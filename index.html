@@ -192,12 +192,7 @@
                 </select>
               </div>
 
-              <div class="form-group">
-                <label for="api-key-input">Gemini API キー</label>
-                <input type="password" id="api-key-input" placeholder="AIzaSy...">
-              </div>
-
-              <div class="form-group">
+<div class="form-group">
                 <label for="model-name-select">使用モデル</label>
                 <select id="model-name-select">
                   <option value="gemini-2.5-flash">gemini-2.5-flash (高速・最適)</option>
@@ -205,7 +200,15 @@
                   <option value="gemini-2.0-flash">gemini-2.0-flash (前世代高速)</option>
                 </select>
               </div>
-            </div>
+
+              <!-- カスタムモデルの追加入力フィールド -->
+              <div class="form-group" style="margin-top: -8px;">
+                <label for="custom-model-input">カスタムモデルの追加</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input type="text" id="custom-model-input" placeholder="例: gemma-2-9b-it" style="flex: 1; padding: 8px 12px; font-size: 13px;">
+                  <button id="custom-model-add-btn" class="secondary-btn" style="padding: 8px 12px; font-size: 13px; height: 34px; white-space: nowrap;">追加</button>
+                </div>
+              </div>
 
             <div class="settings-card">
               <h3>ストーリー進行設定</h3>
