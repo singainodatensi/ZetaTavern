@@ -22,6 +22,12 @@ export async function buildSystemInstruction(story) {
   instruction += `あなたは卓越したストーリーテラー（語り手・ゲームマスター）です。\n`;
   instruction += `以下の【執筆ルール】、【世界観設定】、および登録された【登場人物】や【シーン状況】に従い、プレイヤー（主人公）の行動に対する物語の展開を描写してください。\n\n`;
 
+  instruction += `【出力形式（厳守・最優先）】\n`;
+  instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。英語は一切使わない。\n`;
+  instruction += `- 思考過程・執筆メモ・分析・計画・User input・Context・Goal・Setting・Drafting・Let's などの**メタ記述は出力しない**（頭の中で考えてよいが、画面には出さない）。\n`;
+  instruction += `- 「承知しました」「了解」「I understand」などの前置き応答も禁止。\n`;
+  instruction += `- 執筆ルールの文字数目安に従い、**本文を十分な長さ**で書く。短い要約やプロット箇条書きで済ませない。\n\n`;
+
   instruction += `【執筆ルール】\n`;
   instruction += `${storytellerPrompt || '三人称小説形式で描写してください。感情の直接説明を避け、行動や仕草、セリフで表現してください。'}\n\n`;
 
@@ -123,6 +129,101 @@ export async function buildSystemInstruction(story) {
   return instruction;
 }
 
+/** 行に十分な日本語が含まれるか */
+function hasSignificantJapanese(str) {
+  if (!str) return false;
+  const cjk = (str.match(/[\u3040-\u30ff\u4e00-\u9fff]/g) || []).length;
+  return cjk >= 6 || (str.length > 0 && cjk / str.length > 0.12);
+}
+
+/**
+ * 思考漏れ（英語の計画メモ等）が本文に混ざったときの救済フィルタ
+ */
+export function stripLeakedThinkingText(text) {
+  if (!text || typeof text !== 'string') return text;
+
+  let working = text.trim();
+
+  const draftMatch = working.match(/Drafting the scene:\s*/i);
+  if (draftMatch) {
+    working = working.slice(working.indexOf(draftMatch[0]) + draftMatch[0].length).trim();
+  }
+
+  const metaLine =
+    /^(User input:|Context:|Setting:|Goal:|Visuals?:|Action:|Encounter:|Let's |Third[- ]person|Show, don't|Avoid direct|Strict adherence|No meta|Maybe |Actually |Who\?|Describe the|Introduce the|Yuki has|End with)/i;
+
+  const lines = working.split('\n');
+  let storyStart = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) {
+      if (storyStart === i) storyStart = i + 1;
+      continue;
+    }
+    if (/^---+$/.test(line) || metaLine.test(line)) {
+      storyStart = i + 1;
+      continue;
+    }
+    if (hasSignificantJapanese(line)) {
+      storyStart = i;
+      break;
+    }
+    if (/^[A-Za-z0-9\s,.:;'"!?()[\]\-–—]+$/.test(line) && line.length > 12) {
+      storyStart = i + 1;
+      continue;
+    }
+    break;
+  }
+
+  const stripped = lines.slice(storyStart).join('\n').trim();
+  return stripped.length >= 40 ? stripped : working;
+}
+
+/**
+ * API レスポンスから物語本文だけを取り出す（thought パートを除外）
+ */
+export function extractStoryTextFromApiResponse(result) {
+  const parts = result?.candidates?.[0]?.content?.parts;
+  if (!parts?.length) return null;
+
+  const storyChunks = [];
+  const leakedChunks = [];
+
+  for (const part of parts) {
+    const t = part?.text;
+    if (!t) continue;
+    if (part.thought === true) {
+      continue;
+    }
+    storyChunks.push(t);
+  }
+
+  if (storyChunks.length > 0) {
+    const joined = storyChunks.join('\n\n').trim();
+    return stripLeakedThinkingText(joined);
+  }
+
+  // thought フラグ無しで全部1パートに混ざるケース（2.5 Flash 等）
+  const full = parts.map(p => p.text).filter(Boolean).join('\n\n').trim();
+  return stripLeakedThinkingText(full);
+}
+
+/** モデル別 thinking 設定（2.5 Flash は 0 で思考オフ） */
+function buildThinkingConfig(modelName) {
+  const m = (modelName || '').toLowerCase();
+  if (m.includes('2.5-pro')) {
+    return { thinkingBudget: 512 };
+  }
+  if (m.includes('2.5-flash') || m.includes('2.5-flash-lite') || m.includes('robotics-er')) {
+    return { thinkingBudget: 0 };
+  }
+  if (m.includes('gemini-2.5')) {
+    return { thinkingBudget: 0 };
+  }
+  return null;
+}
+
 /**
  * Sends messages to Gemini API.
  * Supports timeout, retries, and models that accept systemInstruction.
@@ -146,16 +247,23 @@ export async function generateStoryResponse(story, customTimeout = 90000, maxRet
   const modelName = appState.modelName || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
+  const generationConfig = {
+    temperature: 0.9,
+    topP: 0.95,
+    maxOutputTokens: 8192
+  };
+
+  const thinkingConfig = buildThinkingConfig(modelName);
+  if (thinkingConfig) {
+    generationConfig.thinkingConfig = thinkingConfig;
+  }
+
   const payload = {
     contents: contents,
     systemInstruction: {
       parts: [{ text: systemInstruction }]
     },
-    generationConfig: {
-      temperature: 0.9,
-      topP: 0.95,
-      maxOutputTokens: 2048
-    }
+    generationConfig
   };
 
   let attempt = 0;
@@ -183,10 +291,15 @@ export async function generateStoryResponse(story, customTimeout = 90000, maxRet
       }
 
       const result = await response.json();
-      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-      
+      const text = extractStoryTextFromApiResponse(result);
+
       if (!text) {
-        throw new Error('APIから有効なテキストレスポンスが得られませんでした。安全性フィルター等によりブロックされた可能性があります。');
+        const finishReason = result.candidates?.[0]?.finishReason;
+        throw new Error(
+          `APIから有効なテキストレスポンスが得られませんでした。` +
+          (finishReason ? ` (finishReason: ${finishReason})` : '') +
+          ` 安全性フィルター等によりブロックされた可能性があります。`
+        );
       }
 
       return text;
