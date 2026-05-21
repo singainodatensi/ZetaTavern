@@ -51,14 +51,14 @@ async function bootApp() {
     setActiveStory(null);
   }
 
-  // Initialize UI displays
-  ui.renderStoryList();
-  ui.renderCharacterLibrary();
-  ui.renderStory();
-  ui.renderSidebar();
+// Initialize UI displays
+ui.renderStoryList();
+ui.renderCharacterLibrary();
+ui.renderStory();
+ui.renderSidebar();
 
-  // Bind all event handlers
-  bindEvents();
+// Bind all event handlers
+await bindEvents(); // ← await を追加
 
   // Subscribe state changes to auto-render UI
   subscribe((event, state) => {
@@ -193,7 +193,7 @@ function toggleScreenVisibility(activeScreen) {
 /**
  * Binds all general DOM events.
  */
-function bindEvents() {
+async function bindEvents() { // ← async を追加
   // 1. Navigation Screen switching
   document.querySelectorAll('.nav-btn').forEach(btn => {
     btn.onclick = () => {
