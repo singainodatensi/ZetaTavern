@@ -3,7 +3,7 @@
  * Handles storage for settings, assets (Blobs), characters, and stories.
  */
 
-const DB_NAME = 'ZetaTavernDB';
+const DB_NAME = 'ZetaTavern_PWA_Unique_v1_DB'; // 他のアプリと絶対衝突しない名前に変更
 const DB_VERSION = 1;
 
 let dbPromise = null;
