@@ -674,7 +674,7 @@ async function startDropboxAuth() {
     sessionStorage.setItem('dropbox_oauth_state', state);
 
     const authUrl = `https://www.dropbox.com/oauth2/authorize` +
-      `?client_id=${dropbox.APP_KEY}` + // ← dropbox.js からインポートしたキーを自動適用
+      `?client_id=lk117tt6k0vfkb8` + // ← ここを書き換えます
       `&response_type=code` +
       `&redirect_uri=${redirectUri}` +
       `&code_challenge=${codeChallenge}` +
