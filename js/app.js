@@ -11,12 +11,16 @@ import * as dropbox from './dropbox.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
 const DEFAULT_STORYTELLER_PROMPT = `・語り口は三人称。会話と行動描写をメインに据えてテンポよく進める。
-・「語るな、見せろ」：感情の直接説明を避け、行動・セリフ・仕草・視線で表現する。キャラクターの感情を「嬉しかった」「悲しかった」等と直接記述しない。
+・「語るな、見せろ」：感情の直接説明を避け、行動・セリフ・仕草・視線で表現する。キャラクターの感情を「嬉しかった」「悲しかった」などと直接説明しない。
 - 1回の出力の目安は1200～1800字。展開を急がず、感情が動く場面はゆっくりと詳細に描く。
-- 【R-18要素ガイドライン】: 官能的かつ下世話な表現を用いつつ文学的な官能美を目指す。前戯、反応、結合、絶頂、事後の余韻までを五感を使って描写する。手順を飛ばしたり省略したりせず、段階的に複数回に分けて出力する。(※男と女、女と女の組み合わせのみ許可。男同士は禁止。)`;
+- 【R-18要素ガイドライン】: 官能的かつ下世話な表現を用いつつ文学的な官能美を目指す。前戯、反応、結合、絶頂、事後の余韻までを五感を使って描写してください。`;
 
 // Default World settings template
-const DEFAULT_WORLD_PROMPT = `【世界観】\n現代の高校を舞台にした日常系ラブコメの世界。\n\n【状況】\n主人公は平凡な男子高校生。ある日、隣の席に学校一の美少女が座ることになり……`;
+const DEFAULT_WORLD_PROMPT = `【世界観】
+現代の高校を舞台にした日常系ラブコメの世界。
+
+【状況】
+主人公は平凡な男子高校生。ある日、隣の席に転入生が現れた。`;
 
 let hasBooted = false;
 
@@ -127,11 +131,13 @@ async function loadConfigurations() {
   if (modelEl) {
     // 既存のハードコードされたデフォルトオプションを崩さず、以前追加された動的カスタムオプションのみを一度クリアして重複を防ぎます
     const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+    const optsToRemove = [];
     Array.from(modelEl.options).forEach(opt => {
       if (!defaultValues.includes(opt.value)) {
-        modelEl.remove(opt.index);
+        optsToRemove.push(opt);
       }
     });
+    optsToRemove.forEach(opt => opt.remove());
 
     // データベースから読み込んだカスタムモデル一覧をセレクトボックスに再現
     customModels.forEach(customModel => {
@@ -503,7 +509,7 @@ async function createNewStory() {
       },
       {
         role: 'model',
-        content: `新しい物語が始まりました。主人公の名前は「主人公」です。\n右側の設定パネルから、世界設定や主人公の詳細、登場人物の追加・役割の設定を行ってください。\n\nメッセージを入力するか、または送信してストーリーを開始してください。`,
+        content: `新しい物語が始まりました。主人公の名前は「主人公」です。\n右側の設定パネルから、世界設定や主人公の詳細、登場人物の追加などを行うことで、より深いストーリーを展開できます。`,
         timestamp: Date.now()
       }
     ],
@@ -674,7 +680,7 @@ async function startDropboxAuth() {
     sessionStorage.setItem('dropbox_oauth_state', state);
 
     const authUrl = `https://www.dropbox.com/oauth2/authorize` +
-      `?client_id=lk117tt6k0vfkb8` + // ← ここを書き換えます
+      `?client_id=lk117tt6k0vfkb8` +
       `&response_type=code` +
       `&redirect_uri=${redirectUri}` +
       `&code_challenge=${codeChallenge}` +
