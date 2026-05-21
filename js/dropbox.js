@@ -14,7 +14,7 @@ import { getSetting, saveSetting } from './db.js';
 // 定数
 // ============================================================
 
-export const APP_KEY  = 'lk117tt6k0vfkb8'; // 先頭に export を付け、ご自身のキーに変更
+const APP_KEY  = 'lk117tt6k0vfkb8'; 
 const METADATA_PATH   = '/ZetaTavern_data.json';
 const ASSETS_DIR_PATH = '/ZetaTavern_Assets';
 const LOCK_PATH       = '/.zetatavern_sync_lock';
