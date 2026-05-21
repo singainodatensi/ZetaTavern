@@ -104,6 +104,7 @@ async function loadConfigurations() {
   const key = await db.getSetting('api_key', '');
   const model = await db.getSetting('model_name', 'gemini-2.5-flash');
   const choices = await db.getSetting('show_choices', true);
+  const customModels = await db.getSetting('custom_models', []);
   
   // Sync to memory state
   updateState({
@@ -121,8 +122,37 @@ async function loadConfigurations() {
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
-  if (modelEl) modelEl.value = model;
   if (choicesEl) choicesEl.checked = choices;
+
+  if (modelEl) {
+    // 既存のハードコードされたデフォルトオプションを崩さず、以前追加された動的カスタムオプションのみを一度クリアして重複を防ぎます
+    const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+    Array.from(modelEl.options).forEach(opt => {
+      if (!defaultValues.includes(opt.value)) {
+        modelEl.remove(opt.index);
+      }
+    });
+
+    // データベースから読み込んだカスタムモデル一覧をセレクトボックスに再現
+    customModels.forEach(customModel => {
+      const opt = document.createElement('option');
+      opt.value = customModel;
+      opt.textContent = `${customModel} (カスタム)`;
+      modelEl.appendChild(opt);
+    });
+
+    // もし現在選択されているモデルがデフォルトに含まれず、かつカスタム配列にも入っていない場合（初回移行時のフォールバック用）
+    if (!defaultValues.includes(model) && !customModels.includes(model)) {
+      const opt = document.createElement('option');
+      opt.value = model;
+      opt.textContent = `${model} (カスタム)`;
+      modelEl.appendChild(opt);
+      customModels.push(model);
+      await db.saveSetting('custom_models', customModels);
+    }
+
+    modelEl.value = model;
+  }
 }
 
 /**
@@ -259,6 +289,8 @@ async function bindEvents() {
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
+  const customModelInput = document.getElementById('custom-model-input');
+  const customModelAddBtn = document.getElementById('custom-model-add-btn');
 
   if (provEl) {
     provEl.onchange = (e) => {
@@ -289,6 +321,48 @@ async function bindEvents() {
       updateState({ showChoices: val });
       db.saveSetting('show_choices', val);
       ui.renderStory(); // Refresh bottom choices
+    };
+  }
+
+  // ユーザー任意のカスタムモデル追加ロジック
+  if (customModelAddBtn && customModelInput && modelEl) {
+    customModelAddBtn.onclick = async () => {
+      const newModel = customModelInput.value.trim();
+      if (!newModel) return;
+
+      const customModels = await db.getSetting('custom_models', []);
+
+      // セレクトボックスへの重複追加をチェック
+      let optionExists = false;
+      for (let i = 0; i < modelEl.options.length; i++) {
+        if (modelEl.options[i].value === newModel) {
+          optionExists = true;
+          break;
+        }
+      }
+
+      // セレクトボックスに選択肢として追加
+      if (!optionExists) {
+        const opt = document.createElement('option');
+        opt.value = newModel;
+        opt.textContent = `${newModel} (カスタム)`;
+        modelEl.appendChild(opt);
+      }
+
+      // IndexedDBにモデルを保存して永続化
+      if (!customModels.includes(newModel)) {
+        customModels.push(newModel);
+        await db.saveSetting('custom_models', customModels);
+      }
+
+      // 追加したカスタムモデルを即座に選択・保存状態に適用
+      modelEl.value = newModel;
+      updateState({ modelName: newModel });
+      await db.saveSetting('model_name', newModel);
+
+      // 入力欄をクリア
+      customModelInput.value = '';
+      alert(`モデル「${newModel}」を追加し、現在モデルとして適用しました。`);
     };
   }
 
@@ -600,7 +674,7 @@ async function startDropboxAuth() {
     sessionStorage.setItem('dropbox_oauth_state', state);
 
     const authUrl = `https://www.dropbox.com/oauth2/authorize` +
-      `?client_id=lk117tt6k0vfkb8` +
+      `?client_id=7z1zhgvciq5n7o0` +
       `&response_type=code` +
       `&redirect_uri=${redirectUri}` +
       `&code_challenge=${codeChallenge}` +
