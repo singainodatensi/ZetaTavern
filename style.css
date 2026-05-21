@@ -52,6 +52,7 @@ body {
   background-color: var(--bg-app);
   color: var(--text-main);
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
@@ -83,6 +84,7 @@ body {
   display: flex;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   position: relative;
   background-image: radial-gradient(circle at 10% 20%, rgba(98, 0, 234, 0.08) 0%, transparent 45%),
                     radial-gradient(circle at 90% 80%, rgba(0, 229, 255, 0.05) 0%, transparent 45%);
@@ -1406,21 +1408,103 @@ body {
 }
 
 @media (max-width: 1023px) {
+  .app-header {
+    padding: 0 10px;
+    height: 52px;
+    min-height: 52px;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+
+  .header-left {
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .logo {
+    font-size: 17px;
+  }
+
+  /* 狭い画面でラベルが1文字ずつ折れて「縦書き」に見えるのを防ぐ → アイコンのみ */
+  .header-nav {
+    flex: 1;
+    justify-content: center;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .nav-btn {
+    flex-direction: row;
+    padding: 8px 10px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  .nav-btn > span:not(.material-symbols-outlined) {
+    display: none;
+  }
+
+  .header-right {
+    flex-shrink: 0;
+  }
+
   .story-board-layout {
     flex-direction: column;
-    overflow-y: auto;
+    height: 100%;
+    overflow: hidden;
+    min-height: 0;
   }
+
   .story-sidebar-container {
     width: 100%;
     height: auto;
+    max-height: 32vh;
+    overflow-y: auto;
+    flex-shrink: 0;
     border-top: 1px solid var(--color-border);
   }
+
   .timeline-container {
     border-right: none;
-    height: 70vh; /* Fixed height for narrative flow on mobile */
+    flex: 1;
+    min-height: 0;
+    height: auto;
   }
+
+  .input-panel-wrapper {
+    flex-shrink: 0;
+    padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .input-form {
+    padding: 10px 12px;
+    gap: 8px;
+    max-width: none;
+  }
+
+  #user-input-field {
+    min-height: 80px;
+    max-height: 40vh;
+    font-size: 16px;
+    padding: 12px 14px;
+    line-height: 1.5;
+  }
+
+  .send-btn {
+    width: 48px;
+    min-height: 80px;
+    height: auto;
+    border-radius: 14px;
+    align-self: stretch;
+  }
+
   .char-edit-layout {
     flex-direction: column;
     align-items: center;
+  }
+
+  .settings-container,
+  .library-container {
+    padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
   }
 }

@@ -276,10 +276,11 @@ async function bindEvents() {
   if (sendBtn && userInputField) {
     sendBtn.onclick = () => submitStoryTurn();
     userInputField.onkeydown = (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        submitStoryTurn();
-      }
+      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+      // スマホでは Enter＝改行。送信は送信ボタンのみ（Shift+Enter 案内は PC 向け）
+      if (window.matchMedia('(max-width: 1023px)').matches) return;
+      e.preventDefault();
+      submitStoryTurn();
     };
   }
 
