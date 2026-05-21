@@ -14,7 +14,25 @@ import { getSetting, saveSetting } from './db.js';
 // 定数
 // ============================================================
 
-export const APP_KEY  = 'lk117tt6k0vfkb8';
+/** コード内デフォルト（設定画面で上書き可能） */
+export const DEFAULT_APP_KEY = 'lk117tt6k0vfkb8';
+/** @deprecated getAppKey() を使用 */
+export const APP_KEY = DEFAULT_APP_KEY;
+
+/** GitHub Pages 本番で Dropbox アプリに登録するリダイレクト URI（末尾スラッシュ必須） */
+export const PRODUCTION_OAUTH_REDIRECT_URI = 'https://singainodatensi.github.io/ZetaTavern/';
+
+const DROPBOX_APP_KEY_SETTING = 'dropbox_app_key';
+
+/**
+ * 認可・トークン交換の両方で使う App key（設定画面の値を優先）
+ */
+export async function getAppKey() {
+  const stored = await getSetting(DROPBOX_APP_KEY_SETTING, '');
+  const key = (typeof stored === 'string' ? stored : '').trim();
+  return key || DEFAULT_APP_KEY;
+}
+
 const METADATA_PATH   = '/ZetaTavern_data.json';
 const ASSETS_DIR_PATH = '/ZetaTavern_Assets';
 const LOCK_PATH       = '/.zetatavern_sync_lock';
@@ -23,6 +41,43 @@ const TOKENS_KEY      = 'dropboxTokens';
 // ============================================================
 // 内部ヘルパー
 // ============================================================
+
+/**
+ * OAuth で使う redirect_uri を固定化する。
+ * window.location そのままだと index.html の有無や末尾スラッシュで Dropbox 登録値とずれて失敗する。
+ */
+export function getOAuthRedirectUri() {
+  const host = window.location.hostname;
+  if (host === 'singainodatensi.github.io') {
+    return PRODUCTION_OAUTH_REDIRECT_URI;
+  }
+
+  const url = new URL(window.location.href);
+  url.search = '';
+  url.hash = '';
+  let path = url.pathname.replace(/\/index\.html$/i, '/');
+  if (!path.endsWith('/')) {
+    path = path.substring(0, path.lastIndexOf('/') + 1) || '/';
+  }
+  url.pathname = path;
+  return url.toString();
+}
+
+function _applyTokenExpiry(tokens) {
+  if (!tokens) return tokens;
+  const expiresIn = Number(tokens.expires_in);
+  if (Number.isFinite(expiresIn) && expiresIn > 0) {
+    tokens.expires_at = Date.now() + (expiresIn - 300) * 1000;
+  } else if (!Number.isFinite(tokens.expires_at)) {
+    // 期限情報が無い場合は 4 時間後に再取得を試みる
+    tokens.expires_at = Date.now() + 4 * 60 * 60 * 1000;
+  }
+  return tokens;
+}
+
+function _isTokenExpired(tokens) {
+  return Number.isFinite(tokens?.expires_at) && Date.now() >= tokens.expires_at;
+}
 
 async function _getTokens() {
   return getSetting(TOKENS_KEY, null);
@@ -34,10 +89,11 @@ async function _saveTokens(tokens) {
 
 async function _refreshAccessToken(refreshToken) {
   console.log('[Dropbox] アクセストークンを更新中...');
+  const clientId = await getAppKey();
   const params = new URLSearchParams({
     grant_type:    'refresh_token',
     refresh_token: refreshToken,
-    client_id:     APP_KEY,
+    client_id:     clientId,
   });
 
   const response = await fetch('https://api.dropboxapi.com/oauth2/token', {
@@ -53,11 +109,7 @@ async function _refreshAccessToken(refreshToken) {
 
   const data = await response.json();
   const current = await _getTokens() || {};
-  const updated = {
-    ...current,
-    ...data,
-    expires_at: Date.now() + (data.expires_in - 300) * 1000,
-  };
+  const updated = _applyTokenExpiry({ ...current, ...data });
   await _saveTokens(updated);
   console.log('[Dropbox] トークン更新完了。');
   return updated;
@@ -79,7 +131,7 @@ async function _request(domain, endpoint, options = {}, retryCount = 0) {
   }
 
   // トークンが期限切れなら事前にリフレッシュ
-  if (Date.now() >= tokens.expires_at) {
+  if (_isTokenExpired(tokens)) {
     if (!tokens.refresh_token) {
       await disconnect();
       throw new Error('セッションが期限切れです。再度 Dropbox と連携してください。');
@@ -153,12 +205,13 @@ export async function generatePKCE() {
 /**
  * 認可コードとコードベリファイアを使ってアクセストークンを取得・保存する。
  */
-export async function getAccessToken(code, redirectUri, codeVerifier) {
+export async function getAccessToken(code, redirectUri, codeVerifier, clientId) {
+  const appKey = (clientId && String(clientId).trim()) || await getAppKey();
   const params = new URLSearchParams({
     grant_type:    'authorization_code',
     code,
     redirect_uri:  redirectUri,
-    client_id:     APP_KEY,
+    client_id:     appKey,
     code_verifier: codeVerifier,
   });
 
@@ -170,11 +223,14 @@ export async function getAccessToken(code, redirectUri, codeVerifier) {
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    throw new Error(err.error_description || `トークン取得エラー (${response.status})`);
+    const detail = err.error_description || err.error || err.error_summary || JSON.stringify(err);
+    throw new Error(`${detail} (HTTP ${response.status})`);
   }
 
-  const tokenData = await response.json();
-  tokenData.expires_at = Date.now() + (tokenData.expires_in - 300) * 1000;
+  const tokenData = _applyTokenExpiry(await response.json());
+  if (!tokenData.access_token) {
+    throw new Error('Dropbox からアクセストークンを取得できませんでした。');
+  }
   await _saveTokens(tokenData);
   return tokenData;
 }

@@ -19,7 +19,7 @@
   <script src="marked.js" defer></script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js" defer></script>
+  <script type="module" src="js/app.js?v=20260522" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -194,7 +194,7 @@
 
               <div class="form-group">
                 <label for="api-key-input">APIキー</label>
-                <input type="password" id="api-key-input" placeholder="sk-... または API キーを入力">
+                <input type="password" id="api-key-input" placeholder="Google AI Studio の API キー" autocomplete="off">
               </div>
 
               <div class="form-group">
@@ -239,6 +239,20 @@
                 <span class="material-symbols-outlined">info</span>
                 ストーリー・キャラクターデータを Dropbox にバックアップし、複数デバイス間で同期できます。アバター画像も含めて同期されます。
               </p>
+              <p class="settings-note dropbox-redirect-note">
+                <span class="material-symbols-outlined">link</span>
+                Dropbox 開発者コンソールの Redirect URI に
+                <code>https://singainodatensi.github.io/ZetaTavern/</code>
+                を登録してください（末尾のスラッシュ必須）。
+              </p>
+
+              <div class="form-group">
+                <label for="dropbox-app-key-input">Dropbox App key</label>
+                <input type="text" id="dropbox-app-key-input" placeholder="Dropbox App Console の App key" autocomplete="off" spellcheck="false">
+                <p class="settings-note" style="margin-top: 6px;">
+                  認可とトークン取得で<strong>同じ</strong>キーを使います。空欄のときは既定値を使用します。キーを変更したら一度「連携を解除」してから再連携してください。
+                </p>
+              </div>
 
               <!-- 未接続状態 -->
               <div id="dropbox-auth-state">

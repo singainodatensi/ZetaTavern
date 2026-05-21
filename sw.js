@@ -1,4 +1,4 @@
-const CACHE_NAME = 'zetatavern-cache-v2';
+const CACHE_NAME = 'zetatavern-cache-v4';
 const urlsToCache = [
   './',
   './index.html',
@@ -25,15 +25,33 @@ self.addEventListener('install', event => {
 });
 
 self.addEventListener('fetch', event => {
+  const req = event.request;
+  const url = new URL(req.url);
+
+  // HTML / JS は常にネットワーク優先（OAuth 修正や古い SW キャッシュ対策）
+  const isAppShell =
+    req.mode === 'navigate' ||
+    url.pathname.endsWith('.html') ||
+    url.pathname.endsWith('.js') ||
+    url.pathname.endsWith('.css');
+
+  if (isAppShell) {
+    event.respondWith(
+      fetch(req)
+        .then(networkRes => {
+          if (networkRes && networkRes.ok) {
+            const copy = networkRes.clone();
+            caches.open(CACHE_NAME).then(cache => cache.put(req, copy));
+          }
+          return networkRes;
+        })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
+
   event.respondWith(
-    caches.match(event.request)
-      .then(response => {
-        // キャッシュがあればキャッシュを返し、なければネットワークから取得する
-        if (response) {
-          return response;
-        }
-        return fetch(event.request);
-      })
+    caches.match(req).then(cached => cached || fetch(req))
   );
 });
 

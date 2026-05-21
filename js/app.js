@@ -11,16 +11,12 @@ import * as dropbox from './dropbox.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
 const DEFAULT_STORYTELLER_PROMPT = `・語り口は三人称。会話と行動描写をメインに据えてテンポよく進める。
-・「語るな、見せろ」：感情の直接説明を避け、行動・セリフ・仕草・視線で表現する。キャラクターの感情を「嬉しかった」「悲しかった」などと直接説明しない。
+・「語るな、見せろ」：感情の直接説明を避け、行動・セリフ・仕草・視線で表現する。キャラクターの感情を「嬉しかった」「悲しかった」等と直接記述しない。
 - 1回の出力の目安は1200～1800字。展開を急がず、感情が動く場面はゆっくりと詳細に描く。
-- 【R-18要素ガイドライン】: 官能的かつ下世話な表現を用いつつ文学的な官能美を目指す。前戯、反応、結合、絶頂、事後の余韻までを五感を使って描写してください。`;
+- 【R-18要素ガイドライン】: 官能的かつ下世話な表現を用いつつ文学的な官能美を目指す。前戯、反応、結合、絶頂、事後の余韻までを五感を使って描写する。手順を飛ばしたり省略したりせず、段階的に複数回に分けて出力する。(※男と女、女と女の組み合わせのみ許可。男同士は禁止。)`;
 
 // Default World settings template
-const DEFAULT_WORLD_PROMPT = `【世界観】
-現代の高校を舞台にした日常系ラブコメの世界。
-
-【状況】
-主人公は平凡な男子高校生。ある日、隣の席に転入生が現れた。`;
+const DEFAULT_WORLD_PROMPT = `【世界観】\n現代の高校を舞台にした日常系ラブコメの世界。\n\n【状況】\n主人公は平凡な男子高校生。ある日、隣の席に学校一の美少女が座ることになり……`;
 
 let hasBooted = false;
 
@@ -84,14 +80,10 @@ async function bootApp() {
     }
   });
 
-  // Initialize Dropbox connection state UI after the core app is interactive.
-  await initDropbox();
+  // OAuth 戻りを先に処理（トークン保存後に接続 UI を更新）
+  await handleDropboxOAuthReturnIfPresent();
 
-  // Handle Dropbox OAuth callback (PKCE)
-  const urlParams = new URLSearchParams(window.location.search);
-  if (urlParams.has('code') && urlParams.has('state')) {
-    await handleDropboxOAuthCallback(urlParams);
-  }
+  await initDropbox();
 }
 
 if (document.readyState === 'loading') {
@@ -109,6 +101,7 @@ async function loadConfigurations() {
   const model = await db.getSetting('model_name', 'gemini-2.5-flash');
   const choices = await db.getSetting('show_choices', true);
   const customModels = await db.getSetting('custom_models', []);
+  const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
   
   // Sync to memory state
   updateState({
@@ -123,21 +116,21 @@ async function loadConfigurations() {
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
+  const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
   if (choicesEl) choicesEl.checked = choices;
+  if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
 
   if (modelEl) {
     // 既存のハードコードされたデフォルトオプションを崩さず、以前追加された動的カスタムオプションのみを一度クリアして重複を防ぎます
     const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
-    const optsToRemove = [];
     Array.from(modelEl.options).forEach(opt => {
       if (!defaultValues.includes(opt.value)) {
-        optsToRemove.push(opt);
+        modelEl.remove(opt.index);
       }
     });
-    optsToRemove.forEach(opt => opt.remove());
 
     // データベースから読み込んだカスタムモデル一覧をセレクトボックスに再現
     customModels.forEach(customModel => {
@@ -458,6 +451,13 @@ async function bindEvents() {
   const dropboxPullBtn      = document.getElementById('dropbox-pull-btn');
   const dropboxDisconnectBtn = document.getElementById('dropbox-disconnect-btn');
   const dropboxFreqSelect   = document.getElementById('dropbox-sync-frequency');
+  const dropboxAppKeyInput  = document.getElementById('dropbox-app-key-input');
+
+  if (dropboxAppKeyInput) {
+    dropboxAppKeyInput.oninput = (e) => {
+      db.saveSetting('dropbox_app_key', e.target.value.trim());
+    };
+  }
 
   if (dropboxAuthBtn) {
     dropboxAuthBtn.onclick = () => startDropboxAuth();
@@ -509,7 +509,7 @@ async function createNewStory() {
       },
       {
         role: 'model',
-        content: `新しい物語が始まりました。主人公の名前は「主人公」です。\n右側の設定パネルから、世界設定や主人公の詳細、登場人物の追加などを行うことで、より深いストーリーを展開できます。`,
+        content: `新しい物語が始まりました。主人公の名前は「主人公」です。\n右側の設定パネルから、世界設定や主人公の詳細、登場人物の追加・役割の設定を行ってください。\n\nメッセージを入力するか、または送信してストーリーを開始してください。`,
         timestamp: Date.now()
       }
     ],
@@ -666,29 +666,97 @@ function setDropboxProgress(msg) {
   }
 }
 
+const DROPBOX_PKCE_STORAGE_KEY = 'dropbox_pkce_pending';
+
+/** PKCE 情報を sessionStorage + localStorage に保存（モバイルで session が消える対策） */
+function saveDropboxPkceSession({ codeVerifier, state, redirectUri, clientId }) {
+  const payload = JSON.stringify({
+    codeVerifier,
+    state,
+    redirectUri,
+    clientId,
+    savedAt: Date.now()
+  });
+  sessionStorage.setItem('dropbox_code_verifier', codeVerifier);
+  sessionStorage.setItem('dropbox_oauth_state', state);
+  sessionStorage.setItem('dropbox_redirect_uri', redirectUri);
+  sessionStorage.setItem('dropbox_client_id', clientId);
+  localStorage.setItem(DROPBOX_PKCE_STORAGE_KEY, payload);
+}
+
+/** 保存済み PKCE を読み出す（10 分以内のみ有効） */
+function loadDropboxPkceSession() {
+  try {
+    const raw = localStorage.getItem(DROPBOX_PKCE_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data?.codeVerifier || !data?.state || !data?.redirectUri || !data?.clientId) return null;
+    if (Date.now() - (data.savedAt || 0) > 10 * 60 * 1000) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function clearDropboxPkceSession() {
+  sessionStorage.removeItem('dropbox_code_verifier');
+  sessionStorage.removeItem('dropbox_oauth_state');
+  sessionStorage.removeItem('dropbox_redirect_uri');
+  sessionStorage.removeItem('dropbox_client_id');
+  localStorage.removeItem(DROPBOX_PKCE_STORAGE_KEY);
+}
+
+function stripOAuthQueryFromUrl() {
+  const cleanUrl = dropbox.getOAuthRedirectUri();
+  window.history.replaceState({}, document.title, cleanUrl);
+  return cleanUrl;
+}
+
+/** URL に OAuth 戻りパラメータがあれば処理する */
+async function handleDropboxOAuthReturnIfPresent() {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (!urlParams.has('code') && !urlParams.has('error')) return;
+
+  if (urlParams.has('error')) {
+    const msg = urlParams.get('error_description') || urlParams.get('error') || '認可がキャンセルされました';
+    clearDropboxPkceSession();
+    stripOAuthQueryFromUrl();
+    alert(`Dropbox 認証エラー:\n${msg}`);
+    return;
+  }
+
+  if (!urlParams.has('state')) return;
+
+  await handleDropboxOAuthCallback(urlParams);
+}
+
 /**
  * Dropbox PKCE 認証フローを開始する。
- * code_verifier を sessionStorage に保存し、認可ページへリダイレクトする。
  */
 async function startDropboxAuth() {
   try {
+    const appKey = await dropbox.getAppKey();
+    if (!appKey) {
+      alert('Dropbox App key が未設定です。設定画面で App key を入力してください。');
+      return;
+    }
+
     const { codeVerifier, codeChallenge } = await dropbox.generatePKCE();
-    sessionStorage.setItem('dropbox_code_verifier', codeVerifier);
-
-    const redirectUri = encodeURIComponent(window.location.href.split('?')[0]);
+    const redirectUri = dropbox.getOAuthRedirectUri();
     const state = crypto.randomUUID();
-    sessionStorage.setItem('dropbox_oauth_state', state);
 
-    const authUrl = `https://www.dropbox.com/oauth2/authorize` +
-      `?client_id=lk117tt6k0vfkb8` +
-      `&response_type=code` +
-      `&redirect_uri=${redirectUri}` +
-      `&code_challenge=${codeChallenge}` +
-      `&code_challenge_method=S256` +
-      `&state=${state}` +
-      `&token_access_type=offline`;
+    saveDropboxPkceSession({ codeVerifier, state, redirectUri, clientId: appKey });
 
-    window.location.href = authUrl;
+    const authUrl = new URL('https://www.dropbox.com/oauth2/authorize');
+    authUrl.searchParams.set('client_id', appKey);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('code_challenge', codeChallenge);
+    authUrl.searchParams.set('code_challenge_method', 'S256');
+    authUrl.searchParams.set('state', state);
+    authUrl.searchParams.set('token_access_type', 'offline');
+
+    window.location.assign(authUrl.toString());
   } catch (err) {
     alert(`Dropbox 認証の開始に失敗しました:\n${err.message}`);
   }
@@ -698,25 +766,40 @@ async function startDropboxAuth() {
  * OAuth コールバック処理。URLパラメータの code を使ってトークンを取得する。
  */
 async function handleDropboxOAuthCallback(urlParams) {
-  const code          = urlParams.get('code');
+  const code = urlParams.get('code');
   const returnedState = urlParams.get('state');
-  const savedState    = sessionStorage.getItem('dropbox_oauth_state');
-  const codeVerifier  = sessionStorage.getItem('dropbox_code_verifier');
 
-  if (returnedState !== savedState) {
-    console.error('[Dropbox] OAuth state mismatch!');
+  const savedFromStorage = loadDropboxPkceSession();
+  const savedState = sessionStorage.getItem('dropbox_oauth_state') || savedFromStorage?.state;
+  const codeVerifier = sessionStorage.getItem('dropbox_code_verifier') || savedFromStorage?.codeVerifier;
+  const redirectUri = sessionStorage.getItem('dropbox_redirect_uri') || savedFromStorage?.redirectUri || dropbox.getOAuthRedirectUri();
+  const clientId = sessionStorage.getItem('dropbox_client_id') || savedFromStorage?.clientId || await dropbox.getAppKey();
+
+  stripOAuthQueryFromUrl();
+
+  if (!codeVerifier) {
+    clearDropboxPkceSession();
+    alert(
+      'Dropbox 認証の途中データが見つかりませんでした。\n' +
+      '（別タブで開いた、プライベート閲覧、ブラウザのストレージ制限などが原因のことがあります）\n\n' +
+      'もう一度「Dropbox と連携する」からやり直してください。'
+    );
     return;
   }
 
-  sessionStorage.removeItem('dropbox_oauth_state');
-  sessionStorage.removeItem('dropbox_code_verifier');
+  if (!savedState || returnedState !== savedState) {
+    clearDropboxPkceSession();
+    alert(
+      'Dropbox 認証の検証に失敗しました（セッション不一致）。\n' +
+      '同じブラウザ・同じタブで、もう一度「Dropbox と連携する」からやり直してください。'
+    );
+    return;
+  }
 
-  const cleanUrl = window.location.href.split('?')[0];
-  window.history.replaceState({}, document.title, cleanUrl);
+  clearDropboxPkceSession();
 
   try {
-    const redirectUri = cleanUrl;
-    await dropbox.getAccessToken(code, redirectUri, codeVerifier);
+    await dropbox.getAccessToken(code, redirectUri, codeVerifier, clientId);
     const account = await dropbox.testConnection();
     updateDropboxUI(true);
 
@@ -727,7 +810,14 @@ async function handleDropboxOAuthCallback(urlParams) {
 
     alert(`Dropbox との連携が完了しました！\n「クラウドへ保存 (Push)」で初回バックアップを行ってください。`);
   } catch (err) {
-    alert(`Dropbox 認証に失敗しました:\n${err.message}`);
+    console.error('[Dropbox] OAuth token exchange failed:', err);
+    alert(
+      `Dropbox 認証に失敗しました:\n${err.message}\n\n` +
+      `※ 使用した App key: ${clientId}\n` +
+      `※ Dropbox アプリ設定の「Redirect URI」に次が登録されているか確認してください:\n${dropbox.PRODUCTION_OAUTH_REDIRECT_URI}\n\n` +
+      `「code is associated with a different app key」が出る場合:\n` +
+      `設定の App key と認可開始時のキーが一致しているか確認し、もう一度連携してください。`
+    );
   }
 }
 

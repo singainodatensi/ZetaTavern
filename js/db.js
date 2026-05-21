@@ -3,66 +3,53 @@
  * Handles storage for settings, assets (Blobs), characters, and stories.
  */
 
-const DB_NAME = 'ZetaTavern_PWA_Unique_v1_DB';
+const DB_NAME = 'ZetaTavern_PWA_Unique_v1_DB'; // 他のアプリと絶対衝突しない名前に変更
 const DB_VERSION = 1;
 
-let dbInstance = null;
+let dbPromise = null;
 
 /**
  * Initializes and returns the IndexedDB instance.
  */
 function getDB() {
-  if (dbInstance) {
-    return Promise.resolve(dbInstance);
-  }
-
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onupgradeneeded = event => {
       const db = event.target.result;
-      console.log('[DB] Upgrading IndexedDB schema...');
 
       // Settings Store: { key: string, value: any }
       if (!db.objectStoreNames.contains('settings')) {
         db.createObjectStore('settings', { keyPath: 'key' });
-        console.log('[DB] Created settings store');
       }
 
       // Assets Store (Images as Blobs): { assetId: string, blob: Blob, mimeType: string, timestamp: number }
       if (!db.objectStoreNames.contains('assets')) {
         db.createObjectStore('assets', { keyPath: 'assetId' });
-        console.log('[DB] Created assets store');
       }
 
       // Characters Store: { characterId: string, name: string, avatarAssetId: string, description: string, personality: string, mes_example: string, timestamp: number }
       if (!db.objectStoreNames.contains('characters')) {
         db.createObjectStore('characters', { keyPath: 'characterId' });
-        console.log('[DB] Created characters store');
       }
 
       // Stories Store: { storyId: string, title: string, storytellerPrompt: string, worldPrompt: string, protagonist: Object, characters: Array, messages: Array, sceneState: Object, characterMemory: Object, relationshipMemory: Object, timestamp: number }
       if (!db.objectStoreNames.contains('stories')) {
         db.createObjectStore('stories', { keyPath: 'storyId' });
-        console.log('[DB] Created stories store');
       }
     };
 
     request.onsuccess = event => {
-      dbInstance = event.target.result;
-      console.log('[DB] IndexedDB opened successfully');
-      resolve(dbInstance);
+      resolve(event.target.result);
     };
 
     request.onerror = event => {
-      console.error('[DB] IndexedDB open error:', event.target.error);
+      console.error('IndexedDB open error:', event.target.error);
       reject(event.target.error);
     };
-
-    request.onblocked = event => {
-      console.warn('[DB] IndexedDB open blocked - close other tabs with this app');
-    };
   });
+  return dbPromise;
 }
 
 // ==========================================
@@ -72,85 +59,60 @@ function getDB() {
 async function get(storeName, key) {
   const db = await getDB();
   return new Promise((resolve, reject) => {
-    try {
-      const transaction = db.transaction(storeName, 'readonly');
-      const store = transaction.objectStore(storeName);
-      const request = store.get(key);
+    const transaction = db.transaction(storeName, 'readonly');
+    const store = transaction.objectStore(storeName);
+    const request = store.get(key);
 
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-      transaction.onerror = () => reject(transaction.error);
-    } catch (err) {
-      reject(err);
-    }
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
 }
 
 export async function getAll(storeName) {
   const db = await getDB();
   return new Promise((resolve, reject) => {
-    try {
-      const transaction = db.transaction(storeName, 'readonly');
-      const store = transaction.objectStore(storeName);
-      const request = store.getAll();
+    const transaction = db.transaction(storeName, 'readonly');
+    const store = transaction.objectStore(storeName);
+    const request = store.getAll();
 
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-      transaction.onerror = () => reject(transaction.error);
-    } catch (err) {
-      reject(err);
-    }
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
 }
 
 async function put(storeName, value) {
   const db = await getDB();
   return new Promise((resolve, reject) => {
-    try {
-      const transaction = db.transaction(storeName, 'readwrite');
-      const store = transaction.objectStore(storeName);
-      const request = store.put(value);
+    const transaction = db.transaction(storeName, 'readwrite');
+    const store = transaction.objectStore(storeName);
+    const request = store.put(value);
 
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-      transaction.onerror = () => reject(transaction.error);
-    } catch (err) {
-      reject(err);
-    }
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
 }
 
 async function deleteKey(storeName, key) {
   const db = await getDB();
   return new Promise((resolve, reject) => {
-    try {
-      const transaction = db.transaction(storeName, 'readwrite');
-      const store = transaction.objectStore(storeName);
-      const request = store.delete(key);
+    const transaction = db.transaction(storeName, 'readwrite');
+    const store = transaction.objectStore(storeName);
+    const request = store.delete(key);
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-      transaction.onerror = () => reject(transaction.error);
-    } catch (err) {
-      reject(err);
-    }
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
   });
 }
 
 export async function clearStore(storeName) {
   const db = await getDB();
   return new Promise((resolve, reject) => {
-    try {
-      const transaction = db.transaction(storeName, 'readwrite');
-      const store = transaction.objectStore(storeName);
-      const request = store.clear();
+    const transaction = db.transaction(storeName, 'readwrite');
+    const store = transaction.objectStore(storeName);
+    const request = store.clear();
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-      transaction.onerror = () => reject(transaction.error);
-    } catch (err) {
-      reject(err);
-    }
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
   });
 }
 
@@ -163,7 +125,7 @@ export async function getSetting(key, defaultValue = null) {
     const result = await get('settings', key);
     return result ? result.value : defaultValue;
   } catch (err) {
-    console.error(`[DB] Error getting setting ${key}:`, err);
+    console.error(`Error getting setting ${key}:`, err);
     return defaultValue;
   }
 }
@@ -171,10 +133,8 @@ export async function getSetting(key, defaultValue = null) {
 export async function saveSetting(key, value) {
   try {
     await put('settings', { key, value });
-    console.log(`[DB] Setting saved: ${key}`);
   } catch (err) {
-    console.error(`[DB] Error saving setting ${key}:`, err);
-    throw err;
+    console.error(`Error saving setting ${key}:`, err);
   }
 }
 
@@ -191,10 +151,9 @@ export async function saveAsset(blob, mimeType) {
       mimeType,
       timestamp: Date.now()
     });
-    console.log(`[DB] Asset saved: ${assetId}`);
     return assetId;
   } catch (err) {
-    console.error('[DB] Error saving asset:', err);
+    console.error('Error saving asset:', err);
     throw err;
   }
 }
@@ -205,7 +164,7 @@ export async function getAssetBlob(assetId) {
     const asset = await get('assets', assetId);
     return asset ? asset.blob : null;
   } catch (err) {
-    console.error(`[DB] Error getting asset ${assetId}:`, err);
+    console.error(`Error getting asset ${assetId}:`, err);
     return null;
   }
 }
@@ -214,9 +173,8 @@ export async function deleteAsset(assetId) {
   if (!assetId) return;
   try {
     await deleteKey('assets', assetId);
-    console.log(`[DB] Asset deleted: ${assetId}`);
   } catch (err) {
-    console.error(`[DB] Error deleting asset ${assetId}:`, err);
+    console.error(`Error deleting asset ${assetId}:`, err);
   }
 }
 
@@ -233,9 +191,8 @@ export async function saveAssetWithId(assetId, blob, mimeType) {
       mimeType,
       timestamp: Date.now()
     });
-    console.log(`[DB] Asset saved with ID: ${assetId}`);
   } catch (err) {
-    console.error(`[DB] Error saving asset with id ${assetId}:`, err);
+    console.error(`Error saving asset with id ${assetId}:`, err);
     throw err;
   }
 }
@@ -271,11 +228,9 @@ export function base64ToBlob(base64Str, defaultMime = 'image/png') {
 
 export async function getCharacters() {
   try {
-    const chars = await getAll('characters');
-    console.log(`[DB] Retrieved ${chars.length} characters`);
-    return chars;
+    return await getAll('characters');
   } catch (err) {
-    console.error('[DB] Error getting all characters:', err);
+    console.error('Error getting all characters:', err);
     return [];
   }
 }
@@ -284,7 +239,7 @@ export async function getCharacter(characterId) {
   try {
     return await get('characters', characterId);
   } catch (err) {
-    console.error(`[DB] Error getting character ${characterId}:`, err);
+    console.error(`Error getting character ${characterId}:`, err);
     return null;
   }
 }
@@ -296,10 +251,9 @@ export async function saveCharacter(character) {
   character.timestamp = Date.now();
   try {
     await put('characters', character);
-    console.log(`[DB] Character saved: ${character.name} (${character.characterId})`);
     return character.characterId;
   } catch (err) {
-    console.error('[DB] Error saving character:', err);
+    console.error('Error saving character:', err);
     throw err;
   }
 }
@@ -311,9 +265,8 @@ export async function deleteCharacter(characterId) {
       await deleteAsset(char.avatarAssetId);
     }
     await deleteKey('characters', characterId);
-    console.log(`[DB] Character deleted: ${characterId}`);
   } catch (err) {
-    console.error(`[DB] Error deleting character ${characterId}:`, err);
+    console.error(`Error deleting character ${characterId}:`, err);
     throw err;
   }
 }
@@ -324,11 +277,9 @@ export async function deleteCharacter(characterId) {
 
 export async function getStories() {
   try {
-    const stories = await getAll('stories');
-    console.log(`[DB] Retrieved ${stories.length} stories`);
-    return stories;
+    return await getAll('stories');
   } catch (err) {
-    console.error('[DB] Error getting all stories:', err);
+    console.error('Error getting all stories:', err);
     return [];
   }
 }
@@ -337,7 +288,7 @@ export async function getStory(storyId) {
   try {
     return await get('stories', storyId);
   } catch (err) {
-    console.error(`[DB] Error getting story ${storyId}:`, err);
+    console.error(`Error getting story ${storyId}:`, err);
     return null;
   }
 }
@@ -349,10 +300,9 @@ export async function saveStory(story) {
   story.timestamp = Date.now();
   try {
     await put('stories', story);
-    console.log(`[DB] Story saved: ${story.title} (${story.storyId})`);
     return story.storyId;
   } catch (err) {
-    console.error('[DB] Error saving story:', err);
+    console.error('Error saving story:', err);
     throw err;
   }
 }
@@ -360,9 +310,8 @@ export async function saveStory(story) {
 export async function deleteStory(storyId) {
   try {
     await deleteKey('stories', storyId);
-    console.log(`[DB] Story deleted: ${storyId}`);
   } catch (err) {
-    console.error(`[DB] Error deleting story ${storyId}:`, err);
+    console.error(`Error deleting story ${storyId}:`, err);
     throw err;
   }
 }
