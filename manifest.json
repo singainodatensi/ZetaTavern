@@ -1,0 +1,16 @@
+{
+  "short_name": "ZetaTavern",
+  "name": "ZetaTavern - Storytelling Tool",
+  "icons": [
+    {
+      "src": "assets/default-silhouette.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    }
+  ],
+  "start_url": "./index.html",
+  "background_color": "#121214",
+  "theme_color": "#7c4dff",
+  "display": "standalone",
+  "orientation": "any"
+}

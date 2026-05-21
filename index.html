@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZetaTavern - AI Storytelling Forge</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#7c4dff">
+  
+  <!-- Premium Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=Noto+Sans+JP:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0..1,-50..200" />
+  
+  <link rel="stylesheet" href="style.css">
+  
+  <!-- Offline Libraries -->
+  <script src="marked.js" defer></script>
+  
+  <!-- App Modules -->
+  <script type="module" src="js/app.js" defer></script>
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- Left Drawer (Stories History) - Slide out on mobile, persistent on large screens -->
+    <aside id="mobile-drawer" class="mobile-drawer">
+      <div id="drawer-overlay" class="drawer-overlay"></div>
+      <div class="drawer-content">
+        <div class="drawer-header">
+          <h3>ストーリー一覧</h3>
+          <button id="new-story-btn" class="icon-btn-circle" title="新しいストーリーを開始">
+            <span class="material-symbols-outlined">add</span>
+          </button>
+        </div>
+        <div id="stories-list-container" class="stories-list-container">
+          <!-- Story history list items are rendered here -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <div class="main-layout">
+      
+      <!-- Top Navigation Header -->
+      <header class="app-header">
+        <div class="header-left">
+          <button id="menu-trigger-btn" class="header-icon-btn" title="ストーリー一覧">
+            <span class="material-symbols-outlined">menu</span>
+          </button>
+          <div class="logo">
+            <span class="logo-accent">Zeta</span>Tavern
+          </div>
+        </div>
+        <nav class="header-nav">
+          <button class="nav-btn active" data-screen="story" title="ストーリーボード">
+            <span class="material-symbols-outlined">menu_book</span>
+            <span>ストーリー</span>
+          </button>
+          <button class="nav-btn" data-screen="library" title="キャラクターライブラリ">
+            <span class="material-symbols-outlined">group</span>
+            <span>キャラクター</span>
+          </button>
+          <button class="nav-btn" data-screen="settings" title="設定">
+            <span class="material-symbols-outlined">settings</span>
+            <span>設定</span>
+          </button>
+        </nav>
+        <div class="header-right">
+          <!-- View mode toggle (Novel vs. Chat) -->
+          <button id="view-mode-toggle" class="header-icon-btn" title="チャット表示へ切り替え">
+            <span class="material-symbols-outlined">forum</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Screens Content Area -->
+      <main class="screens-container">
+
+        <!-- 1. Story Board Screen -->
+        <section id="story-screen" class="app-screen active">
+          <div class="story-board-layout">
+            
+            <!-- Left/Center Narrative Timelines -->
+            <div class="timeline-container">
+              <div id="story-viewport" class="story-viewport">
+                <!-- Messages or empty state rendered here -->
+              </div>
+              
+              <!-- Bottom Input Controls -->
+              <div class="input-panel-wrapper">
+                <!-- A/B/C Choices Container -->
+                <div id="choices-container" class="choices-container hidden">
+                  <!-- Dynamic A/B/C buttons rendered here -->
+                </div>
+                
+                <div class="input-form">
+                  <textarea id="user-input-field" placeholder="主人公のセリフや行動を入力してください... (Shift+Enterで改行)" rows="1"></textarea>
+                  <button id="send-btn" class="send-btn" title="送信">
+                    <span class="material-symbols-outlined">send</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Sidebar: Scene Settings & Relationships -->
+            <aside id="story-sidebar-container" class="story-sidebar-container">
+              <div class="sidebar-tabs-header">
+                <button class="sidebar-tab-btn active" data-tab="status">シーン・ステータス</button>
+                <button class="sidebar-tab-btn" data-tab="config">ストーリー設定</button>
+              </div>
+              
+              <!-- Sidebar Tab 1: Status & Characters -->
+              <div id="sidebar-tab-status" class="sidebar-tab-content active">
+                <div id="story-sidebar" class="story-sidebar">
+                  <!-- Rendered dynamically by ui.js -->
+                </div>
+              </div>
+              
+              <!-- Sidebar Tab 2: Story Rules & Prompts -->
+              <div id="sidebar-tab-config" class="sidebar-tab-content">
+                <div class="sidebar-config-form">
+                  <div class="form-group">
+                    <label for="story-rule-prompt">ストーリーテラー執筆ルール (指示書)</label>
+                    <textarea id="story-rule-prompt" rows="8" placeholder="三人称視点、心理描写のコツなどを設定..."></textarea>
+                  </div>
+                  
+                  <div class="form-group">
+                    <label for="story-world-prompt">世界設定・作品プロット</label>
+                    <textarea id="story-world-prompt" rows="6" placeholder="この世界観のルール、基本あらすじなど..."></textarea>
+                  </div>
+                  
+                  <div class="form-group protagonist-config">
+                    <label>主人公のアバター & 詳細設定</label>
+                    <div class="protagonist-edit-card">
+                      <div class="p-avatar-uploader">
+                        <img id="protagonist-img-preview" src="assets/default-silhouette.png" alt="Protagonist Avatar">
+                        <label for="protagonist-img-input" class="upload-badge">
+                          <span class="material-symbols-outlined">photo_camera</span>
+                        </label>
+                        <input type="file" id="protagonist-img-input" accept="image/*" class="hidden">
+                      </div>
+                      <div class="p-inputs">
+                        <input type="text" id="protagonist-name" placeholder="主人公の名前" value="主人公">
+                        <textarea id="protagonist-desc" rows="3" placeholder="主人公の詳細設定、容姿、性格など..."></textarea>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </aside>
+            
+          </div>
+        </section>
+
+        <!-- 2. Character Library Screen -->
+        <section id="library-screen" class="app-screen">
+          <div class="library-container">
+            <div class="library-header">
+              <h2>キャラクターライブラリ</h2>
+              <div class="library-actions">
+                <button id="char-import-btn" class="secondary-btn">
+                  <span class="material-symbols-outlined">download</span>
+                  <span>JSONカード取り込み</span>
+                </button>
+                <input type="file" id="char-import-input" accept=".json" class="hidden">
+              </div>
+            </div>
+            <div id="library-viewport" class="library-viewport">
+              <!-- Rendered character cards dynamically -->
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. App Settings Screen -->
+        <section id="settings-screen" class="app-screen">
+          <div class="settings-container">
+            <h2>基本設定</h2>
+            
+            <div class="settings-card">
+              <h3>AI連携 (API設定)</h3>
+              <p class="settings-note">
+                <span class="material-symbols-outlined">info</span>
+                ※ 入力されたAPIキーはブラウザのローカル領域（LocalStorage）にのみ安全に保存され、開発者を含む外部サーバーには一切送信されません。
+              </p>
+              
+              <div class="form-group">
+                <label for="api-provider-select">APIプロバイダー</label>
+                <select id="api-provider-select">
+                  <option value="gemini">Google Gemini API (推奨)</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="api-key-input">Gemini API キー</label>
+                <input type="password" id="api-key-input" placeholder="AIzaSy...">
+              </div>
+
+              <div class="form-group">
+                <label for="model-name-select">使用モデル</label>
+                <select id="model-name-select">
+                  <option value="gemini-2.5-flash">gemini-2.5-flash (高速・最適)</option>
+                  <option value="gemini-2.5-pro">gemini-2.5-pro (超高精度・長文)</option>
+                  <option value="gemini-2.0-flash">gemini-2.0-flash (前世代高速)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <h3>ストーリー進行設定</h3>
+              <div class="form-group-checkbox">
+                <input type="checkbox" id="choices-toggle-checkbox" checked>
+                <label for="choices-toggle-checkbox">
+                  <strong>A/B/Cの自動選択肢提示を有効にする</strong>
+                  <span>ONにすると、ストーリーテラーは返答の最後に行動の選択肢を提示します。</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-card" id="dropbox-settings-card">
+              <h3>
+                <span class="material-symbols-outlined">cloud_sync</span>
+                データ同期 (Dropbox)
+              </h3>
+              <p class="settings-note">
+                <span class="material-symbols-outlined">info</span>
+                ストーリー・キャラクターデータを Dropbox にバックアップし、複数デバイス間で同期できます。アバター画像も含めて同期されます。
+              </p>
+
+              <!-- 未接続状態 -->
+              <div id="dropbox-auth-state">
+                <button id="dropbox-auth-btn" class="primary-btn dropbox-btn">
+                  <span class="material-symbols-outlined">link</span>
+                  <span>Dropbox と連携する</span>
+                </button>
+              </div>
+
+              <!-- 接続済み状態 -->
+              <div id="dropbox-connected-state" class="hidden">
+                <div class="dropbox-status-row">
+                  <span class="material-symbols-outlined sync-icon" id="dropbox-status-icon">cloud_done</span>
+                  <div class="dropbox-status-info">
+                    <strong id="dropbox-user-name"></strong>
+                    <span id="dropbox-last-sync-text" class="dropbox-sync-time">まだ同期していません</span>
+                  </div>
+                </div>
+
+                <div id="dropbox-sync-progress" class="sync-progress-text hidden"></div>
+
+                <div class="form-group">
+                  <label for="dropbox-sync-frequency">自動同期のタイミング</label>
+                  <select id="dropbox-sync-frequency">
+                    <option value="0">手動のみ</option>
+                    <option value="1">毎ターン後</option>
+                    <option value="5">5ターンごと</option>
+                    <option value="10">10ターンごと</option>
+                  </select>
+                </div>
+
+                <div class="dropbox-btn-row">
+                  <button id="dropbox-push-btn" class="primary-btn dropbox-action-btn" title="ローカル → クラウドへ保存">
+                    <span class="material-symbols-outlined">cloud_upload</span>
+                    <span>クラウドへ保存 (Push)</span>
+                  </button>
+                  <button id="dropbox-pull-btn" class="secondary-btn dropbox-action-btn" title="クラウド → ローカルへ復元">
+                    <span class="material-symbols-outlined">cloud_download</span>
+                    <span>クラウドから復元 (Pull)</span>
+                  </button>
+                </div>
+
+                <button id="dropbox-disconnect-btn" class="danger-btn dropbox-disconnect-btn">
+                  <span class="material-symbols-outlined">link_off</span>
+                  <span>連携を解除</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- Character Edit/Add Modal Dialog -->
+  <div id="char-modal" class="modal-wrapper hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="char-modal-title">新規キャラクター登録</h3>
+        <button onclick="document.getElementById('char-modal').classList.add('hidden')" class="icon-btn-circle">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="char-edit-layout">
+          <div class="char-avatar-section">
+            <div class="char-avatar-uploader">
+              <img id="char-img-preview" src="assets/default-silhouette.png" alt="Avatar Preview">
+              <label for="char-img-input" class="upload-badge">
+                <span class="material-symbols-outlined">photo_camera</span>
+              </label>
+              <input type="file" id="char-img-input" accept="image/*" class="hidden">
+            </div>
+            <p class="note">画像をアップロードしてください</p>
+          </div>
+          <div class="char-form-section">
+            <div class="form-group">
+              <label for="char-name-input">キャラクター名 (必須)</label>
+              <input type="text" id="char-name-input" placeholder="例: 中野 三玖">
+            </div>
+            <div class="form-group">
+              <label for="char-pers-input">性格・特徴（キーワード）</label>
+              <input type="text" id="char-pers-input" placeholder="例: クール, 控えめ, 歴史好き, 主人公が好き">
+            </div>
+            <div class="form-group">
+              <label for="char-desc-input">詳細設定・背景設定</label>
+              <textarea id="char-desc-input" rows="4" placeholder="詳細な外見、生い立ち、秘密の設定など。SillyTavernのDescriptionに相当します。"></textarea>
+            </div>
+            <div class="form-group">
+              <label for="char-ex-input">台詞・口調サンプル</label>
+              <textarea id="char-ex-input" rows="4" placeholder="例:
+「……べつに。フータローのことなんか気にしてないし」
+「……責任、取ってよね」
+SillyTavernのExample Dialogに相当します。"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button onclick="document.getElementById('char-modal').classList.add('hidden')" class="secondary-btn">キャンセル</button>
+        <button id="char-save-btn" class="primary-btn">保存する</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs controller helper script -->
+  <script>
+    // Tab switching for right sidebar
+    document.querySelectorAll('.sidebar-tab-btn').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('.sidebar-tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.sidebar-tab-content').forEach(c => c.classList.remove('active'));
+        
+        btn.classList.add('active');
+        const tab = btn.dataset.tab;
+        document.getElementById(`sidebar-tab-${tab}`).classList.add('active');
+      };
+    });
+  </script>
+</body>
+</html>
