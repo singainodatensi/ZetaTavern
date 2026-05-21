@@ -4,7 +4,7 @@
  * db.js の getSetting / saveSetting を利用してトークン情報を IndexedDB に永続化する。
  *
  * 同期対象:
- *   - /ZetaTavern_data.json  … stories + characters のメタデータ (Blob除く)
+ *   - /ZetaTavern_data.json  … stories + characters + settings のメタデータ (Blob除く)
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
@@ -14,7 +14,7 @@ import { getSetting, saveSetting } from './db.js';
 // 定数
 // ============================================================
 
-const APP_KEY  = 'lk117tt6k0vfkb8'; 
+export const APP_KEY  = 'lk117tt6k0vfkb8'; // 先頭に export を付け、ご自身のキーに変更
 const METADATA_PATH   = '/ZetaTavern_data.json';
 const ASSETS_DIR_PATH = '/ZetaTavern_Assets';
 const LOCK_PATH       = '/.zetatavern_sync_lock';
@@ -211,15 +211,15 @@ export async function isConnected() {
 }
 
 // ============================================================
-// メタデータ (stories + characters) の同期
+// メタデータ (stories + characters + settings) の同期
 // ============================================================
 
 /**
- * ZetaTavern の stories + characters 全データを Dropbox にアップロードする。
+ * ZetaTavern の stories + characters + settings 全データを Dropbox にアップロードする。
  * アバター画像 (Blob) は除外し、assetId のみ保持する。
  */
-export async function uploadMetadata(stories, characters) {
-  const payload = JSON.stringify({ stories, characters, exportedAt: Date.now() });
+export async function uploadMetadata(stories, characters, settings = {}) {
+  const payload = JSON.stringify({ stories, characters, settings, exportedAt: Date.now() });
   const args = { path: METADATA_PATH, mode: 'overwrite', mute: true };
 
   return _request('content', '/files/upload', {
@@ -432,17 +432,18 @@ export async function checkLockFile() {
 /**
  * ローカル → Dropbox へのフルプッシュ同期。
  * 1. ロックファイル取得
- * 2. メタデータ (stories, characters) をアップロード
+ * 2. メタデータ (stories, characters, settings) をアップロード
  * 3. アセットフォルダ保証 → ローカルに存在するアセットをバッチアップロード
  * 4. ロックファイル削除
  *
  * @param {object} opts
  * @param {Array}  opts.stories
  * @param {Array}  opts.characters
+ * @param {object} opts.settings
  * @param {Array}  opts.assets  - [{ assetId, blob }]
  * @param {Function} [opts.onProgress]  - (message: string) => void
  */
-export async function pushToDropbox({ stories, characters, assets, onProgress }) {
+export async function pushToDropbox({ stories, characters, settings, assets, onProgress }) {
   const progress = msg => { console.log('[Dropbox Push]', msg); if (onProgress) onProgress(msg); };
 
   progress('同期を開始します...');
@@ -454,7 +455,7 @@ export async function pushToDropbox({ stories, characters, assets, onProgress })
   await uploadLockFile('push');
   try {
     progress('メタデータをアップロード中...');
-    await uploadMetadata(stories, characters);
+    await uploadMetadata(stories, characters, settings);
 
     progress('アセットフォルダを確認中...');
     await ensureAssetsFolderExists();
@@ -477,7 +478,7 @@ export async function pushToDropbox({ stories, characters, assets, onProgress })
  * @param {object} opts
  * @param {Set<string>} opts.localAssetIds  - ローカルにすでに存在するアセットIDの集合
  * @param {Function} [opts.onProgress]
- * @returns {{ stories: Array, characters: Array, newAssets: Array<{assetId, blob}> }}
+ * @returns {{ stories: Array, characters: Array, settings: object, newAssets: Array<{assetId, blob}> }}
  */
 export async function pullFromDropbox({ localAssetIds, onProgress }) {
   const progress = msg => { console.log('[Dropbox Pull]', msg); if (onProgress) onProgress(msg); };
@@ -493,10 +494,10 @@ export async function pullFromDropbox({ localAssetIds, onProgress }) {
     const metaText = await downloadMetadata();
     if (!metaText) {
       progress('クラウドにデータがありませんでした。');
-      return { stories: null, characters: null, newAssets: [] };
+      return { stories: null, characters: null, settings: null, newAssets: [] };
     }
 
-    const { stories, characters } = JSON.parse(metaText);
+    const { stories, characters, settings } = JSON.parse(metaText);
 
     // 必要なアセットIDを収集
     const requiredAssetIds = new Set();
@@ -522,7 +523,7 @@ export async function pullFromDropbox({ localAssetIds, onProgress }) {
     }
 
     progress('プル完了！');
-    return { stories, characters, newAssets };
+    return { stories, characters, settings, newAssets };
   } finally {
     await deleteLockFile();
   }
