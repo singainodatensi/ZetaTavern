@@ -674,7 +674,7 @@ async function startDropboxAuth() {
     sessionStorage.setItem('dropbox_oauth_state', state);
 
     const authUrl = `https://www.dropbox.com/oauth2/authorize` +
-      `?client_id=7z1zhgvciq5n7o0` +
+      `?client_id=lk117tt6k0vfkb8` +
       `&response_type=code` +
       `&redirect_uri=${redirectUri}` +
       `&code_challenge=${codeChallenge}` +
