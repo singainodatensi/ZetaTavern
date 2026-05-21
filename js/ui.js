@@ -6,7 +6,7 @@
 
 import { getState, updateState, setActiveStory, updateCharacterAttendance } from './state.js';
 import * as db from './db.js';
-import { sanitizeHTML } from './sanitizer.js';
+import { sanitizeHTML, escapeHTML } from './sanitizer.js';
 
 // Holds temporary blob URLs to prevent memory leaks
 const blobUrlCache = new Map();
