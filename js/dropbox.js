@@ -14,7 +14,7 @@ import { getSetting, saveSetting } from './db.js';
 // 定数
 // ============================================================
 
-const APP_KEY         = '7z1zhgvciq5n7o0'; // 旧プロジェクトと同じDropbox App Key
+const APP_KEY         = 'lk117tt6k0vfkb8'; // 旧プロジェクトと同じDropbox App Key
 const METADATA_PATH   = '/ZetaTavern_data.json';
 const ASSETS_DIR_PATH = '/ZetaTavern_Assets';
 const LOCK_PATH       = '/.zetatavern_sync_lock';
