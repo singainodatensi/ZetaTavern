@@ -22,14 +22,24 @@ export async function buildSystemInstruction(story) {
   instruction += `あなたは卓越したストーリーテラー（語り手・ゲームマスター）です。\n`;
   instruction += `以下の【執筆ルール】、【世界観設定】、および登録された【登場人物】や【シーン状況】に従い、プレイヤー（主人公）の行動に対する物語の展開を描写してください。\n\n`;
 
-  instruction += `【出力形式（厳守・最優先）】\n`;
+instruction += `【出力形式（厳守・最優先）】\n`;
   instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。英語は一切使わない。\n`;
   instruction += `- 思考過程・執筆メモ・分析・計画・User input・Context・Goal・Setting・Drafting・Let's などの**メタ記述は出力しない**（頭の中で考えてよいが、画面には出さない）。\n`;
   instruction += `- 「承知しました」「了解」「I understand」などの前置き応答も禁止。\n`;
   instruction += `- 執筆ルールの文字数目安に従い、**本文を十分な長さ**で書く。短い要約やプロット箇条書きで済ませない。\n\n`;
 
-  instruction += `【執筆ルール】\n`;
-  instruction += `${storytellerPrompt || '三人称小説形式で描写してください。感情の直接説明を避け、行動や仕草、セリフで表現してください。'}\n\n`;
+  // --- 追加：チャットパース用の構造化指定 ---
+  instruction += `【重要：チャットUI表示のための記述フォーマット】\n`;
+  instruction += `UI側で発言者と描写を分離して吹き出し描画を行うため、物語本文は以下の記法ルールを**絶対に厳守**して出力してください。小説のようなプレーンな文章は出力しないでください。\n`;
+  instruction += `1. **セリフ（発言）**:\n`;
+  instruction += `   必ず行の先頭に \`[発言者名] 「セリフ内容」\` の形式で1行ずつ記述してください。前後に不要な空白は入れないでください。\n`;
+  instruction += `   ※主人公（${protagonist?.name || '主人公'}）自身が発言する場合も、必ず \`[${protagonist?.name || '主人公'}] 「〜〜〜」\` と記述してください。\n`;
+  instruction += `   ※主要人物や補助人物が発言する場合も、必ず \`[登場人物の名前] 「〜〜〜」\` と記述してください。\n`;
+  instruction += `   （例: \`[中野四葉] 「おはようございまーす！」\`）\n`;
+  instruction += `2. **動作描写・仕草・状況説明・ナレーション（地の文）**:\n`;
+  instruction += `   セリフ以外のすべての描写は、必ず独立した行とし、その行全体をアスタリスク（*）で囲んで記述してください。アスタリスク行の中に「」を含めてはいけません。\n`;
+  instruction += `   （例: \`*全力で駆け寄ってくる*\`）\n`;
+  instruction += `   （例: \`*放課後の教室。夕日が窓から差し込んでいる。*\`）\n\n`;
 
   if (showChoices) {
     instruction += `【選択肢の提示ルール】\n`;
@@ -326,4 +336,54 @@ export async function generateStoryResponse(story, customTimeout = 90000, maxRet
 async function getApiKeyFromStorage() {
   // Directly reading from localStorage is appropriate for basic initialization
   return localStorage.getItem('zetatavern_api_key') || '';
+}
+/**
+ * AIから返ってきたフォーマット済みテキストを、チャットUI用の個別ブロック（セリフ、動作描写、その他）に分解します。
+ */
+export function parseStoryToChatBlocks(content, protagonistName = '主人公') {
+  if (!content) return [];
+
+  const lines = content.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  const blocks = [];
+
+  for (const line of lines) {
+    // 選択肢ブロックや境界線の行（► A. / A. / ─── など）は除外またはスルー
+    if (line.startsWith('►') || line.startsWith('A.') || line.startsWith('B.') || line.startsWith('C.')) {
+      continue;
+    }
+    if (line.includes('───') || line.includes('───')) {
+      continue;
+    }
+
+    // 1. 動作・情景描写の判定: *全力で駆け寄る*
+    if (line.startsWith('*') && line.endsWith('*')) {
+      blocks.push({
+        type: 'action',
+        content: line.slice(1, -1).trim() // アスタリスクを取り除く
+      });
+      continue;
+    }
+
+    // 2. セリフの判定: [中野四葉] 「おはようございまーす！」
+    const dialogueMatch = line.match(/^\[([^\]]+)\]\s*「([^」]+)」/);
+    if (dialogueMatch) {
+      const speaker = dialogueMatch[1].trim();
+      const text = dialogueMatch[2].trim();
+      blocks.push({
+        type: 'dialogue',
+        speaker: speaker,
+        isProtagonist: speaker === protagonistName,
+        content: text
+      });
+      continue;
+    }
+
+    // 3. 例外（AIがフォーマットを誤って出力した素のテキストなど）の救済
+    blocks.push({
+      type: 'narration',
+      content: line
+    });
+  }
+
+  return blocks;
 }
