@@ -19,7 +19,7 @@
   <script src="marked.js" defer></script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260522c" defer></script>
+  <script type="module" src="js/app.js?v=20260522d" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -72,6 +72,10 @@
           <button id="view-mode-toggle" class="header-icon-btn" title="チャット表示へ切り替え">
             <span class="material-symbols-outlined">forum</span>
           </button>
+          <!-- Right sidebar toggle (mobile) -->
+          <button id="sidebar-toggle-btn" class="header-icon-btn" title="サイドバー表示">
+            <span class="material-symbols-outlined">right_panel_open</span>
+          </button>
         </div>
       </header>
 
@@ -106,6 +110,7 @@
 
             <!-- Right Sidebar: Scene Settings & Relationships -->
             <aside id="story-sidebar-container" class="story-sidebar-container">
+              <div id="sidebar-overlay" class="sidebar-overlay"></div>
               <div class="sidebar-tabs-header">
                 <button class="sidebar-tab-btn active" data-tab="status">シーン・ステータス</button>
                 <button class="sidebar-tab-btn" data-tab="config">ストーリー設定</button>

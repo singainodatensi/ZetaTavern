@@ -1,7 +1,7 @@
 /**
  * ui.js - ZetaTavern UI Rendering & DOM Events
- * Controls screen views, renders stories, handles settings/character libraries,
- * and parses AI-generated A/B/C options.
+ * Controls screen views, renders stories (novel / chat mode with per-character bubbles),
+ * handles settings/character libraries, and parses AI-generated A/B/C options.
  */
 
 import { getState, updateState, setActiveStory, updateCharacterAttendance } from './state.js';
@@ -78,6 +78,153 @@ export function parseChoices(text) {
   return { bodyText: text, choices: [] };
 }
 
+// ============================================================
+// Chat Parser — split AI narrative into per-character segments
+// ============================================================
+
+/**
+ * Segment types:
+ *   { type: 'narration', text: '...' }
+ *   { type: 'dialogue', speaker: '中野四葉', lines: [ { kind: 'speech'|'action', text } ] }
+ */
+export function parseModelOutputToSegments(text) {
+  if (!text) return [{ type: 'narration', text: '' }];
+
+  const lines = text.split('\n');
+  const segments = [];
+  let currentDialogue = null;
+  let narrationBuffer = [];
+
+  const flushNarration = () => {
+    const joined = narrationBuffer.join('\n').trim();
+    if (joined) {
+      segments.push({ type: 'narration', text: joined });
+    }
+    narrationBuffer = [];
+  };
+
+  const flushDialogue = () => {
+    if (currentDialogue && currentDialogue.lines.length > 0) {
+      segments.push(currentDialogue);
+    }
+    currentDialogue = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Detect a "speaker header" line: a standalone name (no quotes, short)
+    // Heuristic: line is short, contains no「」, not a markdown heading, next line has「
+    const isSpeakerHeader = (
+      trimmed.length > 0 &&
+      trimmed.length <= 30 &&
+      !trimmed.includes('「') &&
+      !trimmed.startsWith('#') &&
+      !trimmed.startsWith('*') &&
+      !trimmed.startsWith('―') &&
+      !trimmed.startsWith('─') &&
+      !trimmed.startsWith('-') &&
+      !trimmed.startsWith('>') &&
+      !/^[\s\d\.\-\*]+$/.test(trimmed)
+    );
+
+    // Check if this line has inline dialogue: "Name「dialogue」"
+    const inlineDialogueMatch = trimmed.match(/^(.+?)「(.+)$/);
+
+    // Check if line starts with 「 — continuation of current speaker
+    const startsWithQuote = trimmed.startsWith('「');
+
+    // Check if line is an action marker: *action* or ＊action＊
+    const isAction = /^\*(.+)\*$/.test(trimmed) || /^＊(.+)＊$/.test(trimmed);
+
+    if (inlineDialogueMatch && !startsWithQuote) {
+      const speakerCandidate = inlineDialogueMatch[1].trim();
+      // Validate speaker name (short, no special chars)
+      if (speakerCandidate.length <= 20 && !/[#\*\-►▶]/.test(speakerCandidate)) {
+        flushNarration();
+        flushDialogue();
+        currentDialogue = { type: 'dialogue', speaker: speakerCandidate, lines: [] };
+        // The rest of the line including 「 is speech
+        const speechText = '「' + inlineDialogueMatch[2];
+        currentDialogue.lines.push({ kind: 'speech', text: speechText });
+        continue;
+      }
+    }
+
+    if (isSpeakerHeader) {
+      // Peek ahead: does next non-empty line start with 「 or * ?
+      let nextIdx = i + 1;
+      while (nextIdx < lines.length && lines[nextIdx].trim() === '') nextIdx++;
+      const nextLine = nextIdx < lines.length ? lines[nextIdx].trim() : '';
+      if (nextLine.startsWith('「') || /^\*(.+)\*$/.test(nextLine) || /^＊(.+)＊$/.test(nextLine)) {
+        flushNarration();
+        flushDialogue();
+        currentDialogue = { type: 'dialogue', speaker: trimmed, lines: [] };
+        continue;
+      }
+    }
+
+    // If we're inside a dialogue block
+    if (currentDialogue) {
+      if (startsWithQuote || trimmed.includes('「')) {
+        currentDialogue.lines.push({ kind: 'speech', text: trimmed });
+        continue;
+      }
+      if (isAction) {
+        const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '');
+        currentDialogue.lines.push({ kind: 'action', text: actionText });
+        continue;
+      }
+      if (trimmed === '') {
+        // Empty line inside dialogue — could be paragraph break; check if next content continues dialogue
+        let nextIdx = i + 1;
+        while (nextIdx < lines.length && lines[nextIdx].trim() === '') nextIdx++;
+        const nextLine = nextIdx < lines.length ? lines[nextIdx].trim() : '';
+        if (nextLine.startsWith('「') || /^\*(.+)\*$/.test(nextLine) || /^＊(.+)＊$/.test(nextLine)) {
+          continue; // skip blank, dialogue continues
+        }
+        // Otherwise end this dialogue
+        flushDialogue();
+        continue;
+      }
+      // Non-dialogue line while in dialogue — flush and treat as narration
+      flushDialogue();
+      narrationBuffer.push(line);
+      continue;
+    }
+
+    // Default: narration
+    narrationBuffer.push(line);
+  }
+
+  flushNarration();
+  flushDialogue();
+
+  return segments.length > 0 ? segments : [{ type: 'narration', text: text }];
+}
+
+/**
+ * Fuzzy-match a speaker name against registered characters.
+ * Returns matched Character object or null.
+ */
+function matchCharacterByName(speakerName, characters) {
+  if (!speakerName || !characters || characters.length === 0) return null;
+  const normalised = speakerName.trim();
+
+  // Exact match
+  let match = characters.find(c => c.name === normalised);
+  if (match) return match;
+
+  // Partial match: speaker name is contained in character name or vice versa
+  match = characters.find(c =>
+    c.name.includes(normalised) || normalised.includes(c.name)
+  );
+  if (match) return match;
+
+  return null;
+}
+
 /**
  * Renders the story messages to the screen based on the current uiMode.
  */
@@ -110,49 +257,103 @@ export async function renderStory() {
     parsedLast = parseChoices(lastMsg.content);
   }
 
+  // Pre-load character list for avatar matching in chat mode
+  const characters = uiMode === 'chat' ? await db.getCharacters() : [];
+
   // Render messages
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     const isLast = i === messages.length - 1;
-    
-    let contentHTML = '';
     const isModel = msg.role === 'model';
-    
-    // Parse markdown (if marked is loaded, else fallback to text)
     const textToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
-    
-    if (window.marked && typeof window.marked.parse === 'function') {
-      contentHTML = sanitizeHTML(window.marked.parse(textToRender));
-    } else {
-      contentHTML = sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
-    }
 
     if (uiMode === 'chat') {
-      // Chat View Rendering
-      const msgEl = document.createElement('div');
-      msgEl.className = `chat-message ${isModel ? 'bot-role' : 'user-role'}`;
-      
-      let avatarUrl = 'assets/default-silhouette.png';
-      let senderName = isModel ? 'Storyteller' : 'You';
-      
-      if (!isModel && currentStory.protagonist) {
-        senderName = currentStory.protagonist.name || 'You';
-        avatarUrl = await getAvatarUrl(currentStory.protagonist.avatarAssetId);
+      // ── Chat View: per-character bubbles ──
+      if (isModel) {
+        const segments = parseModelOutputToSegments(textToRender);
+        for (const seg of segments) {
+          if (seg.type === 'narration') {
+            const narEl = document.createElement('div');
+            narEl.className = 'chat-narration';
+            let html = '';
+            if (window.marked && typeof window.marked.parse === 'function') {
+              html = sanitizeHTML(window.marked.parse(seg.text));
+            } else {
+              html = sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
+            }
+            narEl.innerHTML = `<div class="narration-content">${html}</div>`;
+            container.appendChild(narEl);
+          } else if (seg.type === 'dialogue') {
+            const charMatch = matchCharacterByName(seg.speaker, characters);
+            let avatarUrl = 'assets/default-silhouette.png';
+            if (charMatch) {
+              avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
+            }
+
+            const msgEl = document.createElement('div');
+            msgEl.className = 'chat-message bot-role';
+
+            let linesHTML = '';
+            for (const line of seg.lines) {
+              if (line.kind === 'speech') {
+                const escaped = escapeHTML(line.text);
+                linesHTML += `<p class="chat-speech">${escaped}</p>`;
+              } else if (line.kind === 'action') {
+                linesHTML += `<p class="chat-action"><em>*${escapeHTML(line.text)}*</em></p>`;
+              }
+            }
+
+            msgEl.innerHTML = `
+              <div class="chat-avatar">
+                <img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}">
+              </div>
+              <div class="chat-content-wrapper">
+                <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
+                <div class="chat-bubble">${linesHTML}</div>
+              </div>
+            `;
+            container.appendChild(msgEl);
+          }
+        }
+      } else {
+        // User message
+        let avatarUrl = 'assets/default-silhouette.png';
+        let senderName = 'You';
+        if (currentStory.protagonist) {
+          senderName = currentStory.protagonist.name || 'You';
+          avatarUrl = await getAvatarUrl(currentStory.protagonist.avatarAssetId);
+        }
+
+        let contentHTML = '';
+        if (window.marked && typeof window.marked.parse === 'function') {
+          contentHTML = sanitizeHTML(window.marked.parse(textToRender));
+        } else {
+          contentHTML = sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
+        }
+
+        const msgEl = document.createElement('div');
+        msgEl.className = 'chat-message user-role';
+        msgEl.innerHTML = `
+          <div class="chat-avatar">
+            <img src="${avatarUrl}" alt="${senderName}">
+          </div>
+          <div class="chat-content-wrapper">
+            <span class="chat-sender-name">${senderName}</span>
+            <div class="chat-bubble">${contentHTML}</div>
+          </div>
+        `;
+        container.appendChild(msgEl);
       }
-      
-      msgEl.innerHTML = `
-        <div class="chat-avatar">
-          <img src="${avatarUrl}" alt="${senderName}">
-        </div>
-        <div class="chat-content-wrapper">
-          <span class="chat-sender-name">${senderName}</span>
-          <div class="chat-bubble">${contentHTML}</div>
-        </div>
-      `;
-      container.appendChild(msgEl);
 
     } else {
-      // Novel View Rendering
+      // ── Novel View Rendering ──
+      let contentHTML = '';
+      if (window.marked && typeof window.marked.parse === 'function') {
+        contentHTML = sanitizeHTML(window.marked.parse(textToRender));
+      } else {
+        contentHTML = sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
+      }
+
       const blockEl = document.createElement('div');
       blockEl.className = `novel-block ${isModel ? 'story-paragraph' : 'action-paragraph'}`;
       
