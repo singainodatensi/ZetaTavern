@@ -1,6 +1,7 @@
 /* ==========================================================================
    ZetaTavern - Design System & Stylesheet
    Modern Glassmorphism, Neon Violet Accents, Premium Typography & Layouts
+   Responsive-first: mobile chat priority, collapsible sidebar
    ========================================================================== */
 
 /* 1. Global Variables & Base Setup */
@@ -96,6 +97,7 @@ body {
   flex: 1;
   height: 100%;
   position: relative;
+  min-width: 0;
 }
 
 /* 3. Header Styling */
@@ -109,6 +111,7 @@ body {
   justify-content: space-between;
   padding: 0 24px;
   z-index: 10;
+  flex-shrink: 0;
 }
 
 .header-left {
@@ -178,11 +181,18 @@ body {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* 4. Screens Container */
 .screens-container {
   flex: 1;
   position: relative;
   overflow: hidden;
+  min-height: 0;
 }
 
 .app-screen {
@@ -205,7 +215,7 @@ body {
 
 /* 5. Story Board Screen Layout */
 #story-screen {
-  overflow: hidden; /* Control internal scroll */
+  overflow: hidden;
 }
 
 .story-board-layout {
@@ -221,6 +231,7 @@ body {
   height: 100%;
   border-right: 1px solid var(--color-border);
   background: rgba(13, 13, 17, 0.3);
+  min-width: 0;
 }
 
 /* Story Viewport (Dialogue/Narrative) */
@@ -231,6 +242,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  min-height: 0;
 }
 
 /* Empty State */
@@ -266,7 +278,7 @@ body {
   letter-spacing: 0.05em;
   line-height: 1.95;
   margin-bottom: 8px;
-  text-indent: 1em; /* Indentation for Japanese reading layout */
+  text-indent: 1em;
 }
 
 .action-paragraph {
@@ -293,7 +305,7 @@ body {
 /* --- Chat View (Avatar bubbles representation) --- */
 .chat-message {
   display: flex;
-  gap: 16px;
+  gap: 12px;
   max-width: 850px;
   margin: 0 auto;
   width: 100%;
@@ -302,8 +314,8 @@ body {
 }
 
 .chat-avatar {
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   overflow: hidden;
   border: 2px solid var(--color-border);
@@ -320,7 +332,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-width: calc(100% - 60px);
+  max-width: calc(100% - 56px);
+  min-width: 0;
 }
 
 .chat-sender-name {
@@ -336,14 +349,14 @@ body {
   line-height: 1.6;
 }
 
-/* Bot style */
+/* Bot / character style */
 .bot-role .chat-bubble {
   background: var(--bg-card);
   border: 1px solid var(--color-border);
   border-top-left-radius: 2px;
 }
 
-/* User style */
+/* User style — right-aligned */
 .user-role {
   flex-direction: row-reverse;
 }
@@ -357,6 +370,44 @@ body {
   color: #fff;
   border-top-right-radius: 2px;
   box-shadow: var(--shadow-neon);
+}
+
+/* --- Chat bubble inner elements --- */
+.chat-speech {
+  margin: 2px 0;
+}
+
+.chat-action {
+  margin: 4px 0;
+  color: var(--text-sub);
+  font-size: 13px;
+}
+
+/* --- Narration block (between character dialogues) --- */
+.chat-narration {
+  max-width: 750px;
+  margin: 8px auto;
+  width: 100%;
+  opacity: 0;
+  animation: fadeInUp 0.4s forwards ease-out;
+}
+
+.narration-content {
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 3px solid rgba(124, 77, 255, 0.3);
+  padding: 12px 18px;
+  border-radius: 0 12px 12px 0;
+  color: var(--text-sub);
+  font-size: 14px;
+  line-height: 1.8;
+  letter-spacing: 0.03em;
+}
+
+.narration-content p {
+  margin-bottom: 8px;
+}
+.narration-content p:last-child {
+  margin-bottom: 0;
 }
 
 /* --- Dynamic Choices buttons --- */
@@ -417,6 +468,7 @@ body {
   background: linear-gradient(180deg, transparent 0%, var(--bg-app) 40%);
   padding-bottom: 24px;
   z-index: 5;
+  flex-shrink: 0;
 }
 
 .input-form {
@@ -510,13 +562,19 @@ body {
   font-style: italic;
 }
 
-/* 6. Sidebar (Scene State & Character Configs) */
+/* 6. Right Sidebar (Scene State & Character Configs) */
 .story-sidebar-container {
   width: 320px;
   display: flex;
   flex-direction: column;
   height: 100%;
   background: var(--bg-sidebar);
+  flex-shrink: 0;
+  position: relative;
+}
+
+.sidebar-overlay {
+  display: none;
 }
 
 .sidebar-tabs-header {
@@ -1224,7 +1282,7 @@ body {
   gap: 16px;
 }
 
-/* 10. Drawer Panel (Persistent History) */
+/* 10. Left Drawer Panel (Story History) */
 .mobile-drawer {
   position: fixed;
   top: 0;
@@ -1382,9 +1440,11 @@ body {
   }
 }
 
-/* 12. Responsive Adjustments */
+/* ============================================================
+   12. Responsive — Desktop (>= 1024px)
+   ============================================================ */
 @media (min-width: 1024px) {
-  /* On desktop, the drawer is persistent, overlay hidden */
+  /* On desktop, the left drawer is persistent */
   .mobile-drawer {
     position: static;
     width: 280px;
@@ -1405,9 +1465,21 @@ body {
   #menu-trigger-btn {
     display: none;
   }
+
+  /* Right sidebar toggle hidden on desktop (always visible) */
+  #sidebar-toggle-btn {
+    display: none;
+  }
 }
 
+/* ============================================================
+   13. Responsive — Mobile (< 1024px)
+   ============================================================ */
 @media (max-width: 1023px) {
+  :root {
+    --header-height: 52px;
+  }
+
   .app-header {
     padding: 0 10px;
     height: 52px;
@@ -1425,7 +1497,6 @@ body {
     font-size: 17px;
   }
 
-  /* 狭い画面でラベルが1文字ずつ折れて「縦書き」に見えるのを防ぐ → アイコンのみ */
   .header-nav {
     flex: 1;
     justify-content: center;
@@ -1440,6 +1511,7 @@ body {
     flex-shrink: 0;
   }
 
+  /* Hide text labels on narrow screens — icon only */
   .nav-btn > span:not(.material-symbols-outlined) {
     display: none;
   }
@@ -1448,6 +1520,7 @@ body {
     flex-shrink: 0;
   }
 
+  /* Story board: vertical stack, sidebar hidden by default */
   .story-board-layout {
     flex-direction: column;
     height: 100%;
@@ -1455,13 +1528,42 @@ body {
     min-height: 0;
   }
 
+  /* Right sidebar becomes a slide-out drawer on mobile */
   .story-sidebar-container {
-    width: 100%;
-    height: auto;
-    max-height: 32vh;
-    overflow-y: auto;
-    flex-shrink: 0;
-    border-top: 1px solid var(--color-border);
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 85vw;
+    max-width: 360px;
+    height: 100vh;
+    height: 100dvh;
+    z-index: 95;
+    transform: translateX(100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .story-sidebar-container.open {
+    transform: translateX(0);
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+    z-index: -1;
+  }
+
+  .story-sidebar-container.open .sidebar-overlay {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .timeline-container {
@@ -1469,6 +1571,11 @@ body {
     flex: 1;
     min-height: 0;
     height: auto;
+  }
+
+  .story-viewport {
+    padding: 16px;
+    gap: 16px;
   }
 
   .input-panel-wrapper {
@@ -1483,7 +1590,7 @@ body {
   }
 
   #user-input-field {
-    min-height: 80px;
+    min-height: 48px;
     max-height: 40vh;
     font-size: 16px;
     padding: 12px 14px;
@@ -1492,10 +1599,9 @@ body {
 
   .send-btn {
     width: 48px;
-    min-height: 80px;
-    height: auto;
+    height: 48px;
     border-radius: 14px;
-    align-self: stretch;
+    align-self: flex-end;
   }
 
   .char-edit-layout {
@@ -1505,6 +1611,55 @@ body {
 
   .settings-container,
   .library-container {
+    padding: 24px 16px;
     padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .library-viewport {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+  }
+
+  .char-card {
+    padding: 14px;
+  }
+
+  /* Chat bubbles tighter on mobile */
+  .chat-message {
+    gap: 8px;
+  }
+
+  .chat-avatar {
+    width: 32px;
+    height: 32px;
+  }
+
+  .chat-bubble {
+    padding: 10px 14px;
+    font-size: 14px;
+    border-radius: 16px;
+  }
+
+  .chat-narration {
+    margin: 4px auto;
+  }
+
+  .narration-content {
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  .choices-container {
+    padding: 12px 16px 0 16px;
+  }
+
+  .choice-btn {
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  /* Drawer header on mobile */
+  .drawer-header {
+    height: 52px;
   }
 }

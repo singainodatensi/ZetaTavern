@@ -226,7 +226,7 @@ async function bindEvents() {
     };
   });
 
-  // Mobile drawer trigger
+  // Mobile drawer trigger (left — story list)
   const menuBtn = document.getElementById('menu-trigger-btn');
   const mobileDrawer = document.getElementById('mobile-drawer');
   const drawerOverlay = document.getElementById('drawer-overlay');
@@ -241,13 +241,32 @@ async function bindEvents() {
     };
   }
 
+  // Right sidebar toggle (mobile — scene/status/config)
+  const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+  const sidebarContainer = document.getElementById('story-sidebar-container');
+  const sidebarOverlay = document.getElementById('sidebar-overlay');
+
+  if (sidebarToggleBtn && sidebarContainer) {
+    sidebarToggleBtn.onclick = () => {
+      sidebarContainer.classList.toggle('open');
+    };
+  }
+  if (sidebarOverlay && sidebarContainer) {
+    sidebarOverlay.onclick = () => {
+      sidebarContainer.classList.remove('open');
+    };
+  }
+
   // 2. View mode switching (Novel / Chat)
   const modeToggle = document.getElementById('view-mode-toggle');
   if (modeToggle) {
     modeToggle.onclick = () => {
       const currentMode = getState().uiMode;
       const nextMode = currentMode === 'novel' ? 'chat' : 'novel';
-      modeToggle.textContent = nextMode === 'novel' ? 'book' : 'forum';
+      const iconEl = modeToggle.querySelector('.material-symbols-outlined');
+      if (iconEl) {
+        iconEl.textContent = nextMode === 'novel' ? 'menu_book' : 'forum';
+      }
       modeToggle.title = nextMode === 'novel' ? 'チャット表示へ切り替え' : '小説表示へ切り替え';
       updateState({ uiMode: nextMode });
       ui.renderStory();
