@@ -86,6 +86,8 @@ export function parseChoices(text) {
  * Segment types:
  *   { type: 'narration', text: '...' }
  *   { type: 'dialogue', speaker: '中野四葉', lines: [ { kind: 'speech'|'action', text } ] }
+ *
+ * 厳密な [キャラクター名] 記法と、従来のヒューリスティック判定の双方に対応したハイブリッドパーサー。
  */
 export function parseModelOutputToSegments(text) {
   if (!text) return [{ type: 'narration', text: '' }];
@@ -113,9 +115,58 @@ export function parseModelOutputToSegments(text) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
+    if (!trimmed) continue;
 
-    // Detect a "speaker header" line: a standalone name (no quotes, short)
-    // Heuristic: line is short, contains no「」, not a markdown heading, next line has「
+    // ────────────────────────────────────────────────────────
+    // ルール A: 新しい明示的なフォーマット [キャラクター名] 「セリフ」
+    // ────────────────────────────────────────────────────────
+    const structuredDialogueMatch = trimmed.match(/^\[([^\]]+)\]\s*(「[^」]+」|.*)$/);
+    if (structuredDialogueMatch) {
+      flushNarration();
+      flushDialogue();
+
+      const speaker = structuredDialogueMatch[1].trim();
+      const dialogueText = structuredDialogueMatch[2].trim();
+
+      // ナレーターやシステム用の出力は、吹き出し無しの地の文（narration）として扱う
+      if (speaker === 'ナレーター' || speaker === 'システム' || speaker === '背景' || speaker === 'ナレーション') {
+        segments.push({ type: 'narration', text: dialogueText });
+        continue;
+      }
+
+      currentDialogue = {
+        type: 'dialogue',
+        speaker: speaker,
+        lines: [{ kind: 'speech', text: dialogueText }]
+      };
+      flushDialogue(); // 1セリフごとに単一の吹き出しとして完結させる
+      continue;
+    }
+
+    // ────────────────────────────────────────────────────────
+    // ルール B: 新しい明示的な動作描写・地の文 *動作* 
+    // ────────────────────────────────────────────────────────
+    const isAction = /^\*(.+)\*$/.test(trimmed) || /^＊(.+)＊$/.test(trimmed);
+    if (isAction) {
+      const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '').trim();
+      
+      // 直前が会話であれば、その会話ブロックの中の「動作」として追加する
+      if (currentDialogue) {
+        currentDialogue.lines.push({ kind: 'action', text: actionText });
+      } else {
+        // そうでなければ単体の動作ナレーションとして書き出す
+        flushNarration();
+        segments.push({ type: 'narration', text: `*${actionText}*` });
+      }
+      continue;
+    }
+
+    // ────────────────────────────────────────────────────────
+    // ルール C: 旧ヒューリスティック判定（過去のログ表示や、AIの出力微ブレ時のフォールバック用）
+    // ────────────────────────────────────────────────────────
+    const inlineDialogueMatch = trimmed.match(/^(.+?)「(.+)$/);
+    const startsWithQuote = trimmed.startsWith('「');
+
     const isSpeakerHeader = (
       trimmed.length > 0 &&
       trimmed.length <= 30 &&
@@ -129,23 +180,12 @@ export function parseModelOutputToSegments(text) {
       !/^[\s\d\.\-\*]+$/.test(trimmed)
     );
 
-    // Check if this line has inline dialogue: "Name「dialogue」"
-    const inlineDialogueMatch = trimmed.match(/^(.+?)「(.+)$/);
-
-    // Check if line starts with 「 — continuation of current speaker
-    const startsWithQuote = trimmed.startsWith('「');
-
-    // Check if line is an action marker: *action* or ＊action＊
-    const isAction = /^\*(.+)\*$/.test(trimmed) || /^＊(.+)＊$/.test(trimmed);
-
     if (inlineDialogueMatch && !startsWithQuote) {
       const speakerCandidate = inlineDialogueMatch[1].trim();
-      // Validate speaker name (short, no special chars)
       if (speakerCandidate.length <= 20 && !/[#\*\-►▶]/.test(speakerCandidate)) {
         flushNarration();
         flushDialogue();
         currentDialogue = { type: 'dialogue', speaker: speakerCandidate, lines: [] };
-        // The rest of the line including 「 is speech
         const speechText = '「' + inlineDialogueMatch[2];
         currentDialogue.lines.push({ kind: 'speech', text: speechText });
         continue;
@@ -153,7 +193,6 @@ export function parseModelOutputToSegments(text) {
     }
 
     if (isSpeakerHeader) {
-      // Peek ahead: does next non-empty line start with 「 or * ?
       let nextIdx = i + 1;
       while (nextIdx < lines.length && lines[nextIdx].trim() === '') nextIdx++;
       const nextLine = nextIdx < lines.length ? lines[nextIdx].trim() : '';
@@ -165,36 +204,15 @@ export function parseModelOutputToSegments(text) {
       }
     }
 
-    // If we're inside a dialogue block
     if (currentDialogue) {
       if (startsWithQuote || trimmed.includes('「')) {
         currentDialogue.lines.push({ kind: 'speech', text: trimmed });
         continue;
       }
-      if (isAction) {
-        const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '');
-        currentDialogue.lines.push({ kind: 'action', text: actionText });
-        continue;
-      }
-      if (trimmed === '') {
-        // Empty line inside dialogue — could be paragraph break; check if next content continues dialogue
-        let nextIdx = i + 1;
-        while (nextIdx < lines.length && lines[nextIdx].trim() === '') nextIdx++;
-        const nextLine = nextIdx < lines.length ? lines[nextIdx].trim() : '';
-        if (nextLine.startsWith('「') || /^\*(.+)\*$/.test(nextLine) || /^＊(.+)＊$/.test(nextLine)) {
-          continue; // skip blank, dialogue continues
-        }
-        // Otherwise end this dialogue
-        flushDialogue();
-        continue;
-      }
-      // Non-dialogue line while in dialogue — flush and treat as narration
       flushDialogue();
-      narrationBuffer.push(line);
-      continue;
     }
 
-    // Default: narration
+    // いずれにも当てはまらない場合はナレーション（地の文）
     narrationBuffer.push(line);
   }
 
@@ -283,15 +301,26 @@ export async function renderStory() {
             }
             narEl.innerHTML = `<div class="narration-content">${html}</div>`;
             container.appendChild(narEl);
-          } else if (seg.type === 'dialogue') {
-            const charMatch = matchCharacterByName(seg.speaker, characters);
+        } else if (seg.type === 'dialogue') {
+            // 話し手が「主人公」本人かどうか判定（設定された主人公名、または「主人公」という文字列に合致するか）
+            const protagonistName = currentStory.protagonist?.name || '主人公';
+            const isProtagonist = (seg.speaker === protagonistName || seg.speaker === '主人公');
+
             let avatarUrl = 'assets/default-silhouette.png';
-            if (charMatch) {
-              avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
+            let roleClass = 'bot-role'; // デフォルトは左側（他キャラクター）
+
+            if (isProtagonist) {
+              roleClass = 'user-role'; // 主人公であれば右側に配置
+              avatarUrl = await getAvatarUrl(currentStory.protagonist?.avatarAssetId);
+            } else {
+              const charMatch = matchCharacterByName(seg.speaker, characters);
+              if (charMatch) {
+                avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
+              }
             }
 
             const msgEl = document.createElement('div');
-            msgEl.className = 'chat-message bot-role';
+            msgEl.className = `chat-message ${roleClass}`;
 
             let linesHTML = '';
             for (const line of seg.lines) {
