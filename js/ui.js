@@ -671,18 +671,44 @@ export async function renderStoryList() {
   stories.forEach(story => {
     const el = document.createElement('div');
     el.className = `story-list-item ${current && current.storyId === story.storyId ? 'active' : ''}`;
+    
+    // レイアウト崩れを防ぐため、テキストとアクション(編集・削除)をflexコンテナでグループ化します
     el.innerHTML = `
-      <div class="story-item-text">
+      <div class="story-item-text" style="flex: 1; min-width: 0;">
         <span class="story-item-title">${escapeHTML(story.title || '無題のストーリー')}</span>
         <span class="story-item-meta">${story.messages?.length || 0} メッセージ</span>
       </div>
-      <button class="delete-story-btn" title="削除">
-        <span class="material-symbols-outlined">delete</span>
-      </button>
+      <div class="story-item-actions" style="display: flex; gap: 4px; align-items: center; margin-left: 8px;">
+        <button class="rename-story-btn" title="名前を変更" style="background: none; border: none; color: inherit; opacity: 0.6; cursor: pointer; padding: 4px; display: inline-flex; align-items: center;">
+          <span class="material-symbols-outlined" style="font-size: 20px;">edit</span>
+        </button>
+        <button class="delete-story-btn" title="削除">
+          <span class="material-symbols-outlined">delete</span>
+        </button>
+      </div>
     `;
     
     el.onclick = (e) => {
-      // If clicked delete button
+      // 1. 名前変更ボタンがクリックされた場合の処理
+      if (e.target.closest('.rename-story-btn')) {
+        e.stopPropagation(); // 親要素のストーリー切り替えイベントを発火させない
+        const oldTitle = story.title || '新しいストーリー';
+        const newTitle = prompt('ストーリーの名前を変更:', oldTitle);
+        
+        if (newTitle !== null && newTitle.trim() !== '') {
+          story.title = newTitle.trim();
+          db.saveStory(story).then(() => {
+            // もし名前を変更したストーリーが「現在のアクティブなストーリー」なら状態も更新する
+            if (current && current.storyId === story.storyId) {
+              setActiveStory(story);
+            }
+            renderStoryList();
+          });
+        }
+        return;
+      }
+
+      // 2. 削除ボタンがクリックされた場合の処理
       if (e.target.closest('.delete-story-btn')) {
         e.stopPropagation();
         if (confirm(`ストーリー「${story.title}」を削除しますか？`)) {
@@ -696,6 +722,7 @@ export async function renderStoryList() {
         return;
       }
       
+      // 3. 通常のストーリー選択処理
       setActiveStory(story);
       renderStoryList();
       // Close mobile drawer if open
