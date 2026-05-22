@@ -19,7 +19,7 @@
   <script src="marked.js" defer></script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260522d" defer></script>
+  <script type="module" src="js/app.js?v=20260522e" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -68,6 +68,10 @@
           </button>
         </nav>
         <div class="header-right">
+          <!-- Sync status indicator (Dropbox) -->
+          <span id="sync-status-indicator" class="sync-status-indicator hidden" title="同期ステータス">
+            <span class="material-symbols-outlined">cloud_done</span>
+          </span>
           <!-- View mode toggle (Novel vs. Chat) -->
           <button id="view-mode-toggle" class="header-icon-btn" title="チャット表示へ切り替え">
             <span class="material-symbols-outlined">forum</span>
@@ -171,6 +175,17 @@
                 </button>
                 <input type="file" id="char-import-input" accept=".json" class="hidden">
               </div>
+            </div>
+            <!-- Filter/Search Bar -->
+            <div class="library-filter-bar">
+              <div class="library-search-wrapper">
+                <span class="material-symbols-outlined">search</span>
+                <input type="text" id="library-search-input" placeholder="キャラクター名で検索...">
+              </div>
+              <select id="library-filter-select" class="library-filter-select">
+                <option value="all">すべて</option>
+                <option value="in-story">使用中のストーリーのみ</option>
+              </select>
             </div>
             <div id="library-viewport" class="library-viewport">
               <!-- Rendered character cards dynamically -->
@@ -339,6 +354,10 @@
             <div class="form-group">
               <label for="char-name-input">キャラクター名 (必須)</label>
               <input type="text" id="char-name-input" placeholder="例: 中野 三玖">
+            </div>
+            <div class="form-group">
+              <label for="char-category-input">カテゴリ / 作品名</label>
+              <input type="text" id="char-category-input" placeholder="例: 五等分の花嫁, オリジナル, モブ">
             </div>
             <div class="form-group">
               <label for="char-pers-input">性格・特徴（キーワード）</label>

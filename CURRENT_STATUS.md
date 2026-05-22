@@ -15,6 +15,12 @@
 - [x] Gemini API 連携（モデル選択、カスタムモデル、思考パート除外）
 - [x] A/B/C 選択肢のパースとボタン表示
 - [x] Dropbox 同期（PKCE、Push/Pull、画像アセット）
+- [x] **Dropbox 自動同期**
+  - ターン完了後のサイレント自動Push
+  - アプリ起動時の自動Pull
+  - タブ復帰時（visibilitychange）の自動同期
+  - ヘッダーにリアルタイム同期ステータスアイコン（同期中/成功/エラー/オフライン）
+  - ポップアップなしの静的UI通知
 - [x] PWA（Service Worker、オフラインキャッシュ）
 
 ### UI / レスポンシブ
@@ -24,17 +30,24 @@
   - キャラクターライブラリとのファジーマッチでアバター表示
   - 未登録キャラはデフォルトシルエット表示
   - プレイヤーメッセージは右側、キャラメッセージは左側
-  - 地の文はナレーションブロックとして表示
+- [x] **ナレーターシステム**
+  - 地の文はアイコンなし・吹き出しなし・イタリック体のプレーンテキスト
+  - Zeta AI方式に準拠
 - [x] **レスポンシブレイアウト**
   - モバイル: チャット画面を最優先表示
   - モバイル: 右サイドバーはドロワー化（ボタンでトグル）
   - モバイル: ナビはアイコンのみ表示
   - PC: 左ドロワー常時表示、右サイドバー常時表示
 - [x] ストーリー一覧: 左ドロワー（モバイルはスライドイン）
+- [x] **キャラクターライブラリ: カテゴリ/フィルタ対応**
+  - 検索バー（名前/カテゴリ/性格でフィルタ）
+  - カテゴリフィルタ（作品別/使用中のみ）
+  - キャラクターカードにカテゴリタグ表示
+  - キャラクター編集・エクスポート・インポートにカテゴリ対応
 
 ### データモデル
 - [x] Story: storyId, title, messages[], protagonist, characters[], sceneState, characterMemory, relationshipMemory
-- [x] Character: characterId, name, description, personality, mes_example, avatarAssetId
+- [x] Character: characterId, name, category, description, personality, mes_example, avatarAssetId
 - [x] Settings: api_key, model_name, show_choices, dropbox設定 等
 - [x] Assets: Blob画像ストレージ
 
@@ -48,7 +61,6 @@
 
 ### 中優先度
 - [ ] 登場キャラ名とライブラリのファジーマッチ強化（別名・ニックネーム対応）
-- [ ] キャラクターカテゴリの簡略化（「登場/不在」+「詳細度」の2軸へ）
 - [ ] 関数ベースの動的状態更新
 
 ### 低優先度
