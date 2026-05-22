@@ -679,6 +679,7 @@ export async function renderStoryList() {
 
 /**
  * Renders the Character Library screen (Grid view & Add/Edit form)
+ * Supports search filtering and category filtering.
  */
 export async function renderCharacterLibrary() {
   const container = document.getElementById('library-viewport');
@@ -686,6 +687,68 @@ export async function renderCharacterLibrary() {
 
   container.innerHTML = '';
   const characters = await db.getCharacters();
+
+  const searchInput = document.getElementById('library-search-input');
+  const filterSelect = document.getElementById('library-filter-select');
+  const searchQuery = searchInput ? searchInput.value.trim().toLowerCase() : '';
+  const filterMode = filterSelect ? filterSelect.value : 'all';
+
+  // Collect unique categories for the filter dropdown
+  const categories = new Set();
+  characters.forEach(c => {
+    if (c.category) categories.add(c.category);
+  });
+
+  // Rebuild filter options dynamically (keep "all" and "in-story", add categories)
+  if (filterSelect) {
+    const currentVal = filterSelect.value;
+    filterSelect.innerHTML = '';
+    const optAll = document.createElement('option');
+    optAll.value = 'all';
+    optAll.textContent = 'すべて';
+    filterSelect.appendChild(optAll);
+
+    const optInStory = document.createElement('option');
+    optInStory.value = 'in-story';
+    optInStory.textContent = '使用中のストーリーのみ';
+    filterSelect.appendChild(optInStory);
+
+    for (const cat of [...categories].sort()) {
+      const opt = document.createElement('option');
+      opt.value = `cat:${cat}`;
+      opt.textContent = cat;
+      filterSelect.appendChild(opt);
+    }
+
+    filterSelect.value = currentVal;
+  }
+
+  // Determine which character IDs are in the current story
+  const { currentStory } = getState();
+  const inStoryCharIds = new Set();
+  if (currentStory && currentStory.characters) {
+    currentStory.characters.forEach(c => {
+      if (c.attendance && c.attendance !== 'absent') {
+        inStoryCharIds.add(c.characterId);
+      }
+    });
+  }
+
+  // Filter characters
+  let filtered = characters;
+  if (searchQuery) {
+    filtered = filtered.filter(c =>
+      c.name.toLowerCase().includes(searchQuery) ||
+      (c.category || '').toLowerCase().includes(searchQuery) ||
+      (c.personality || '').toLowerCase().includes(searchQuery)
+    );
+  }
+  if (filterMode === 'in-story') {
+    filtered = filtered.filter(c => inStoryCharIds.has(c.characterId));
+  } else if (filterMode.startsWith('cat:')) {
+    const catName = filterMode.slice(4);
+    filtered = filtered.filter(c => c.category === catName);
+  }
 
   // "Add Character" Card
   const addCard = document.createElement('div');
@@ -698,17 +761,22 @@ export async function renderCharacterLibrary() {
   container.appendChild(addCard);
 
   // Render character list cards
-  for (const char of characters) {
+  for (const char of filtered) {
     const card = document.createElement('div');
     card.className = 'char-card';
     const avatarUrl = await getAvatarUrl(char.avatarAssetId);
     
+    const categoryTag = char.category
+      ? `<span class="char-card-tag">${escapeHTML(char.category)}</span>`
+      : '';
+
     card.innerHTML = `
       <div class="char-card-avatar-wrapper">
         <img src="${avatarUrl}" alt="${char.name}">
       </div>
       <div class="char-card-details">
         <strong>${escapeHTML(char.name)}</strong>
+        ${categoryTag}
         <p class="char-card-personality">${escapeHTML(char.personality || '個性未設定')}</p>
       </div>
       <div class="char-card-actions">
@@ -734,7 +802,6 @@ export async function renderCharacterLibrary() {
       if (confirm(`キャラクター「${char.name}」を削除しますか？\n(紐付いているアバター画像も削除されます)`)) {
         db.deleteCharacter(char.characterId).then(() => {
           renderCharacterLibrary();
-          // Update sidebar if open
           renderSidebar();
         });
       }
@@ -753,6 +820,7 @@ export async function showCharacterModal(char = null) {
 
   const titleEl = document.getElementById('char-modal-title');
   const nameInput = document.getElementById('char-name-input');
+  const categoryInput = document.getElementById('char-category-input');
   const descInput = document.getElementById('char-desc-input');
   const persInput = document.getElementById('char-pers-input');
   const exInput = document.getElementById('char-ex-input');
@@ -762,6 +830,7 @@ export async function showCharacterModal(char = null) {
 
   // Reset fields
   nameInput.value = char ? char.name : '';
+  if (categoryInput) categoryInput.value = char ? char.category || '' : '';
   descInput.value = char ? char.description || '' : '';
   persInput.value = char ? char.personality || '' : '';
   exInput.value = char ? char.mes_example || '' : '';
@@ -801,6 +870,7 @@ export async function showCharacterModal(char = null) {
       const characterData = {
         characterId: char ? char.characterId : undefined,
         name: nameInput.value.trim(),
+        category: categoryInput ? categoryInput.value.trim() : '',
         avatarAssetId: currentAvatarAssetId,
         description: descInput.value.trim(),
         personality: persInput.value.trim(),
@@ -828,6 +898,7 @@ async function exportCharacterJSON(char) {
       spec: 'zetatavern-character',
       version: 1,
       name: char.name,
+      category: char.category || '',
       description: char.description || '',
       personality: char.personality || '',
       mes_example: char.mes_example || '',
@@ -875,6 +946,7 @@ export async function importCharacterJSON(file) {
 
     const charData = {
       name: importObj.name,
+      category: importObj.category || '',
       description: importObj.description,
       personality: importObj.personality,
       mes_example: importObj.mes_example,

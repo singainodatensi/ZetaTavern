@@ -57,6 +57,11 @@ async function bootApp() {
   ui.renderStory();
   ui.renderSidebar();
 
+  // Fill story settings form after initial render
+  if (getState().currentStory) {
+    fillStorySettingsForm(getState().currentStory);
+  }
+
   // Bind all event handlers
   await bindEvents();
 
@@ -84,6 +89,12 @@ async function bootApp() {
   await handleDropboxOAuthReturnIfPresent();
 
   await initDropbox();
+
+  // Setup auto-sync on tab return
+  setupVisibilitySync();
+
+  // Startup sync (silent pull if auto-sync is configured)
+  await performStartupSync();
 }
 
 if (document.readyState === 'loading') {
@@ -125,7 +136,7 @@ async function loadConfigurations() {
 
   if (modelEl) {
     // 既存のハードコードされたデフォルトオプションを崩さず、以前追加された動的カスタムオプションのみを一度クリアして重複を防ぎます
-    const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+    const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it'];
     Array.from(modelEl.options).forEach(opt => {
       if (!defaultValues.includes(opt.value)) {
         modelEl.remove(opt.index);
@@ -452,6 +463,16 @@ async function bindEvents() {
     };
   }
 
+  // 5b. Character Library Search & Filter
+  const librarySearchInput = document.getElementById('library-search-input');
+  const libraryFilterSelect = document.getElementById('library-filter-select');
+  if (librarySearchInput) {
+    librarySearchInput.oninput = () => ui.renderCharacterLibrary();
+  }
+  if (libraryFilterSelect) {
+    libraryFilterSelect.onchange = () => ui.renderCharacterLibrary();
+  }
+
   // 6. Character Import Trigger
   const importCharInput = document.getElementById('char-import-input');
   const importCharBtn = document.getElementById('char-import-btn');
@@ -614,8 +635,8 @@ async function submitStoryTurn() {
     ui.renderStory();
     ui.renderStoryList();
 
-    // Check auto-sync
-    await checkAutoSync();
+    // Auto-sync to Dropbox (silent)
+    await performAutoDropboxSync();
 
   } catch (err) {
     alert(`ストーリーテラーの応答生成中にエラーが発生しました:\n${err.message}`);
@@ -646,9 +667,11 @@ async function initDropbox() {
       }
       const lastSync = await db.getSetting('dropbox_last_sync', null);
       updateLastSyncText(lastSync);
+      updateSyncStatusIndicator('idle');
     } catch (e) {
       console.warn('[Dropbox] 接続テストに失敗しました。', e);
       updateDropboxUI(false);
+      updateSyncStatusIndicator('offline');
     }
   }
 }
@@ -959,8 +982,8 @@ async function performDropboxPull() {
   }
 }
 
-/** ターン終了後に自動同期を行うか確認する */
-async function checkAutoSync() {
+/** ターン終了後に自動同期を行うか確認する（静的UI表示） */
+async function performAutoDropboxSync() {
   const connected = await dropbox.isConnected();
   if (!connected) return;
 
@@ -973,10 +996,154 @@ async function checkAutoSync() {
   if (counter >= freq) {
     await db.saveSetting('dropbox_sync_counter', 0);
     console.log('[Dropbox] 自動同期を開始...');
+    updateSyncStatusIndicator('syncing');
     try {
-      await performDropboxPush();
+      await performDropboxPushSilent();
+      const now = Date.now();
+      await db.saveSetting('dropbox_last_sync', now);
+      updateLastSyncText(now);
+      updateSyncStatusIndicator('success');
     } catch (e) {
       console.warn('[Dropbox] 自動同期に失敗しました:', e);
+      updateSyncStatusIndicator('error');
     }
   }
+}
+
+/**
+ * Silent push (no alert, no button disable — for auto-sync).
+ */
+async function performDropboxPushSilent() {
+  const stories    = await db.getStories();
+  const characters = await db.getCharacters();
+
+  const assetIds = new Set();
+  [...stories, ...characters].forEach(item => {
+    if (item.protagonist?.avatarAssetId) assetIds.add(item.protagonist.avatarAssetId);
+    if (item.avatarAssetId) assetIds.add(item.avatarAssetId);
+  });
+
+  const assets = [];
+  for (const assetId of assetIds) {
+    if (!assetId) continue;
+    const blob = await db.getAssetBlob(assetId);
+    if (blob) assets.push({ assetId, blob });
+  }
+
+  await dropbox.pushToDropbox({
+    stories,
+    characters,
+    assets,
+    onProgress: msg => console.log('[Dropbox AutoSync]', msg)
+  });
+}
+
+/**
+ * Updates the sync status indicator in the header.
+ * States: 'syncing', 'success', 'error', 'offline', 'idle'
+ */
+function updateSyncStatusIndicator(status) {
+  const indicator = document.getElementById('sync-status-indicator');
+  if (!indicator) return;
+  const iconEl = indicator.querySelector('.material-symbols-outlined');
+  if (!iconEl) return;
+
+  indicator.classList.remove('hidden');
+  indicator.className = 'sync-status-indicator';
+
+  switch (status) {
+    case 'syncing':
+      iconEl.textContent = 'cloud_sync';
+      indicator.classList.add('sync-active');
+      indicator.title = '同期中...';
+      break;
+    case 'success':
+      iconEl.textContent = 'cloud_done';
+      indicator.classList.add('sync-success');
+      indicator.title = '同期完了';
+      setTimeout(() => {
+        indicator.classList.remove('sync-success');
+        indicator.classList.add('sync-idle');
+        iconEl.textContent = 'cloud_done';
+        indicator.title = 'Dropbox 連携済み';
+      }, 3000);
+      break;
+    case 'error':
+      iconEl.textContent = 'cloud_off';
+      indicator.classList.add('sync-error');
+      indicator.title = '同期エラー';
+      break;
+    case 'offline':
+      iconEl.textContent = 'cloud_off';
+      indicator.classList.add('sync-offline');
+      indicator.title = 'オフライン';
+      break;
+    default:
+      iconEl.textContent = 'cloud_done';
+      indicator.classList.add('sync-idle');
+      indicator.title = 'Dropbox 連携済み';
+  }
+}
+
+/** Auto-pull on app startup if connected and frequency > 0 */
+async function performStartupSync() {
+  const connected = await dropbox.isConnected();
+  if (!connected) return;
+
+  const freq = parseInt(await db.getSetting('dropbox_sync_frequency', '0'), 10);
+  if (freq === 0) return;
+
+  updateSyncStatusIndicator('syncing');
+  try {
+    // Pull latest data silently
+    const localAssets = await db.getAll('assets');
+    const localAssetIds = new Set(localAssets.map(a => a.assetId));
+
+    const { stories, characters, newAssets } = await dropbox.pullFromDropbox({
+      localAssetIds,
+      onProgress: msg => console.log('[Dropbox StartupSync]', msg)
+    });
+
+    if (stories) {
+      for (const { assetId, blob } of newAssets) {
+        await db.saveAssetWithId(assetId, blob, blob.type);
+      }
+      await db.clearStore('stories');
+      await db.clearStore('characters');
+      for (const story of stories) await db.saveStory(story);
+      for (const char of characters) await db.saveCharacter(char);
+
+      const updatedStories = await db.getStories();
+      const updatedChars   = await db.getCharacters();
+      updateState({ stories: updatedStories, characters: updatedChars });
+
+      if (updatedStories.length > 0) {
+        updatedStories.sort((a, b) => b.timestamp - a.timestamp);
+        setActiveStory(updatedStories[0]);
+      }
+      ui.renderStoryList();
+      ui.renderCharacterLibrary();
+    }
+
+    const now = Date.now();
+    await db.saveSetting('dropbox_last_sync', now);
+    updateLastSyncText(now);
+    updateSyncStatusIndicator('success');
+  } catch (e) {
+    console.warn('[Dropbox] 起動時同期に失敗:', e);
+    updateSyncStatusIndicator('error');
+  }
+}
+
+/** Sync on tab return (visibility change) */
+function setupVisibilitySync() {
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState !== 'visible') return;
+    const connected = await dropbox.isConnected();
+    if (!connected) return;
+    const freq = parseInt(await db.getSetting('dropbox_sync_frequency', '0'), 10);
+    if (freq === 0) return;
+    // Auto-pull on tab return
+    await performStartupSync();
+  });
 }
