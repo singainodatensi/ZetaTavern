@@ -235,10 +235,9 @@ function buildThinkingConfig(modelName) {
 }
 
 /**
- * Sends messages to Gemini API.
- * Supports timeout, retries, and models that accept systemInstruction.
+ * Sends messages to Gemini API with dynamic retries, timeouts, and manual cancel support.
  */
-export async function generateStoryResponse(story, customTimeout = 90000, maxRetries = 3) {
+export async function generateStoryResponse(story) {
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   
@@ -246,9 +245,15 @@ export async function generateStoryResponse(story, customTimeout = 90000, maxRet
     throw new Error('APIキーが設定されていません。設定画面で登録してください。');
   }
 
+  // --- 設定から値を取得（なければ安全なデフォルト値を使用） ---
+  // apiTimeout は設定画面から秒単位での入力を想定（デフォルト: 60秒）
+  const timeoutSeconds = appState.apiTimeout ? parseInt(appState.apiTimeout) : 60;
+  // apiRetries は設定画面からのリトライ回数入力を想定（デフォルト: 3回）
+  const maxRetries = appState.apiRetries !== undefined ? parseInt(appState.apiRetries) : 3;
+
   const systemInstruction = await buildSystemInstruction(story);
 
-  // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
+  // Map messages to Gemini API formats
   const contents = story.messages.map(msg => ({
     role: msg.role === 'user' ? 'user' : 'model',
     parts: [{ text: msg.content }]
@@ -268,19 +273,25 @@ export async function generateStoryResponse(story, customTimeout = 90000, maxRet
     generationConfig.thinkingConfig = thinkingConfig;
   }
 
-  const payload = {
-    contents: contents,
-    systemInstruction: {
-      parts: [{ text: systemInstruction }]
-    },
-    generationConfig
-  };
+  // 1. 手動キャンセル用のメイン AbortController を作成し、Stateに登録する
+  const mainController = new AbortController();
+  updateState({ activeAbortController: mainController });
 
   let attempt = 0;
   while (attempt < maxRetries) {
     attempt++;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), customTimeout);
+    
+    // このアテンプト専用の AbortController（タイムアウト検知用）
+    const attemptController = new AbortController();
+    
+    // メインコントローラーが「手動中断」されたら、現在走っているアテンプト通信も即時停止する
+    const onMainAbort = () => attemptController.abort();
+    mainController.signal.addEventListener('abort', onMainAbort);
+
+    // 一定時間応答がない場合に停止（タイムアウト）させるタイマー
+    const timeoutId = setTimeout(() => {
+      attemptController.abort(); // タイムアウト時にこの回の通信のみをキャンセルして次のリトライに進める
+    }, timeoutSeconds * 1000);
 
     try {
       const response = await fetch(url, {
@@ -288,11 +299,18 @@ export async function generateStoryResponse(story, customTimeout = 90000, maxRet
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(payload),
-        signal: controller.signal
+        body: JSON.stringify({
+          contents: contents,
+          systemInstruction: {
+            parts: [{ text: systemInstruction }]
+          },
+          generationConfig
+        }),
+        signal: attemptController.signal
       });
 
       clearTimeout(timeoutId);
+      mainController.signal.removeEventListener('abort', onMainAbort);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -307,23 +325,33 @@ export async function generateStoryResponse(story, customTimeout = 90000, maxRet
         const finishReason = result.candidates?.[0]?.finishReason;
         throw new Error(
           `APIから有効なテキストレスポンスが得られませんでした。` +
-          (finishReason ? ` (finishReason: ${finishReason})` : '') +
-          ` 安全性フィルター等によりブロックされた可能性があります。`
+          (finishReason ? ` (finishReason: ${finishReason})` : '')
         );
       }
 
+      // 成功したら手動キャンセルStateをクリア
+      updateState({ activeAbortController: null });
       return text;
 
     } catch (err) {
       clearTimeout(timeoutId);
+      mainController.signal.removeEventListener('abort', onMainAbort);
+
+      // ★ ユーザーが「生成を停止」ボタンを押して意図的に中断した場合は、リトライせずにループを抜ける
+      if (mainController.signal.aborted) {
+        updateState({ activeAbortController: null });
+        throw new Error('ユーザーにより生成が中止されました。');
+      }
+
       console.warn(`API call attempt ${attempt} failed:`, err);
       
-      // If we used all retries or it was aborted by user, throw
-      if (attempt >= maxRetries || err.name === 'AbortError') {
+      // 全てのリトライを使い切った場合はエラーを投げる
+      if (attempt >= maxRetries) {
+        updateState({ activeAbortController: null });
         throw err;
       }
       
-      // Backoff delay before next retry
+      // 指数バックオフによる待機時間
       const delay = Math.pow(2, attempt) * 1000;
       await new Promise(r => setTimeout(r, delay));
     }
