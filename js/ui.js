@@ -640,7 +640,21 @@ export async function renderStoryList() {
   const stories = await db.getStories();
   const current = getState().currentStory;
 
-  stories.sort((a, b) => b.timestamp - a.timestamp);
+stories.sort((a, b) => b.timestamp - a.timestamp);
+
+  // --- 追加：スマホ対応アクティブストーリー設定ボタン ---
+  if (current) {
+    const settingsBtn = document.createElement('button');
+    settingsBtn.className = 'primary-btn';
+    settingsBtn.style = "width: 100%; padding: 8px; margin-bottom: 12px; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; box-sizing: border-box; border-radius: 6px;";
+    settingsBtn.innerHTML = `<span class="material-symbols-outlined" style="font-size: 18px;">settings</span>⚙️ 現在のストーリーを設定`;
+    settingsBtn.onclick = () => {
+      showStorySettingsModal();
+      // スマホドロワーが開いていれば閉じる
+      document.getElementById('mobile-drawer')?.classList.remove('open');
+    };
+    container.appendChild(settingsBtn);
+  }
 
   stories.forEach(story => {
     const el = document.createElement('div');
