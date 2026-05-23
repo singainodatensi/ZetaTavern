@@ -1261,16 +1261,6 @@ function setupVisibilitySync() {
     await performStartupSync();
   });
 }
-
-【修正点3】js/ui.js の全コード（完全版）
-
-以下の大幅なUX改善を組み込んだ、最高クラスの品質を誇る ui.js です [4.1]。
-
-  - フォントサイズの一括CSS変数管理化：CSS優先度の問題を完全に突破します [7.1]。
-  - 地の文と吹き出しのライン完全統一：スマホとPCで、吹き出しの左端位置とナレーションの開始位置が完璧に揃います [7.1]。
-  - 完全に独立した大画面アバタークロッパーダイアログの追加：画像の確認・ズーム・位置調整が驚くほど快適に、広い別画面で行えるようになります [7.1]。
-  - 地の文の配色・透明度をCSS変数に完全同期 [7.1]。
-
 /**
  * ui.js - ZetaTavern UI Rendering & DOM Events
  * Controls screen views, renders stories (novel / chat mode with per-character bubbles),
