@@ -252,7 +252,7 @@ export function isCharacterMatchingStory(char, story) {
   const charCategory = char.category || '';
   const charTags = char.tags || [];
 
-  // カテゴリー、またはキャラクター自身に登録された個別タグが、ストーリータグに含まれているか確認
+  // カテゴリー、またはキャラクター自身に登録された個別タグが, ストーリータグに含まれているか確認
   const matchCategory = storyTags.includes(charCategory);
   const matchTags = charTags.some(tag => storyTags.includes(tag));
 
@@ -308,17 +308,23 @@ export async function renderStory() {
         for (const seg of segments) {
           if (seg.type === 'narration') {
             const narEl = document.createElement('div');
-            narEl.className = 'chat-narration';
+            // ★ 通常のセリフと同じ構造にし、左側に不可視アバターを配置することでラインをセリフと完全統一
+            narEl.className = 'chat-message narration-role'; 
             let html = '';
             if (window.marked && typeof window.marked.parse === 'function') {
               html = sanitizeHTML(window.marked.parse(seg.text));
             } else {
               html = sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
             }
-            narEl.innerHTML = `<div class="narration-content">${html}</div>`;
+            narEl.innerHTML = `
+              <div class="chat-avatar" style="visibility: hidden; flex-shrink: 0;"></div>
+              <div class="chat-content-wrapper">
+                <div class="narration-content">${html}</div>
+              </div>
+            `;
             container.appendChild(narEl);
           } else if (seg.type === 'dialogue') {
-            // 話し手が「主人公」本人かどうか判定（設定された主人公名、または「主人公」という文字列に合致するか）
+            // 話し手が「主人公」本人かどうか判定
             const protagonistName = currentStory.protagonist?.name || '主人公';
             const isProtagonist = (seg.speaker === protagonistName || seg.speaker === '主人公');
 
@@ -1330,241 +1336,4 @@ export async function showStorySettingsModal() {
         <!-- 世界観の設定 -->
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
-          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="例：一般的な日常世界です。">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
-        </div>
-
-        <!-- ストーリータグの設定（追加） -->
-        <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-weight: bold; font-size: 13px;">ストーリーのタグ (カンマ区切り)</label>
-          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;" placeholder="例: 五等分の花嫁, ラブコメ">
-        </div>
-
-        <!-- 執筆ルールの設定 -->
-        <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
-          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="空欄の場合、デフォルトのチャットロールプレイ最適化ルールが適用されます。">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
-        </div>
-
-      </div>
-
-      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
-        <button id="story-settings-cancel-btn" class="secondary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">キャンセル</button>
-        <button id="story-settings-save-btn" class="primary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">設定を保存</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(modal);
-
-  // イベントリスナーの設定
-  const closeBtn = modal.querySelector('#story-settings-close-btn');
-  const cancelBtn = modal.querySelector('#story-settings-cancel-btn');
-  const saveBtn = modal.querySelector('#story-settings-save-btn');
-  const avatarInput = modal.querySelector('#story-p-avatar-input');
-  const avatarPreview = modal.querySelector('#story-p-avatar-preview');
-
-  const closeModal = () => modal.remove();
-  closeBtn.onclick = closeModal;
-  cancelBtn.onclick = closeModal;
-
-  // 主人公用のアバター画像選択時：大画面クロッパーを割り当て
-  let newAvatarBlob = null;
-  avatarInput.onchange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      showAvatarCropModal(file, (croppedBlob) => {
-        newAvatarBlob = croppedBlob;
-        avatarPreview.src = URL.createObjectURL(croppedBlob);
-      });
-    }
-  };
-
-  saveBtn.onclick = async () => {
-    const name = modal.querySelector('#story-p-name-input').value.trim();
-    const desc = modal.querySelector('#story-p-desc-input').value.trim();
-    const world = modal.querySelector('#story-world-input').value.trim();
-    const promptText = modal.querySelector('#story-prompt-input').value.trim();
-    const tagsText = modal.querySelector('#story-tags-input').value.trim();
-
-    try {
-      let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
-      if (newAvatarBlob) {
-        if (avatarAssetId) {
-          await db.deleteAsset(avatarAssetId);
-        }
-        avatarAssetId = await db.saveAsset(newAvatarBlob, 'image/jpeg');
-      }
-
-      currentStory.protagonist = {
-        name: name || '主人公',
-        description: desc,
-        avatarAssetId: avatarAssetId
-      };
-      currentStory.worldPrompt = world;
-      currentStory.storytellerPrompt = promptText;
-      
-      // カンマ区切りのテキストをパースしてタグ配列に変換して保存
-      currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
-
-      await db.saveStory(currentStory);
-      
-      // 保存完了時にState側の物語一覧データを同期する
-      const updatedStories = await db.getStories();
-      updateState({ stories: updatedStories });
-
-      closeModal();
-      
-      // UIの再レンダリング
-      renderStoryList();
-      renderSidebar();
-      renderStory();
-    } catch (err) {
-      alert(`保存に失敗しました: ${err.message}`);
-    }
-  };
-}
-
-/**
- * フォントサイズをCSS変数経由で一括変更し、上書きの競合を完全に防ぎます。
- */
-export function applyFontSize(sizeClass) {
-  let chatSize = '15px';
-  let narrationSize = '14.5px';
-  let uiSize = '13px';
-
-  if (sizeClass === 'small') {
-    chatSize = '13px';
-    narrationSize = '12.5px';
-    uiSize = '11px';
-  } else if (sizeClass === 'large') {
-    chatSize = '18px';
-    narrationSize = '17px';
-    uiSize = '15px';
-  }
-
-  const root = document.documentElement;
-  root.style.setProperty('--chat-font-size', chatSize);
-  root.style.setProperty('--narration-font-size', narrationSize);
-  root.style.setProperty('--ui-font-size', uiSize);
-}
-
-/**
- * 地の文（ナレーション）の背景色・文字色・不透明度をCSS変数に注入します。
- */
-export function applyNarrationStyles(bgColor, textColor, opacityPercent) {
-  const root = document.documentElement;
-  
-  let finalBg = bgColor || '#f3f5f8';
-  // HEX値をRGBAに変換して不透明度を反映
-  if (opacityPercent !== undefined && finalBg.startsWith('#') && finalBg.length === 7) {
-    const r = parseInt(finalBg.slice(1, 3), 16) || 243;
-    const g = parseInt(finalBg.slice(3, 5), 16) || 245;
-    const b = parseInt(finalBg.slice(5, 7), 16) || 248;
-    finalBg = `rgba(${r}, ${g}, ${b}, ${opacityPercent / 100})`;
-  }
-  
-  root.style.setProperty('--narration-bg', finalBg);
-  root.style.setProperty('--narration-text', textColor || '#323232');
-}
-
-// ────────────────────────────────────────────────────────
-// 3. 視認性・可読性・スマホ特化レイアウト調整用CSSの自動注入
-// ────────────────────────────────────────────────────────
-const styleInject = document.createElement('style');
-styleInject.textContent = `
-  /* CSS変数による一括フォント・ナレーション設定 */
-  :root {
-    --chat-font-size: 15px;
-    --narration-font-size: 14.5px;
-    --ui-font-size: 13px;
-    
-    --narration-bg: rgba(243, 245, 248, 0.8);
-    --narration-text: #323232;
-  }
-
-  /* フォントサイズ設定の強制上書き */
-  .chat-speech, .novel-block, .chat-bubble p {
-    font-size: var(--chat-font-size) !important;
-  }
-  .narration-content, .chat-narration {
-    font-size: var(--narration-font-size) !important;
-  }
-  .chat-sender-name, .novel-action-badge {
-    font-size: var(--ui-font-size) !important;
-  }
-
-  /* ナレーター（地の文）の開始ライン・横幅を「会話の吹き出し」と完全に同期 */
-  .chat-narration {
-    display: flex;
-    justify-content: flex-start;
-    width: 100%;
-    box-sizing: border-box;
-    margin: 14px 0 !important;
-  }
-  
-  .narration-content {
-    /* 吹き出しのテキスト左端ライン（アバター50px + 隙間12px = 62px）に完全に揃えます */
-    padding-left: 62px !important;
-    padding-right: 16px !important;
-    padding-top: 8px !important;
-    padding-bottom: 8px !important;
-    width: 100%;
-    max-width: 82% !important; /* 吹き出しと同じ最大幅に制限 */
-    box-sizing: border-box !important;
-    line-height: 1.75 !important;
-    letter-spacing: 0.03em !important;
-    color: var(--narration-text) !important;
-    background-color: var(--narration-bg) !important;
-    border-left: 4px solid var(--primary-color, #4a90e2) !important;
-    border-radius: 4px;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.01);
-  }
-  
-  .narration-content p {
-    margin: 0 !important;
-  }
-
-  /* セリフ吹き出し内の行間・可読性も調整 */
-  .chat-bubble p {
-    line-height: 1.65 !important;
-    margin-bottom: 8px !important;
-  }
-  .chat-bubble p:last-child {
-    margin-bottom: 0 !important;
-  }
-
-  /* スマートフォン専用：可読性マージン調整 & ナレーター余白ラインをモバイルアバター幅に同期 */
-  @media (max-width: 1023px) {
-    #story-viewport {
-      padding: 12px 8px !important;
-    }
-    .chat-message {
-      margin-bottom: 14px !important;
-      gap: 8px !important;
-    }
-    .chat-avatar {
-      width: 40px !important;
-      height: 40px !important;
-    }
-    .chat-bubble {
-      padding: 10px 12px !important;
-      max-width: 82% !important;
-    }
-    .narration-content {
-      /* モバイルでのアバター幅(40px) + 隙間(8px) = 48px に同期して左端を会話と一直線にします */
-      padding-left: 48px !important;
-      max-width: 95% !important;
-      font-size: 0.95em !important;
-    }
-  }
-
-  /* ダークモード時のナレーター可読性補正 */
-  @media (prefers-color-scheme: dark) {
-    .chat-narration {
-      color: rgba(225, 228, 232, 0.95) !important;
-      background-color: rgba(30, 34, 42, 0.7) !important;
-      border-left: 4px solid var(--primary-light, #64b5f6) !important;
-    }
-  }
-`;
-document.head.appendChild(styleInject);
+          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="例：一般的な日常世界です。">${escapeHTML(currentStory.worldPrompt || '')}</textarea
