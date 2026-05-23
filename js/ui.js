@@ -1428,7 +1428,7 @@ styleInject.textContent = `
     margin-bottom: 0 !important;
   }
 
-  @media (min-width: 1024px) {
+ @media (min-width: 1024px) {
     .timeline-container {
       max-width: 800px !important;
       margin: 0 auto !important;
@@ -1439,9 +1439,9 @@ styleInject.textContent = `
     }
     
     #story-viewport {
-      border-left: 1px solid var(--border-color, #eee) !important;
-      border-right: 1px solid var(--border-color, #eee) !important;
-      background-color: var(--bg-viewport, #fafafa) !important;
+      /* 背景色の強制上書きを削除し、元の黒（テーマ色）に戻します */
+      border-left: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important;
+      border-right: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important;
     }
   }
 
