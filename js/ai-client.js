@@ -299,7 +299,7 @@ export async function generateStoryResponse(story) {
       attemptController.abort();
     }, timeoutSeconds * 1000);
 
-    try {
+try {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
