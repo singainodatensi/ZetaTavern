@@ -396,58 +396,32 @@ export async function renderStory() {
     }
   }
 
-  // If loading indicator is active
-  if (isGenerating) {
-    const loader = document.createElement('div');
-    loader.className = 'story-loader';
-    loader.innerHTML = `
-      <div class="typing-indicator">
-        <span></span><span></span><span></span>
-      </div>
-      <p class="loader-text">ストーリーを紡いでいます...</p>
-    `;
-    container.appendChild(loader);
-  }
+ // If loading indicator is active
+if (isGenerating) {
+  const loader = document.createElement('div');
+  loader.className = 'story-loader';
+  loader.style = "display: flex; flex-direction: column; align-items: center; gap: 8px;";
+  loader.innerHTML = `
+    <div class="typing-indicator">
+      <span></span><span></span><span></span>
+    </div>
+    <p class="loader-text">ストーリーを紡いでいます...</p>
+    <button id="cancel-generation-btn" class="secondary-btn" style="padding: 4px 12px; font-size: 12px; cursor: pointer; border-radius: 4px; margin-top: 4px;">
+      生成を停止する
+    </button>
+  `;
+  container.appendChild(loader);
 
-  // Scroll to bottom
-  container.scrollTop = container.scrollHeight;
-
-  // Render parsed choices at the bottom if enabled and available
-  renderChoiceButtons(parsedLast.choices);
-}
-
-/**
- * Renders the parsed choices as interactive buttons.
- */
-function renderChoiceButtons(choices) {
-  const choicesContainer = document.getElementById('choices-container');
-  if (!choicesContainer) return;
-
-  choicesContainer.innerHTML = '';
-  
-  const { showChoices, isGenerating } = getState();
-  
-  if (!showChoices || choices.length === 0 || isGenerating) {
-    choicesContainer.classList.add('hidden');
-    return;
-  }
-
-  choicesContainer.classList.remove('hidden');
-
-  choices.forEach(choice => {
-    const btn = document.createElement('button');
-    btn.className = 'choice-btn';
-    btn.innerHTML = `
-      <span class="choice-label">${choice.label}</span>
-      <span class="choice-text">${choice.text}</span>
-    `;
-    btn.onclick = () => {
-      // Auto-submit the choice
-      const textToSend = `${choice.label}. ${choice.text}`;
-      window.dispatchEvent(new CustomEvent('submitUserAction', { detail: textToSend }));
+  // 停止ボタンのクリックイベントを結びつける
+  const cancelBtn = loader.querySelector('#cancel-generation-btn');
+  if (cancelBtn) {
+    cancelBtn.onclick = () => {
+      const { activeAbortController } = getState();
+      if (activeAbortController) {
+        activeAbortController.abort(); // メインのコントローラーを中断させる
+      }
     };
-    choicesContainer.appendChild(btn);
-  });
+  }
 }
 
 /**
