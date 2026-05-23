@@ -3,7 +3,7 @@
  * Constructs character-aware dynamic prompts and manages Gemini API calls with retries & timeouts.
  */
 
-import { getState } from './state.js';
+import { getState, updateState } from './state.js'; // ★ updateState のインポートを追加
 import { getCharacter } from './db.js';
 
 /**
@@ -22,7 +22,7 @@ export async function buildSystemInstruction(story) {
   instruction += `あなたは卓越したストーリーテラー（語り手・ゲームマスター）です。\n`;
   instruction += `以下の【執筆ルール】、【世界観設定】、および登録された【登場人物】や【シーン状況】に従い、プレイヤー（主人公）の行動に対する物語の展開を描写してください。\n\n`;
 
-instruction += `【出力形式（厳守・最優先）】\n`;
+  instruction += `【出力形式（厳守・最優先）】\n`;
   instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。英語は一切使わない。\n`;
   instruction += `- 思考過程・執筆メモ・分析・計画・User input・Context・Goal・Setting・Drafting・Let's などの**メタ記述は出力しない**（頭の中で考えてよいが、画面には出さない）。\n`;
   instruction += `- 「承知しました」「了解」「I understand」などの前置き応答も禁止。\n`;
@@ -40,6 +40,16 @@ instruction += `【出力形式（厳守・最優先）】\n`;
   instruction += `   セリフ以外のすべての描写は、必ず独立した行とし、その行全体をアスタリスク（*）で囲んで記述してください。アスタリスク行の中に「」を含めてはいけません。\n`;
   instruction += `   （例: \`*全力で駆け寄ってくる*\`）\n`;
   instruction += `   （例: \`*放課後の教室。夕日が窓から差し込んでいる。*\`）\n\n`;
+
+  // デフォルトのチャットロールプレイ最適化執筆ルール
+  const defaultStorytellerPrompt = 
+    `・三人称主人公視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
+    `・「語るな、見せろ（Show, don't tell）」を厳守してください。キャラクターの感情を「嬉しい」「怒る」などと地の文で直接説明せず、声のトーン、視線、間（ま）、仕草、セリフの選び方で生き生きと表現してください。\n` +
+    `・各登場人物は、主人公や他のキャラクターの話し方に影響（汚染・伝染）されず、固有の一人称・二人称・敬語レベル・語尾を厳格に維持して発言させてください。\n` +
+    `・一度の出力で事態を勝手に解決・完結させず、主人公（ユーザー）が次のターンで介入（発言や行動の選択）できる明確な「判断の余白」を残した時点で物語の記述を終了してください。`;
+
+  instruction += `【執筆ルール】\n`;
+  instruction += `${storytellerPrompt || defaultStorytellerPrompt}\n\n`;
 
   if (showChoices) {
     instruction += `【選択肢の提示ルール】\n`;
@@ -198,7 +208,6 @@ export function extractStoryTextFromApiResponse(result) {
   if (!parts?.length) return null;
 
   const storyChunks = [];
-  const leakedChunks = [];
 
   for (const part of parts) {
     const t = part?.text;
@@ -235,7 +244,8 @@ function buildThinkingConfig(modelName) {
 }
 
 /**
- * Sends messages to Gemini API with dynamic retries, timeouts, and manual cancel support.
+ * Sends messages to Gemini API.
+ * Supports timeout, retries, and manual stop.
  */
 export async function generateStoryResponse(story) {
   const appState = getState();
@@ -246,14 +256,12 @@ export async function generateStoryResponse(story) {
   }
 
   // --- 設定から値を取得（なければ安全なデフォルト値を使用） ---
-  // apiTimeout は設定画面から秒単位での入力を想定（デフォルト: 60秒）
   const timeoutSeconds = appState.apiTimeout ? parseInt(appState.apiTimeout) : 60;
-  // apiRetries は設定画面からのリトライ回数入力を想定（デフォルト: 3回）
   const maxRetries = appState.apiRetries !== undefined ? parseInt(appState.apiRetries) : 3;
 
   const systemInstruction = await buildSystemInstruction(story);
 
-  // Map messages to Gemini API formats
+  // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
   const contents = story.messages.map(msg => ({
     role: msg.role === 'user' ? 'user' : 'model',
     parts: [{ text: msg.content }]
@@ -273,7 +281,7 @@ export async function generateStoryResponse(story) {
     generationConfig.thinkingConfig = thinkingConfig;
   }
 
-  // 1. 手動キャンセル用のメイン AbortController を作成し、Stateに登録する
+  // 手動キャンセル用のメイン AbortController
   const mainController = new AbortController();
   updateState({ activeAbortController: mainController });
 
@@ -281,137 +289,5 @@ export async function generateStoryResponse(story) {
   while (attempt < maxRetries) {
     attempt++;
     
-    // このアテンプト専用の AbortController（タイムアウト検知用）
-    const attemptController = new AbortController();
-    
-    // メインコントローラーが「手動中断」されたら、現在走っているアテンプト通信も即時停止する
-    const onMainAbort = () => attemptController.abort();
-    mainController.signal.addEventListener('abort', onMainAbort);
-
-    // 一定時間応答がない場合に停止（タイムアウト）させるタイマー
-    const timeoutId = setTimeout(() => {
-      attemptController.abort(); // タイムアウト時にこの回の通信のみをキャンセルして次のリトライに進める
-    }, timeoutSeconds * 1000);
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          contents: contents,
-          systemInstruction: {
-            parts: [{ text: systemInstruction }]
-          },
-          generationConfig
-        }),
-        signal: attemptController.signal
-      });
-
-      clearTimeout(timeoutId);
-      mainController.signal.removeEventListener('abort', onMainAbort);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
-        throw new Error(`Gemini API Error: ${errMsg}`);
-      }
-
-      const result = await response.json();
-      const text = extractStoryTextFromApiResponse(result);
-
-      if (!text) {
-        const finishReason = result.candidates?.[0]?.finishReason;
-        throw new Error(
-          `APIから有効なテキストレスポンスが得られませんでした。` +
-          (finishReason ? ` (finishReason: ${finishReason})` : '')
-        );
-      }
-
-      // 成功したら手動キャンセルStateをクリア
-      updateState({ activeAbortController: null });
-      return text;
-
-    } catch (err) {
-      clearTimeout(timeoutId);
-      mainController.signal.removeEventListener('abort', onMainAbort);
-
-      // ★ ユーザーが「生成を停止」ボタンを押して意図的に中断した場合は、リトライせずにループを抜ける
-      if (mainController.signal.aborted) {
-        updateState({ activeAbortController: null });
-        throw new Error('ユーザーにより生成が中止されました。');
-      }
-
-      console.warn(`API call attempt ${attempt} failed:`, err);
-      
-      // 全てのリトライを使い切った場合はエラーを投げる
-      if (attempt >= maxRetries) {
-        updateState({ activeAbortController: null });
-        throw err;
-      }
-      
-      // 指数バックオフによる待機時間
-      const delay = Math.pow(2, attempt) * 1000;
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-}
-
-/**
- * Fallback to read API key from localStorage if not in memory state.
- */
-async function getApiKeyFromStorage() {
-  // Directly reading from localStorage is appropriate for basic initialization
-  return localStorage.getItem('zetatavern_api_key') || '';
-}
-/**
- * AIから返ってきたフォーマット済みテキストを、チャットUI用の個別ブロック（セリフ、動作描写、その他）に分解します。
- */
-export function parseStoryToChatBlocks(content, protagonistName = '主人公') {
-  if (!content) return [];
-
-  const lines = content.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-  const blocks = [];
-
-  for (const line of lines) {
-    // 選択肢ブロックや境界線の行（► A. / A. / ─── など）は除外またはスルー
-    if (line.startsWith('►') || line.startsWith('A.') || line.startsWith('B.') || line.startsWith('C.')) {
-      continue;
-    }
-    if (line.includes('───') || line.includes('───')) {
-      continue;
-    }
-
-    // 1. 動作・情景描写の判定: *全力で駆け寄る*
-    if (line.startsWith('*') && line.endsWith('*')) {
-      blocks.push({
-        type: 'action',
-        content: line.slice(1, -1).trim() // アスタリスクを取り除く
-      });
-      continue;
-    }
-
-    // 2. セリフの判定: [中野四葉] 「おはようございまーす！」
-    const dialogueMatch = line.match(/^\[([^\]]+)\]\s*「([^」]+)」/);
-    if (dialogueMatch) {
-      const speaker = dialogueMatch[1].trim();
-      const text = dialogueMatch[2].trim();
-      blocks.push({
-        type: 'dialogue',
-        speaker: speaker,
-        isProtagonist: speaker === protagonistName,
-        content: text
-      });
-      continue;
-    }
-
-    // 3. 例外（AIがフォーマットを誤って出力した素のテキストなど）の救済
-    blocks.push({
-      type: 'narration',
-      content: line
-    });
-  }
-
-  return blocks;
-}
+    // このアテンプト専用の AbortController
+    const attemptController
