@@ -256,7 +256,26 @@
                 </label>
               </div>
             </div>
-
+<!-- 追加：地の文（ナレーション）表示設定 -->
+            <div class="settings-card">
+              <h3>地の文（ナレーション）表示設定</h3>
+              <p class="settings-note">
+                <span class="material-symbols-outlined">info</span>
+                チャット画面に表示される地の文（ナレーション）の背景色と文字色、透明度を自分好みに調整できます。
+              </p>
+              <div class="form-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <label for="narration-bg-input">背景のベース色</label>
+                <input type="color" id="narration-bg-input" value="#f3f5f8" style="padding: 0; width: 45px; height: 30px; border: none; cursor: pointer; border-radius: 4px;">
+              </div>
+              <div class="form-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <label for="narration-color-input">文字のベース色</label>
+                <input type="color" id="narration-color-input" value="#323232" style="padding: 0; width: 45px; height: 30px; border: none; cursor: pointer; border-radius: 4px;">
+              </div>
+              <div class="form-group">
+                <label for="narration-opacity-slider">背景の不透明度</label>
+                <input type="range" id="narration-opacity-slider" min="0" max="100" value="80" style="width: 100%; cursor: pointer;">
+              </div>
+            </div>
             <div class="settings-card" id="dropbox-settings-card">
               <h3>
                 <span class="material-symbols-outlined">cloud_sync</span>
