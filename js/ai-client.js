@@ -290,4 +290,75 @@ export async function generateStoryResponse(story) {
     attempt++;
     
     // このアテンプト専用の AbortController
-    const attemptController
+    const attemptController = new AbortController();
+    
+    const onMainAbort = () => attemptController.abort();
+    mainController.signal.addEventListener('abort', onMainAbort);
+
+    const timeoutId = setTimeout(() => {
+      attemptController.abort();
+    }, timeoutSeconds * 1000);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          contents: contents,
+          systemInstruction: {
+            parts: [{ text: systemInstruction }]
+          },
+          generationConfig
+        }),
+        signal: attemptController.signal
+      });
+
+      clearTimeout(timeoutId);
+      mainController.signal.removeEventListener('abort', onMainAbort);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
+        throw new Error(`Gemini API Error: ${errMsg}`);
+      }
+
+      const result = await response.json();
+      const text = extractStoryTextFromApiResponse(result);
+
+      if (!text) {
+        throw new Error('有効なテキストが得られませんでした。');
+      }
+
+      updateState({ activeAbortController: null });
+      return text;
+
+    } catch (err) {
+      clearTimeout(timeoutId);
+      mainController.signal.removeEventListener('abort', onMainAbort);
+
+      if (mainController.signal.aborted) {
+        updateState({ activeAbortController: null });
+        throw new Error('ユーザーにより生成が中止されました。');
+      }
+
+      console.warn(`API call attempt ${attempt} failed:`, err);
+      
+      if (attempt >= maxRetries) {
+        updateState({ activeAbortController: null });
+        throw err;
+      }
+      
+      const delay = Math.pow(2, attempt) * 1000;
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+/**
+ * Fallback to read API key from localStorage if not in memory state.
+ */
+async function getApiKeyFromStorage() {
+  return localStorage.getItem('zetatavern_api_key') || '';
+}
