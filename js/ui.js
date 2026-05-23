@@ -955,7 +955,141 @@ async function exportCharacterJSON(char) {
     alert(`エクスポートに失敗しました: ${err.message}`);
   }
 }
+/**
+ * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト）の編集モーダルを動的に生成・表示します。
+ */
+export async function showStorySettingsModal() {
+  const { currentStory } = getState();
+  if (!currentStory) return;
 
+  // 重複防止のため、既存のモーダルがあれば削除
+  let modal = document.getElementById('story-settings-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'story-settings-modal';
+  
+  const pAvatarUrl = await getAvatarUrl(currentStory.protagonist?.avatarAssetId);
+
+  // CSSを追加せずにスタイルを完全保証するため、インラインスタイルを適用しています
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.5)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '3000';
+
+  modal.innerHTML = `
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #333); width: 90%; max-width: 550px; max-height: 85vh; border-radius: 8px; padding: 20px; display: flex; flex-direction: column; box-shadow: 0 4px 20px rgba(0,0,0,0.15); overflow: hidden;">
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color, #eee); padding-bottom: 10px; margin-bottom: 16px;">
+        <h3 style="margin: 0;">ストーリー設定</h3>
+        <button id="story-settings-close-btn" style="background: none; border: none; font-size: 24px; cursor: pointer; color: inherit;">&times;</button>
+      </div>
+      
+      <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 4px;">
+        
+        <!-- 主人公の設定 -->
+        <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px;">
+          <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">主人公設定</legend>
+          <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
+            <div style="text-align: center;">
+              <img id="story-p-avatar-preview" src="${pAvatarUrl}" style="width: 70px; height: 70px; border-radius: 50%; object-fit: cover; border: 2px solid var(--primary-color, #4a90e2); display: block; margin-bottom: 4px;" alt="Avatar">
+              <label for="story-p-avatar-input" style="font-size: 11px; cursor: pointer; color: var(--primary-color, #4a90e2); text-decoration: underline;">画像を変更</label>
+              <input type="file" id="story-p-avatar-input" accept="image/*" style="display: none;">
+            </div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+              <label style="font-size: 11px; font-weight: bold;">名前</label>
+              <input type="text" id="story-p-name-input" value="${escapeHTML(currentStory.protagonist?.name || '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+            </div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <label style="font-size: 11px; font-weight: bold;">詳細・性格・容姿</label>
+            <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
+          </div>
+        </fieldset>
+
+        <!-- 世界観の設定 -->
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
+          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="例：一般的な日常世界です。">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
+        </div>
+
+        <!-- 執筆ルールの設定 -->
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
+          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="空欄の場合、デフォルトのチャットロールプレイ最適化ルールが適用されます。">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
+        </div>
+
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
+        <button id="story-settings-cancel-btn" class="secondary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">キャンセル</button>
+        <button id="story-settings-save-btn" class="primary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">設定を保存</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  // イベントリスナーの設定
+  const closeBtn = modal.querySelector('#story-settings-close-btn');
+  const cancelBtn = modal.querySelector('#story-settings-cancel-btn');
+  const saveBtn = modal.querySelector('#story-settings-save-btn');
+  const avatarInput = modal.querySelector('#story-p-avatar-input');
+  const avatarPreview = modal.querySelector('#story-p-avatar-preview');
+
+  const closeModal = () => modal.remove();
+  closeBtn.onclick = closeModal;
+  cancelBtn.onclick = closeModal;
+
+  let newAvatarBlob = null;
+  avatarInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      newAvatarBlob = file;
+      avatarPreview.src = URL.createObjectURL(file);
+    }
+  };
+
+  saveBtn.onclick = async () => {
+    const name = modal.querySelector('#story-p-name-input').value.trim();
+    const desc = modal.querySelector('#story-p-desc-input').value.trim();
+    const world = modal.querySelector('#story-world-input').value.trim();
+    const promptText = modal.querySelector('#story-prompt-input').value.trim();
+
+    try {
+      let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
+      if (newAvatarBlob) {
+        if (avatarAssetId) {
+          await db.deleteAsset(avatarAssetId);
+        }
+        avatarAssetId = await db.saveAsset(newAvatarBlob, newAvatarBlob.type);
+      }
+
+      currentStory.protagonist = {
+        name: name || '主人公',
+        description: desc,
+        avatarAssetId: avatarAssetId
+      };
+      currentStory.worldPrompt = world;
+      currentStory.storytellerPrompt = promptText;
+
+      await db.saveStory(currentStory);
+      closeModal();
+      
+      // UIの再レンダリング
+      renderStoryList();
+      renderSidebar();
+      renderStory();
+    } catch (err) {
+      alert(`保存に失敗しました: ${err.message}`);
+    }
+  };
+}
 /**
  * Handles character importing from JSON
  */
