@@ -86,8 +86,6 @@ export function parseChoices(text) {
  * Segment types:
  *   { type: 'narration', text: '...' }
  *   { type: 'dialogue', speaker: '中野四葉', lines: [ { kind: 'speech'|'action', text } ] }
- *
- * 厳密な [キャラクター名] 記法と、従来のヒューリスティック判定の双方に対応したハイブリッドパーサー。
  */
 export function parseModelOutputToSegments(text) {
   if (!text) return [{ type: 'narration', text: '' }];
@@ -128,7 +126,7 @@ export function parseModelOutputToSegments(text) {
       const speaker = structuredDialogueMatch[1].trim();
       const dialogueText = structuredDialogueMatch[2].trim();
 
-      // ナレーターやシステム用の出力は、吹き出し無しの地の文（narration）として扱う
+      // ナレーター、システム、背景、ナレーション用のセリフブロックは、吹き出し無しの地の文（narration）として扱う
       if (speaker === 'ナレーター' || speaker === 'システム' || speaker === '背景' || speaker === 'ナレーション') {
         segments.push({ type: 'narration', text: dialogueText });
         continue;
@@ -139,7 +137,7 @@ export function parseModelOutputToSegments(text) {
         speaker: speaker,
         lines: [{ kind: 'speech', text: dialogueText }]
       };
-      flushDialogue(); // 1セリフごとに単一の吹き出しとして完結させる
+      flushDialogue(); // 1セリフごとに単一の吹き出しとして即座に完結させます
       continue;
     }
 
@@ -150,11 +148,11 @@ export function parseModelOutputToSegments(text) {
     if (isAction) {
       const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '').trim();
       
-      // 直前が会話であれば、その会話ブロックの中の「動作」として追加する
+      // 直前が会話中であれば、その会話ブロックの中の「動作」としてぶら下げる
       if (currentDialogue) {
         currentDialogue.lines.push({ kind: 'action', text: actionText });
       } else {
-        // そうでなければ単体の動作ナレーションとして書き出す
+        // そうでなければ独立した動作・ナレーション
         flushNarration();
         segments.push({ type: 'narration', text: `*${actionText}*` });
       }
@@ -162,7 +160,7 @@ export function parseModelOutputToSegments(text) {
     }
 
     // ────────────────────────────────────────────────────────
-    // ルール C: 旧ヒューリスティック判定（過去のログ表示や、AIの出力微ブレ時のフォールバック用）
+    // ルール C: 旧ヒューリスティック判定（後方互換用）
     // ────────────────────────────────────────────────────────
     const inlineDialogueMatch = trimmed.match(/^(.+?)「(.+)$/);
     const startsWithQuote = trimmed.startsWith('「');
@@ -212,7 +210,7 @@ export function parseModelOutputToSegments(text) {
       flushDialogue();
     }
 
-    // いずれにも当てはまらない場合はナレーション（地の文）
+    // デフォルト：地の文
     narrationBuffer.push(line);
   }
 
@@ -301,16 +299,16 @@ export async function renderStory() {
             }
             narEl.innerHTML = `<div class="narration-content">${html}</div>`;
             container.appendChild(narEl);
-        } else if (seg.type === 'dialogue') {
+          } else if (seg.type === 'dialogue') {
             // 話し手が「主人公」本人かどうか判定（設定された主人公名、または「主人公」という文字列に合致するか）
             const protagonistName = currentStory.protagonist?.name || '主人公';
             const isProtagonist = (seg.speaker === protagonistName || seg.speaker === '主人公');
 
             let avatarUrl = 'assets/default-silhouette.png';
-            let roleClass = 'bot-role'; // デフォルトは左側（他キャラクター）
+            let roleClass = 'bot-role'; // デフォルト：左側
 
             if (isProtagonist) {
-              roleClass = 'user-role'; // 主人公であれば右側に配置
+              roleClass = 'user-role'; // 右側配置
               avatarUrl = await getAvatarUrl(currentStory.protagonist?.avatarAssetId);
             } else {
               const charMatch = matchCharacterByName(seg.speaker, characters);
@@ -396,32 +394,73 @@ export async function renderStory() {
     }
   }
 
- // If loading indicator is active
-if (isGenerating) {
-  const loader = document.createElement('div');
-  loader.className = 'story-loader';
-  loader.style = "display: flex; flex-direction: column; align-items: center; gap: 8px;";
-  loader.innerHTML = `
-    <div class="typing-indicator">
-      <span></span><span></span><span></span>
-    </div>
-    <p class="loader-text">ストーリーを紡いでいます...</p>
-    <button id="cancel-generation-btn" class="secondary-btn" style="padding: 4px 12px; font-size: 12px; cursor: pointer; border-radius: 4px; margin-top: 4px;">
-      生成を停止する
-    </button>
-  `;
-  container.appendChild(loader);
+  // If loading indicator is active
+  if (isGenerating) {
+    const loader = document.createElement('div');
+    loader.className = 'story-loader';
+    loader.style = "display: flex; flex-direction: column; align-items: center; gap: 8px;";
+    loader.innerHTML = `
+      <div class="typing-indicator">
+        <span></span><span></span><span></span>
+      </div>
+      <p class="loader-text">ストーリーを紡いでいます...</p>
+      <button id="cancel-generation-btn" class="secondary-btn" style="padding: 4px 12px; font-size: 12px; cursor: pointer; border-radius: 4px; margin-top: 4px;">
+        生成を停止する
+      </button>
+    `;
+    container.appendChild(loader);
 
-  // 停止ボタンのクリックイベントを結びつける
-  const cancelBtn = loader.querySelector('#cancel-generation-btn');
-  if (cancelBtn) {
-    cancelBtn.onclick = () => {
-      const { activeAbortController } = getState();
-      if (activeAbortController) {
-        activeAbortController.abort(); // メインのコントローラーを中断させる
-      }
-    };
+    // 停止ボタンのクリックイベントを設定
+    const cancelBtn = loader.querySelector('#cancel-generation-btn');
+    if (cancelBtn) {
+      cancelBtn.onclick = () => {
+        const { activeAbortController } = getState();
+        if (activeAbortController) {
+          activeAbortController.abort(); // 生成処理を中断
+        }
+      };
+    }
   }
+
+  // Scroll to bottom
+  container.scrollTop = container.scrollHeight;
+
+  // Render parsed choices at the bottom if enabled and available
+  renderChoiceButtons(parsedLast.choices);
+}
+
+/**
+ * Renders the parsed choices as interactive buttons.
+ */
+function renderChoiceButtons(choices) {
+  const choicesContainer = document.getElementById('choices-container');
+  if (!choicesContainer) return;
+
+  choicesContainer.innerHTML = '';
+  
+  const { showChoices, isGenerating } = getState();
+  
+  if (!showChoices || choices.length === 0 || isGenerating) {
+    choicesContainer.classList.add('hidden');
+    return;
+  }
+
+  choicesContainer.classList.remove('hidden');
+
+  choices.forEach(choice => {
+    const btn = document.createElement('button');
+    btn.className = 'choice-btn';
+    btn.innerHTML = `
+      <span class="choice-label">${choice.label}</span>
+      <span class="choice-text">${choice.text}</span>
+    `;
+    btn.onclick = () => {
+      // Auto-submit the choice
+      const textToSend = `${choice.label}. ${choice.text}`;
+      window.dispatchEvent(new CustomEvent('submitUserAction', { detail: textToSend }));
+    };
+    choicesContainer.appendChild(btn);
+  });
 }
 
 /**
@@ -442,7 +481,7 @@ export async function renderSidebar() {
   const characters = await db.getCharacters();
 
   let html = `
- <!-- Protagonist Profile Card -->
+    <!-- Protagonist Profile Card -->
     <div class="sidebar-section">
       <h4>主人公プロファイル</h4>
       <div class="sidebar-protagonist-card" style="cursor: pointer; transition: opacity 0.2s;" title="設定を編集" onmouseover="this.style.opacity=0.8" onmouseout="this.style.opacity=1">
@@ -548,18 +587,22 @@ function bindSidebarEvents() {
   const { currentStory } = getState();
   if (!currentStory) return;
 
-  const saveStateChanges = () => { ... };
+  const saveStateChanges = () => {
+    db.saveStory(currentStory).then(() => {
+      // Notify other modules of change if needed, but avoid full re-render of sidebar during active typing
+      window.dispatchEvent(new CustomEvent('storyDataUpdated'));
+    });
+  };
 
-  // --- 追加：主人公カードクリック時に設定モーダルを起動 ---
+  // --- 主人公カードクリック時に設定モーダルを起動 ---
   const pCard = document.querySelector('.sidebar-protagonist-card');
   if (pCard) {
     pCard.onclick = () => {
       showStorySettingsModal();
     };
   }
-  // ------------------------------------------------------
 
-  // 1. Scene State changes ...
+  // 1. Scene State changes
   const locInput = document.getElementById('scene-location-input');
   const timeInput = document.getElementById('scene-time-input');
   const atmosInput = document.getElementById('scene-atmosphere-input');
@@ -644,7 +687,7 @@ export async function renderStoryList() {
   const stories = await db.getStories();
   const current = getState().currentStory;
 
-stories.sort((a, b) => b.timestamp - a.timestamp);
+  stories.sort((a, b) => b.timestamp - a.timestamp);
 
   // --- 追加：スマホ対応アクティブストーリー設定ボタン ---
   if (current) {
@@ -654,7 +697,6 @@ stories.sort((a, b) => b.timestamp - a.timestamp);
     settingsBtn.innerHTML = `<span class="material-symbols-outlined" style="font-size: 18px;">settings</span>⚙️ 現在のストーリーを設定`;
     settingsBtn.onclick = () => {
       showStorySettingsModal();
-      // スマホドロワーが開いていれば閉じる
       document.getElementById('mobile-drawer')?.classList.remove('open');
     };
     container.appendChild(settingsBtn);
@@ -664,7 +706,7 @@ stories.sort((a, b) => b.timestamp - a.timestamp);
     const el = document.createElement('div');
     el.className = `story-list-item ${current && current.storyId === story.storyId ? 'active' : ''}`;
     
-    // レイアウト崩れを防ぐため、テキストとアクション(編集・削除)をflexコンテナでグループ化します
+    // レイアウト崩れを防ぐため、テキストとアクション(編集・削除)をflexコンテナでグループ化
     el.innerHTML = `
       <div class="story-item-text" style="flex: 1; min-width: 0;">
         <span class="story-item-title">${escapeHTML(story.title || '無題のストーリー')}</span>
@@ -681,16 +723,15 @@ stories.sort((a, b) => b.timestamp - a.timestamp);
     `;
     
     el.onclick = (e) => {
-      // 1. 名前変更ボタンがクリックされた場合の処理
+      // 名前変更
       if (e.target.closest('.rename-story-btn')) {
-        e.stopPropagation(); // 親要素のストーリー切り替えイベントを発火させない
+        e.stopPropagation();
         const oldTitle = story.title || '新しいストーリー';
         const newTitle = prompt('ストーリーの名前を変更:', oldTitle);
         
         if (newTitle !== null && newTitle.trim() !== '') {
           story.title = newTitle.trim();
           db.saveStory(story).then(() => {
-            // もし名前を変更したストーリーが「現在のアクティブなストーリー」なら状態も更新する
             if (current && current.storyId === story.storyId) {
               setActiveStory(story);
             }
@@ -700,7 +741,7 @@ stories.sort((a, b) => b.timestamp - a.timestamp);
         return;
       }
 
-      // 2. 削除ボタンがクリックされた場合の処理
+      // 削除
       if (e.target.closest('.delete-story-btn')) {
         e.stopPropagation();
         if (confirm(`ストーリー「${story.title}」を削除しますか？`)) {
@@ -714,7 +755,6 @@ stories.sort((a, b) => b.timestamp - a.timestamp);
         return;
       }
       
-      // 3. 通常のストーリー選択処理
       setActiveStory(story);
       renderStoryList();
       // Close mobile drawer if open
@@ -973,6 +1013,43 @@ async function exportCharacterJSON(char) {
     alert(`エクスポートに失敗しました: ${err.message}`);
   }
 }
+
+/**
+ * Handles character importing from JSON
+ */
+export async function importCharacterJSON(file) {
+  try {
+    const text = await file.text();
+    const importObj = JSON.parse(text);
+
+    if (importObj.spec !== 'zetatavern-character') {
+      throw new Error('サポートされていないファイル形式です。(ZetaTavernキャラクターJSONではありません)');
+    }
+
+    let avatarAssetId = '';
+    if (importObj.avatarBase64) {
+      const blob = db.base64ToBlob(importObj.avatarBase64);
+      avatarAssetId = await db.saveAsset(blob, blob.type);
+    }
+
+    const charData = {
+      name: importObj.name,
+      category: importObj.category || '',
+      description: importObj.description,
+      personality: importObj.personality,
+      mes_example: importObj.mes_example,
+      avatarAssetId: avatarAssetId
+    };
+
+    await db.saveCharacter(charData);
+    renderCharacterLibrary();
+    renderSidebar();
+    alert(`キャラクター「${charData.name}」を取り込みました。`);
+  } catch (err) {
+    alert(`取り込みに失敗しました: ${err.message}`);
+  }
+}
+
 /**
  * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト）の編集モーダルを動的に生成・表示します。
  */
@@ -989,7 +1066,7 @@ export async function showStorySettingsModal() {
   
   const pAvatarUrl = await getAvatarUrl(currentStory.protagonist?.avatarAssetId);
 
-  // CSSを追加せずにスタイルを完全保証するため、インラインスタイルを適用しています
+  // CSSを追加せずにスタイルを完全保証するため、インラインスタイルを適用
   modal.style.position = 'fixed';
   modal.style.top = '0';
   modal.style.left = '0';
@@ -1107,39 +1184,4 @@ export async function showStorySettingsModal() {
       alert(`保存に失敗しました: ${err.message}`);
     }
   };
-}
-/**
- * Handles character importing from JSON
- */
-export async function importCharacterJSON(file) {
-  try {
-    const text = await file.text();
-    const importObj = JSON.parse(text);
-
-    if (importObj.spec !== 'zetatavern-character') {
-      throw new Error('サポートされていないファイル形式です。(ZetaTavernキャラクターJSONではありません)');
-    }
-
-    let avatarAssetId = '';
-    if (importObj.avatarBase64) {
-      const blob = db.base64ToBlob(importObj.avatarBase64);
-      avatarAssetId = await db.saveAsset(blob, blob.type);
-    }
-
-    const charData = {
-      name: importObj.name,
-      category: importObj.category || '',
-      description: importObj.description,
-      personality: importObj.personality,
-      mes_example: importObj.mes_example,
-      avatarAssetId: avatarAssetId
-    };
-
-    await db.saveCharacter(charData);
-    renderCharacterLibrary();
-    renderSidebar();
-    alert(`キャラクター「${charData.name}」を取り込みました。`);
-  } catch (err) {
-    alert(`取り込みに失敗しました: ${err.message}`);
-  }
 }
