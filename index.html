@@ -211,10 +211,12 @@
                   <option value="gemini">Google Gemini API (推奨)</option>
                 </select>
               </div>
-<div class="form-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+
+              <div class="form-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                 <label for="font-size-input">文字サイズ変更 (px)</label>
                 <input type="number" id="font-size-input" min="10" max="32" value="15" style="width: 80px; padding: 6px; border: 1px solid #ccc; border-radius: 4px; text-align: center; background: var(--bg-card, #fff); color: inherit;">
               </div>
+
               <div class="form-group">
                 <label for="api-key-input">APIキー</label>
                 <input type="password" id="api-key-input" placeholder="Google AI Studio の API キー" autocomplete="off">
@@ -252,7 +254,8 @@
                 </label>
               </div>
             </div>
-<!-- 追加：地の文（ナレーション）表示設定 -->
+
+            <!-- 地の文（ナレーション）表示設定 -->
             <div class="settings-card">
               <h3>地の文（ナレーション）表示設定</h3>
               <p class="settings-note">
@@ -272,6 +275,7 @@
                 <input type="range" id="narration-opacity-slider" min="0" max="100" value="80" style="width: 100%; cursor: pointer;">
               </div>
             </div>
+
             <div class="settings-card" id="dropbox-settings-card">
               <h3>
                 <span class="material-symbols-outlined">cloud_sync</span>
