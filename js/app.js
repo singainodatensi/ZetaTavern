@@ -10,7 +10,7 @@ import { generateStoryResponse } from './ai-client.js';
 import * as dropbox from './dropbox.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
-const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
+const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕跨（動作・情景描写）を中心に物語を進行させてください。\n` +
     `・「語るな、見せろ（Show, don't tell）」を厳守してください。キャラクターの感情を「嬉しい」「怒る」などと地の文で直接説明せず、声のトーン、視線、間（ま）、仕草、セリフの選び方で生き生きと表現してください。\n` +
     `・各登場人物は、主人公や他のキャラクターの話し方に影響（汚染・伝染）されず、固有の一人称・二人称・敬語レベル・語尾を厳格に維持して発言させてください。\n` +
     `・一度の出力で事態を勝手に解決・完結させず、主人公（ユーザー）が次のターンで介入（発言や行動の選択）できる明確な「判断の余白」を残した時点で物語の記述を終了してください。`;
@@ -114,12 +114,18 @@ async function loadConfigurations() {
   const customModels = await db.getSetting('custom_models', []);
   const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
   
+  // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
+  const apiTimeout = await db.getSetting('api_timeout', 60);
+  const apiRetries = await db.getSetting('api_retries', 3);
+
   // Sync to memory state
   updateState({
     apiProvider: provider,
     apiKey: key,
     modelName: model,
-    showChoices: choices
+    showChoices: choices,
+    apiTimeout: apiTimeout,
+    apiRetries: apiRetries
   });
 
   // Prefill settings form
@@ -128,14 +134,17 @@ async function loadConfigurations() {
   const modelEl = document.getElementById('model-name-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
+  const retriesEl = document.getElementById('settings-retries-input');
+  const timeoutEl = document.getElementById('settings-timeout-input');
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
   if (choicesEl) choicesEl.checked = choices;
   if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
+  if (retriesEl) retriesEl.value = apiRetries;
+  if (timeoutEl) timeoutEl.value = apiTimeout;
 
   if (modelEl) {
-    // 既存のハードコードされたデフォルトオプションを崩さず、以前追加された動的カスタムオプションのみを一度クリアして重複を防ぎます
     const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it'];
     Array.from(modelEl.options).forEach(opt => {
       if (!defaultValues.includes(opt.value)) {
@@ -143,7 +152,6 @@ async function loadConfigurations() {
       }
     });
 
-    // データベースから読み込んだカスタムモデル一覧をセレクトボックスに再現
     customModels.forEach(customModel => {
       const opt = document.createElement('option');
       opt.value = customModel;
@@ -151,7 +159,6 @@ async function loadConfigurations() {
       modelEl.appendChild(opt);
     });
 
-    // もし現在選択されているモデルがデフォルトに含まれず、かつカスタム配列にも入っていない場合（初回移行時のフォールバック用）
     if (!defaultValues.includes(model) && !customModels.includes(model)) {
       const opt = document.createElement('option');
       opt.value = model;
@@ -305,12 +312,17 @@ async function bindEvents() {
 
   if (sendBtn && userInputField) {
     sendBtn.onclick = () => submitStoryTurn();
+    
+    // キーバインド改修：Ctrl+Enter(Command+Enter)でのみ送信、通常のEnterは改行を許可
     userInputField.onkeydown = (e) => {
-      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
-      // スマホでは Enter＝改行。送信は送信ボタンのみ（Shift+Enter 案内は PC 向け）
-      if (window.matchMedia('(max-width: 1023px)').matches) return;
-      e.preventDefault();
-      submitStoryTurn();
+      if (e.key === 'Enter') {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          submitStoryTurn();
+        } else {
+          // Enter単体の場合はイベントをインターセプトせず、そのまま改行（textareaの標準挙動）を通す
+        }
+      }
     };
   }
 
@@ -321,6 +333,8 @@ async function bindEvents() {
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const customModelInput = document.getElementById('custom-model-input');
   const customModelAddBtn = document.getElementById('custom-model-add-btn');
+  const retriesEl = document.getElementById('settings-retries-input');
+  const timeoutEl = document.getElementById('settings-timeout-input');
 
   if (provEl) {
     provEl.onchange = (e) => {
@@ -334,7 +348,6 @@ async function bindEvents() {
       const val = e.target.value.trim();
       updateState({ apiKey: val });
       db.saveSetting('api_key', val);
-      // Also save to localStorage for legacy fallback
       localStorage.setItem('zetatavern_api_key', val);
     };
   }
@@ -350,11 +363,24 @@ async function bindEvents() {
       const val = e.target.checked;
       updateState({ showChoices: val });
       db.saveSetting('show_choices', val);
-      ui.renderStory(); // Refresh bottom choices
+      ui.renderStory();
+    };
+  }
+  if (retriesEl) {
+    retriesEl.oninput = (e) => {
+      const val = parseInt(e.target.value) || 3;
+      updateState({ apiRetries: val });
+      db.saveSetting('api_retries', val);
+    };
+  }
+  if (timeoutEl) {
+    timeoutEl.oninput = (e) => {
+      const val = parseInt(e.target.value) || 60;
+      updateState({ apiTimeout: val });
+      db.saveSetting('api_timeout', val);
     };
   }
 
-  // ユーザー任意のカスタムモデル追加ロジック
   if (customModelAddBtn && customModelInput && modelEl) {
     customModelAddBtn.onclick = async () => {
       const newModel = customModelInput.value.trim();
@@ -362,7 +388,6 @@ async function bindEvents() {
 
       const customModels = await db.getSetting('custom_models', []);
 
-      // セレクトボックスへの重複追加をチェック
       let optionExists = false;
       for (let i = 0; i < modelEl.options.length; i++) {
         if (modelEl.options[i].value === newModel) {
@@ -371,7 +396,6 @@ async function bindEvents() {
         }
       }
 
-      // セレクトボックスに選択肢として追加
       if (!optionExists) {
         const opt = document.createElement('option');
         opt.value = newModel;
@@ -379,18 +403,15 @@ async function bindEvents() {
         modelEl.appendChild(opt);
       }
 
-      // IndexedDBにモデルを保存して永続化
       if (!customModels.includes(newModel)) {
         customModels.push(newModel);
         await db.saveSetting('custom_models', customModels);
       }
 
-      // 追加したカスタムモデルを即座に選択・保存状態に適用
       modelEl.value = newModel;
       updateState({ modelName: newModel });
       await db.saveSetting('model_name', newModel);
 
-      // 入力欄をクリア
       customModelInput.value = '';
       alert(`モデル「${newModel}」を追加し、現在モデルとして適用しました。`);
     };
@@ -405,8 +426,11 @@ async function bindEvents() {
     if (!currentStory) return;
     currentStory.storytellerPrompt = rPrompt.value.trim();
     currentStory.worldPrompt = wPrompt.value.trim();
-    db.saveStory(currentStory).then(() => {
-      ui.renderSidebar(); // Update sidebar configurations view
+    db.saveStory(currentStory).then(async () => {
+      // 保存完了時にStateを同期して変更をリストやビュー等へ即時反映させる
+      const stories = await db.getStories();
+      updateState({ stories });
+      ui.renderSidebar();
     });
   };
 
@@ -430,6 +454,10 @@ async function bindEvents() {
     currentStory.protagonist.description = pDesc.value.trim();
     
     await db.saveStory(currentStory);
+    
+    // Stateの物語リストを更新し同期する
+    const stories = await db.getStories();
+    updateState({ stories });
     ui.renderSidebar();
   };
 
@@ -447,17 +475,19 @@ async function bindEvents() {
           currentStory.protagonist = { name: '主人公', avatarAssetId: '', description: '' };
         }
         
-        // Delete old asset
         if (currentStory.protagonist.avatarAssetId) {
           await db.deleteAsset(currentStory.protagonist.avatarAssetId);
         }
         
-        // Save new
         const newAssetId = await db.saveAsset(file, file.type);
         currentStory.protagonist.avatarAssetId = newAssetId;
         pPreview.src = URL.createObjectURL(file);
         
         await db.saveStory(currentStory);
+        
+        // アバター保存時にもStateを同期
+        const stories = await db.getStories();
+        updateState({ stories });
         ui.renderSidebar();
       }
     };
@@ -536,6 +566,7 @@ async function createNewStory() {
     title: storyTitle || '無題のストーリー',
     storytellerPrompt: DEFAULT_STORYTELLER_PROMPT,
     worldPrompt: DEFAULT_WORLD_PROMPT,
+    tags: [], // ストーリータグ用配列フィールドを追加
     protagonist: {
       name: '主人公',
       avatarAssetId: '',
@@ -639,6 +670,13 @@ async function submitStoryTurn() {
     await performAutoDropboxSync();
 
   } catch (err) {
+    // ユーザーによる意図的なキャンセル（手動停止）の場合
+    if (err.message && err.message.includes('中止されました')) {
+      updateState({ isGenerating: false });
+      ui.renderStory();
+      return;
+    }
+
     alert(`ストーリーテラーの応答生成中にエラーが発生しました:\n${err.message}`);
     
     currentStory.messages.pop();
@@ -1085,6 +1123,20 @@ function updateSyncStatusIndicator(status) {
   }
 }
 
+/** 
+ * ローカルの更新（ストーリーやキャラクター）が、前回の同期時刻より新しいか判定
+ */
+async function hasNewerLocalChanges() {
+  const lastSync = parseInt(await db.getSetting('dropbox_last_sync', '0'), 10) || 0;
+  const stories = await db.getStories();
+  const characters = await db.getCharacters();
+
+  const hasNewStory = stories.some(s => (s.timestamp || 0) > lastSync);
+  const hasNewChar = characters.some(c => (c.timestamp || 0) > lastSync);
+
+  return hasNewStory || hasNewChar;
+}
+
 /** Auto-pull on app startup if connected and frequency > 0 */
 async function performStartupSync() {
   const connected = await dropbox.isConnected();
@@ -1095,6 +1147,17 @@ async function performStartupSync() {
 
   updateSyncStatusIndicator('syncing');
   try {
+    // ★ 安全ガード：ローカルに変更がある場合は、引き戻さずに、サイレントにPush（自動退避アップロード）を行う
+    if (await hasNewerLocalChanges()) {
+      console.log('[Dropbox StartupSync] ローカルに最新の未同期編集があります。Pullをスキップし、Pushをバックグラウンド実行します。');
+      await performDropboxPushSilent();
+      const now = Date.now();
+      await db.saveSetting('dropbox_last_sync', now);
+      updateLastSyncText(now);
+      updateSyncStatusIndicator('success');
+      return;
+    }
+
     // Pull latest data silently
     const localAssets = await db.getAll('assets');
     const localAssetIds = new Set(localAssets.map(a => a.assetId));
