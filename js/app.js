@@ -10,7 +10,7 @@ import { generateStoryResponse } from './ai-client.js';
 import * as dropbox from './dropbox.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
-const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕跨（動作・情景描写）を中心に物語を進行させてください。\n` +
+const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
     `・「語るな、見せろ（Show, don't tell）」を厳守してください。キャラクターの感情を「嬉しい」「怒る」などと地の文で直接説明せず、声のトーン、視線、間（ま）、仕草、セリフの選び方で生き生きと表現してください。\n` +
     `・各登場人物は、主人公や他のキャラクターの話し方に影響（汚染・伝染）されず、固有の一人称・二人称・敬語レベル・語尾を厳格に維持して発言させてください。\n` +
     `・一度の出力で事態を勝手に解決・完結させず、主人公（ユーザー）が次のターンで介入（発言や行動の選択）できる明確な「判断の余白」を残した時点で物語の記述を終了してください。`;
@@ -117,6 +117,10 @@ async function loadConfigurations() {
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
   const apiTimeout = await db.getSetting('api_timeout', 60);
   const apiRetries = await db.getSetting('api_retries', 3);
+  
+  // フォントサイズの設定（デフォルト：中(medium)）
+  const fontSize = await db.getSetting('font_size', 'medium');
+  document.body.className = `font-size-${fontSize}`;
 
   // Sync to memory state
   updateState({
@@ -125,7 +129,8 @@ async function loadConfigurations() {
     modelName: model,
     showChoices: choices,
     apiTimeout: apiTimeout,
-    apiRetries: apiRetries
+    apiRetries: apiRetries,
+    fontSize: fontSize
   });
 
   // Prefill settings form
@@ -136,6 +141,7 @@ async function loadConfigurations() {
   const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
   const retriesEl = document.getElementById('settings-retries-input');
   const timeoutEl = document.getElementById('settings-timeout-input');
+  const fontSizeEl = document.getElementById('font-size-select');
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
@@ -143,6 +149,7 @@ async function loadConfigurations() {
   if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
   if (retriesEl) retriesEl.value = apiRetries;
   if (timeoutEl) timeoutEl.value = apiTimeout;
+  if (fontSizeEl) fontSizeEl.value = fontSize;
 
   if (modelEl) {
     const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it'];
@@ -335,6 +342,7 @@ async function bindEvents() {
   const customModelAddBtn = document.getElementById('custom-model-add-btn');
   const retriesEl = document.getElementById('settings-retries-input');
   const timeoutEl = document.getElementById('settings-timeout-input');
+  const fontSizeEl = document.getElementById('font-size-select');
 
   if (provEl) {
     provEl.onchange = (e) => {
@@ -378,6 +386,14 @@ async function bindEvents() {
       const val = parseInt(e.target.value) || 60;
       updateState({ apiTimeout: val });
       db.saveSetting('api_timeout', val);
+    };
+  }
+  if (fontSizeEl) {
+    fontSizeEl.onchange = (e) => {
+      const val = e.target.value;
+      updateState({ fontSize: val });
+      db.saveSetting('font_size', val);
+      document.body.className = `font-size-${val}`; // HTML全体の文字サイズクラスを切り替え
     };
   }
 
@@ -863,7 +879,7 @@ async function handleDropboxOAuthCallback(urlParams) {
     alert(
       'Dropbox 認証の途中データが見つかりませんでした。\n' +
       '（別タブで開いた、プライベート閲覧、ブラウザのストレージ制限などが原因のことがあります）\n\n' +
-      'もう一度「Dropbox と連携する」からやり直してください。'
+      'もう一度「Dropbox と連携する」からやり重してください。'
     );
     return;
   }
