@@ -11,7 +11,7 @@ import * as dropbox from './dropbox.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
 const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
-    `・「語るな、見せろ（Show, don't tell）」を厳守してください。キャラクターの感情を「嬉しい」「怒る」などと地の文で直接説明せず、声のトーン, 視線、間（ま）、仕草、セリフの選び方で生き生きと表現してください。\n` +
+    `・「語るな、見せろ（Show, don't tell）」を厳守してください。キャラクターの感情を「嬉しい」「怒る」などと地の文で直接説明せず、声のトーン、視線、間（ま）、仕草、セリフの選び方で生き生きと表現してください。\n` +
     `・各登場人物は、主人公や他のキャラクターの話し方に影響（汚染・伝染）されず、固有の一人称・二人称・敬語レベル・語尾を厳格に維持して発言させてください。\n` +
     `・一度の出力で事態を勝手に解決・完結させず、主人公（ユーザー）が次のターンで介入（発言や行動の選択）できる明確な「判断の余白」を残した時点で物語の記述を終了してください。`;
 
@@ -19,6 +19,7 @@ const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラ
 const DEFAULT_WORLD_PROMPT = `【世界観】\n現代の高校を舞台にした日常系ラブコメの世界。\n\n【状況】\n主人公は平凡な男子高校生。ある日、隣の席に学校一の美少女が座ることになり……`;
 
 let hasBooted = false;
+let isSyncInProgress = false; // ★ 同期の多重実行を防ぐ排他ガードフラグを追加
 
 // Boot strap execution
 async function bootApp() {
@@ -118,8 +119,8 @@ async function loadConfigurations() {
   const apiTimeout = await db.getSetting('api_timeout', 60);
   const apiRetries = await db.getSetting('api_retries', 3);
   
-  // フォントサイズの設定（デフォルト：15px）を読み込み、即座に適用
-  const fontSize = await db.getSetting('font_size', 15);
+  // フォントサイズの設定（デフォルト：中(medium)）を読み込み、即座に適用
+  const fontSize = await db.getSetting('font_size', 'medium');
   ui.applyFontSize(fontSize);
 
   // 地の文の表示カスタマイズ設定を読み込み、即座に適用
@@ -150,7 +151,7 @@ async function loadConfigurations() {
   const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
   const retriesEl = document.getElementById('settings-retries-input');
   const timeoutEl = document.getElementById('settings-timeout-input');
-  const fontSizeEl = document.getElementById('font-size-input');
+  const fontSizeEl = document.getElementById('font-size-select');
   const nBgEl = document.getElementById('narration-bg-input');
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
@@ -357,7 +358,7 @@ async function bindEvents() {
   const customModelAddBtn = document.getElementById('custom-model-add-btn');
   const retriesEl = document.getElementById('settings-retries-input');
   const timeoutEl = document.getElementById('settings-timeout-input');
-  const fontSizeEl = document.getElementById('font-size-input');
+  const fontSizeEl = document.getElementById('font-size-select');
   const nBgEl = document.getElementById('narration-bg-input');
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
@@ -407,9 +408,8 @@ async function bindEvents() {
     };
   }
   if (fontSizeEl) {
-    // 任意のフォント数値入力を監視し、リアルタイム適用
-    fontSizeEl.oninput = (e) => {
-      const val = parseInt(e.target.value) || 15;
+    fontSizeEl.onchange = (e) => {
+      const val = e.target.value;
       updateState({ fontSize: val });
       db.saveSetting('font_size', val);
       ui.applyFontSize(val); // UIフォントサイズの一括・即時反映
@@ -1197,6 +1197,13 @@ async function performStartupSync() {
   const freq = parseInt(await db.getSetting('dropbox_sync_frequency', '0'), 10);
   if (freq === 0) return;
 
+  // ★ 追加：多重起動（Visibility APIとの競合）を防ぐ排他処理ガード
+  if (isSyncInProgress) {
+    console.log('[Dropbox] 起動時同期の多重実行を回避しました。');
+    return;
+  }
+
+  isSyncInProgress = true;
   updateSyncStatusIndicator('syncing');
   try {
     // ★ 安全ガード：ローカルに変更がある場合は、引き戻さずに、サイレントにPush（自動退避アップロード）を行う
@@ -1247,6 +1254,8 @@ async function performStartupSync() {
   } catch (e) {
     console.warn('[Dropbox] 起動時同期に失敗:', e);
     updateSyncStatusIndicator('error');
+  } finally {
+    isSyncInProgress = false; // ★ ガード解除
   }
 }
 
