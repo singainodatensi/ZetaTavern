@@ -211,7 +211,14 @@
                   <option value="gemini">Google Gemini API (推奨)</option>
                 </select>
               </div>
-
+<div class="form-row">
+  <label for="font-size-select">文字サイズ変更</label>
+  <select id="font-size-select" class="form-select">
+    <option value="small">小 (読みやすさ重視 / 俯瞰)</option>
+    <option value="medium" selected>中 (標準サイズ)</option>
+    <option value="large">大 (スマホ・可読性優先)</option>
+  </select>
+</div>
               <div class="form-group">
                 <label for="api-key-input">APIキー</label>
                 <input type="password" id="api-key-input" placeholder="Google AI Studio の API キー" autocomplete="off">
