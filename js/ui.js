@@ -442,10 +442,10 @@ export async function renderSidebar() {
   const characters = await db.getCharacters();
 
   let html = `
-    <!-- Protagonist Profile Card -->
+ <!-- Protagonist Profile Card -->
     <div class="sidebar-section">
       <h4>主人公プロファイル</h4>
-      <div class="sidebar-protagonist-card">
+      <div class="sidebar-protagonist-card" style="cursor: pointer; transition: opacity 0.2s;" title="設定を編集" onmouseover="this.style.opacity=0.8" onmouseout="this.style.opacity=1">
         <img src="${pAvatarUrl}" class="sidebar-p-avatar" alt="Protagonist">
         <div class="sidebar-p-details">
           <strong id="sidebar-p-name">${escapeHTML(protagonist?.name || '主人公名なし')}</strong>
@@ -548,14 +548,18 @@ function bindSidebarEvents() {
   const { currentStory } = getState();
   if (!currentStory) return;
 
-  const saveStateChanges = () => {
-    db.saveStory(currentStory).then(() => {
-      // Notify other modules of change if needed, but avoid full re-render of sidebar during active typing
-      window.dispatchEvent(new CustomEvent('storyDataUpdated'));
-    });
-  };
+  const saveStateChanges = () => { ... };
 
-  // 1. Scene State changes
+  // --- 追加：主人公カードクリック時に設定モーダルを起動 ---
+  const pCard = document.querySelector('.sidebar-protagonist-card');
+  if (pCard) {
+    pCard.onclick = () => {
+      showStorySettingsModal();
+    };
+  }
+  // ------------------------------------------------------
+
+  // 1. Scene State changes ...
   const locInput = document.getElementById('scene-location-input');
   const timeInput = document.getElementById('scene-time-input');
   const atmosInput = document.getElementById('scene-atmosphere-input');
