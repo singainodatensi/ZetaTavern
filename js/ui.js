@@ -1215,4 +1215,265 @@ export async function showStorySettingsModal() {
         
         <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px;">
           <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">主人公設定</legend>
-          <div style="display: flex; g
+          <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
+            <div style="text-align: center;">
+              <div style="width: 70px; height: 70px; border-radius: 50%; overflow: hidden; border: 2px solid var(--primary-color, #4a90e2); display: flex; justify-content: center; align-items: center; background: #eee;">
+                <img id="story-p-avatar-preview" src="${pAvatarUrl}" style="display: block; width: 100%; height: 100%; object-fit: cover;" alt="Avatar">
+              </div>
+              <label for="story-p-avatar-input" style="font-size: 11px; cursor: pointer; color: var(--primary-color, #4a90e2); text-decoration: underline; display: block; margin-top: 4px;">画像を変更</label>
+              <input type="file" id="story-p-avatar-input" accept="image/*" style="display: none;">
+            </div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+              <label style="font-size: 11px; font-weight: bold;">名前</label>
+              <input type="text" id="story-p-name-input" value="${escapeHTML(currentStory.protagonist?.name || '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+            </div>
+          </div>
+          <div id="story-p-adjust-btn-container" style="text-align: left; margin-bottom: 8px;"></div>
+          
+          <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 8px;">
+            <label style="font-size: 11px; font-weight: bold;">詳細・性格・容姿</label>
+            <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
+          </div>
+        </fieldset>
+
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
+          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="例：一般的な日常世界です。">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">ストーリーのタグ (カンマ区切り)</label>
+          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;" placeholder="例: 五等分の花嫁, ラブコメ">
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
+          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="空欄の場合、デフォルトのチャットロールプレイ最適化ルールが適用されます。">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
+        </div>
+
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
+        <button id="story-settings-cancel-btn" class="secondary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">キャンセル</button>
+        <button id="story-settings-save-btn" class="primary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">設定を保存</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const closeBtn = modal.querySelector('#story-settings-close-btn');
+  const cancelBtn = modal.querySelector('#story-settings-cancel-btn');
+  const saveBtn = modal.querySelector('#story-settings-save-btn');
+  const avatarInput = modal.querySelector('#story-p-avatar-input');
+  const avatarPreview = modal.querySelector('#story-p-avatar-preview');
+  const adjustBtnContainer = modal.querySelector('#story-p-adjust-btn-container');
+
+  const closeModal = () => modal.remove();
+  closeBtn.onclick = closeModal;
+  cancelBtn.onclick = closeModal;
+
+  let newAvatarBlob = null;
+  let currentOriginalFile = null;
+
+  const adjustBtn = document.createElement('button');
+  adjustBtn.id = 'story-p-adjust-crop-btn';
+  adjustBtn.className = 'secondary-btn';
+  adjustBtn.type = 'button';
+  adjustBtn.style = "display: none; font-size: 11px; padding: 4px 8px; width: 100%; box-sizing: border-box;";
+  adjustBtn.textContent = '位置を再調整';
+  adjustBtnContainer.appendChild(adjustBtn);
+
+  avatarInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      currentOriginalFile = file; 
+      showAvatarCropModal(file, (croppedBlob) => {
+        newAvatarBlob = croppedBlob;
+        avatarPreview.src = URL.createObjectURL(croppedBlob);
+        adjustBtn.style.display = 'inline-flex'; 
+      });
+    }
+  };
+
+  adjustBtn.onclick = () => {
+    if (currentOriginalFile) {
+      showAvatarCropModal(currentOriginalFile, (croppedBlob) => {
+        newAvatarBlob = croppedBlob;
+        avatarPreview.src = URL.createObjectURL(croppedBlob);
+      });
+    }
+  };
+
+  saveBtn.onclick = async () => {
+    const name = modal.querySelector('#story-p-name-input').value.trim();
+    const desc = modal.querySelector('#story-p-desc-input').value.trim();
+    const world = modal.querySelector('#story-world-input').value.trim();
+    const promptText = modal.querySelector('#story-prompt-input').value.trim();
+    const tagsText = modal.querySelector('#story-tags-input').value.trim();
+
+    try {
+      let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
+      if (newAvatarBlob) {
+        if (avatarAssetId) {
+          await db.deleteAsset(avatarAssetId);
+        }
+        avatarAssetId = await db.saveAsset(newAvatarBlob, 'image/jpeg');
+      }
+
+      currentStory.protagonist = {
+        name: name || '主人公',
+        description: desc,
+        avatarAssetId: avatarAssetId
+      };
+      currentStory.worldPrompt = world;
+      currentStory.storytellerPrompt = promptText;
+      
+      currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
+
+      await db.saveStory(currentStory);
+      
+      const updatedStories = await db.getStories();
+      updateState({ stories: updatedStories });
+
+      closeModal();
+      
+      renderStoryList();
+      renderSidebar();
+      renderStory();
+    } catch (err) {
+      alert(`保存に失敗しました: ${err.message}`);
+    }
+  };
+}
+
+export function applyFontSize(size) {
+  const numSize = parseFloat(size) || 15;
+  const root = document.documentElement;
+  root.style.setProperty('--chat-font-size', `${numSize}px`);
+  root.style.setProperty('--narration-font-size', `${Math.max(10, numSize - 0.5)}px`);
+  root.style.setProperty('--ui-font-size', `${Math.max(10, numSize - 2)}px`);
+}
+
+export function applyNarrationStyles(bgColor, textColor, opacityPercent) {
+  const root = document.documentElement;
+  
+  let finalBg = bgColor || '#f3f5f8';
+  if (opacityPercent !== undefined && finalBg.startsWith('#') && finalBg.length === 7) {
+    const r = parseInt(finalBg.slice(1, 3), 16) || 243;
+    const g = parseInt(finalBg.slice(3, 5), 16) || 245;
+    const b = parseInt(finalBg.slice(5, 7), 16) || 248;
+    finalBg = `rgba(${r}, ${g}, ${b}, ${opacityPercent / 100})`;
+  }
+  
+  root.style.setProperty('--narration-bg', finalBg);
+  root.style.setProperty('--narration-text', textColor || '#323232');
+}
+
+const styleInject = document.createElement('style');
+styleInject.textContent = `
+  :root {
+    --chat-font-size: 15px;
+    --narration-font-size: 14.5px;
+    --ui-font-size: 13px;
+    
+    --narration-bg: rgba(243, 245, 248, 0.8);
+    --narration-text: #323232;
+  }
+
+  .chat-speech, .novel-block, .chat-bubble p {
+    font-size: var(--chat-font-size) !important;
+  }
+  .narration-content, .chat-narration {
+    font-size: var(--narration-font-size) !important;
+  }
+  .chat-sender-name, .novel-action-badge {
+    font-size: var(--ui-font-size) !important;
+  }
+
+  .chat-narration {
+    display: flex;
+    justify-content: flex-start;
+    width: 100%;
+    box-sizing: border-box;
+    margin: 14px 0 !important;
+  }
+  
+  .narration-content {
+    padding-left: 62px !important;
+    padding-right: 16px !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+    width: 100%;
+    max-width: 82% !important; 
+    box-sizing: border-box !important;
+    line-height: 1.75 !important;
+    letter-spacing: 0.03em !important;
+    color: var(--narration-text) !important;
+    background-color: var(--narration-bg) !important;
+    border-left: 4px solid var(--primary-color, #4a90e2) !important;
+    border-radius: 4px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.01);
+  }
+  
+  .narration-content p {
+    margin: 0 !important;
+  }
+
+  .chat-bubble p {
+    line-height: 1.65 !important;
+    margin-bottom: 8px !important;
+  }
+  .chat-bubble p:last-child {
+    margin-bottom: 0 !important;
+  }
+
+  @media (min-width: 1024px) {
+    .timeline-container {
+      max-width: 800px !important;
+      margin: 0 auto !important;
+      width: 100% !important;
+      display: flex !important;
+      flex-direction: column !important;
+      box-sizing: border-box !important;
+    }
+    
+    #story-viewport {
+      border-left: 1px solid var(--border-color, #eee) !important;
+      border-right: 1px solid var(--border-color, #eee) !important;
+      background-color: var(--bg-viewport, #fafafa) !important;
+    }
+  }
+
+  @media (max-width: 1023px) {
+    #story-viewport {
+      padding: 12px 8px !important;
+    }
+    .chat-message {
+      margin-bottom: 14px !important;
+      gap: 8px !important;
+    }
+    .chat-avatar {
+      width: 40px !important;
+      height: 40px !important;
+    }
+    .chat-bubble {
+      padding: 10px 12px !important;
+      max-width: 82% !important;
+    }
+    .narration-content {
+      padding-left: 48px !important;
+      max-width: 95% !important;
+      font-size: 0.95em !important;
+    }
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .chat-narration {
+      color: rgba(225, 228, 232, 0.95) !important;
+      background-color: rgba(30, 34, 42, 0.7) !important;
+      border-left: 4px solid var(--primary-light, #64b5f6) !important;
+    }
+  }
+`;
+document.head.appendChild(styleInject);
