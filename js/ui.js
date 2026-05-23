@@ -946,6 +946,132 @@ export async function renderCharacterLibrary() {
 }
 
 /**
+ * Canvasを使用して、画像を任意の倍率と位置（トリミング・プレビュー同期）で切り抜いて正方形のBlobとして返します。
+ * 外部ライブラリ不要で、完全にオフラインで動作します。
+ */
+export function cropImageToSquareBlob(file, zoomPercent, shiftX, shiftY) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 300; // アイコン用に最適化された正方形
+      canvas.height = 300;
+      const ctx = canvas.getContext('2d');
+
+      // 画像の短辺を1辺とした基準トリミングサイズ
+      const baseSize = Math.min(img.width, img.height);
+      // ズーム値を反映したソース切り出し窓のサイズ（ズームするほど切り出す範囲は狭くなる）
+      const sourceSize = baseSize / (zoomPercent / 100);
+
+      // 中心位置を起点としたピクセル単位のシフト量を算出
+      const offsetX = (img.width - sourceSize) / 2 + (shiftX * (sourceSize / 200));
+      const offsetY = (img.height - sourceSize) / 2 + (shiftY * (sourceSize / 200));
+
+      // canvasに綺麗に描画
+      ctx.drawImage(
+        img,
+        offsetX, offsetY, sourceSize, sourceSize, // ソース画像領域
+        0, 0, 300, 300                            // 描画先キャンバス領域
+      );
+
+      canvas.toBlob((blob) => {
+        resolve(blob);
+      }, 'image/jpeg', 0.9); // 高画質JPEGで書き出して軽量化
+
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = (err) => reject(err);
+  });
+}
+
+/**
+ * HTML5 Canvasトリミング用の各種スライダーコントローラーUIを作成・設定します。
+ */
+function setupCropperControls(imgInput, previewImg, cropContainerId) {
+  let selectedFile = null;
+
+  // コントローラーHTMLの生成
+  const container = document.getElementById(cropContainerId);
+  if (!container) return { getCropBlob: async () => selectedFile };
+
+  container.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:8px; width:100%; border:1px dashed var(--border-color, #ccc); padding:10px; border-radius:6px; box-sizing:border-box; margin-top:8px;">
+      <span style="font-size:11px; font-weight:bold; color:var(--primary-color);">トリミング・位置調整ツール</span>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <label style="font-size:11px; min-width:60px;">ズーム</label>
+          <input type="range" id="${cropContainerId}-zoom" min="100" max="300" value="100" style="flex:1; cursor:pointer;">
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <label style="font-size:11px; min-width:60px;">左右位置</label>
+          <input type="range" id="${cropContainerId}-shift-x" min="-100" max="100" value="0" style="flex:1; cursor:pointer;">
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <label style="font-size:11px; min-width:60px;">上下位置</label>
+          <input type="range" id="${cropContainerId}-shift-y" min="-100" max="100" value="0" style="flex:1; cursor:pointer;">
+        </div>
+      </div>
+      <p style="font-size:10px; color:var(--text-muted, #777); margin:0;">スライダーを動かして、上のプレビューを正方形アイコンに綺麗に収めてください。</p>
+    </div>
+  `;
+
+  const zoomSlider = container.querySelector(`#${cropContainerId}-zoom`);
+  const shiftXSlider = container.querySelector(`#${cropContainerId}-shift-x`);
+  const shiftYSlider = container.querySelector(`#${cropContainerId}-shift-y`);
+
+  // スタイル変更して、丸い正方形コンテナを擬似的に表現
+  const wrapper = previewImg.parentElement;
+  if (wrapper) {
+    wrapper.style.position = 'relative';
+    wrapper.style.overflow = 'hidden';
+    wrapper.style.display = 'flex';
+    wrapper.style.justifyContent = 'center';
+    wrapper.style.alignItems = 'center';
+  }
+
+  // プレビューのスタイル更新
+  const updateLivePreview = () => {
+    if (!selectedFile) return;
+    const z = zoomSlider.value;
+    const x = shiftXSlider.value;
+    const y = shiftYSlider.value;
+
+    // CSS transform を使って、GPU加速された非常に滑らかな超軽量プレビューを実現 (スマホでもぬるぬる動作)
+    previewImg.style.transform = `scale(${z / 100}) translate(${-x / 2}%, ${-y / 2}%)`;
+    previewImg.style.transformOrigin = 'center';
+  };
+
+  imgInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      selectedFile = file;
+      previewImg.src = URL.createObjectURL(file);
+      // スライダー初期化
+      zoomSlider.value = 100;
+      shiftXSlider.value = 0;
+      shiftYSlider.value = 0;
+      updateLivePreview();
+    }
+  };
+
+  zoomSlider.oninput = updateLivePreview;
+  shiftXSlider.oninput = updateLivePreview;
+  shiftYSlider.oninput = updateLivePreview;
+
+  // 保存時にキャンバスに切り出してBlobを取得するためのヘルパー
+  return {
+    getCropBlob: async () => {
+      if (!selectedFile) return null;
+      const z = parseFloat(zoomSlider.value);
+      const x = parseFloat(shiftXSlider.value);
+      const y = parseFloat(shiftYSlider.value);
+      return await cropImageToSquareBlob(selectedFile, z, x, y);
+    }
+  };
+}
+
+/**
  * Shows the Character Add/Edit Modal
  */
 export async function showCharacterModal(char = null) {
@@ -976,6 +1102,16 @@ export async function showCharacterModal(char = null) {
     tagsInput = document.getElementById('char-tags-input');
   }
 
+  // トリミングコントロール用コンテナの動的インジェクション
+  let cropContainer = document.getElementById('char-crop-container');
+  if (!cropContainer && imgInput) {
+    const parent = imgInput.parentElement;
+    const cropRow = document.createElement('div');
+    cropRow.id = 'char-crop-container';
+    parent.appendChild(cropRow);
+    cropContainer = cropRow;
+  }
+
   // Reset fields
   nameInput.value = char ? char.name : '';
   if (categoryInput) categoryInput.value = char ? char.category || '' : '';
@@ -984,21 +1120,15 @@ export async function showCharacterModal(char = null) {
   persInput.value = char ? char.personality || '' : '';
   exInput.value = char ? char.mes_example || '' : '';
   imgInput.value = '';
+  previewImg.style.transform = 'none'; // CSS変形リセット
   
   let currentAvatarAssetId = char ? char.avatarAssetId : '';
   previewImg.src = await getAvatarUrl(currentAvatarAssetId);
 
   titleEl.textContent = char ? 'キャラクター設定編集' : '新規キャラクター登録';
 
-  // Temp holder for new selected file
-  let newFileBlob = null;
-  imgInput.onchange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      newFileBlob = file;
-      previewImg.src = URL.createObjectURL(file);
-    }
-  };
+  // クロッパーの初期化
+  const cropper = setupCropperControls(imgInput, previewImg, 'char-crop-container');
 
   saveBtn.onclick = async () => {
     if (!nameInput.value.trim()) {
@@ -1007,13 +1137,14 @@ export async function showCharacterModal(char = null) {
     }
 
     try {
-      // Save new image if uploaded
-      if (newFileBlob) {
-        // If editing, delete old asset first
+      // ユーザーが位置調整したトリミング画像（Blob）を取得
+      const croppedBlob = await cropper.getCropBlob();
+      
+      if (croppedBlob) {
         if (currentAvatarAssetId) {
           await db.deleteAsset(currentAvatarAssetId);
         }
-        currentAvatarAssetId = await db.saveAsset(newFileBlob, newFileBlob.type);
+        currentAvatarAssetId = await db.saveAsset(croppedBlob, 'image/jpeg');
       }
 
       const characterData = {
@@ -1029,7 +1160,7 @@ export async function showCharacterModal(char = null) {
 
       await db.saveCharacter(characterData);
       
-      // 保存完了時にStateを即座に更新して、F5を待たずに同期させる
+      // 保存完了時にState側のキャラクター一覧を即時同期
       const updatedChars = await db.getCharacters();
       updateState({ characters: updatedChars });
 
@@ -1125,7 +1256,7 @@ export async function importCharacterJSON(file) {
 }
 
 /**
- * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト・ストーリータグ）の編集モーダルを動的に生成・表示します。
+ * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト・ストーリータグ・主人公トリミング）の編集モーダルを動的に生成・表示します。
  */
 export async function showStorySettingsModal() {
   const { currentStory } = getState();
@@ -1166,8 +1297,10 @@ export async function showStorySettingsModal() {
           <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">主人公設定</legend>
           <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
             <div style="text-align: center;">
-              <img id="story-p-avatar-preview" src="${pAvatarUrl}" style="width: 70px; height: 70px; border-radius: 50%; object-fit: cover; border: 2px solid var(--primary-color, #4a90e2); display: block; margin-bottom: 4px;" alt="Avatar">
-              <label for="story-p-avatar-input" style="font-size: 11px; cursor: pointer; color: var(--primary-color, #4a90e2); text-decoration: underline;">画像を変更</label>
+              <div style="width: 70px; height: 70px; border-radius: 50%; overflow: hidden; border: 2px solid var(--primary-color, #4a90e2); display: flex; justify-content: center; align-items: center; background: #eee;">
+                <img id="story-p-avatar-preview" src="${pAvatarUrl}" style="display: block; width: 100%; height: 100%; object-fit: cover;" alt="Avatar">
+              </div>
+              <label for="story-p-avatar-input" style="font-size: 11px; cursor: pointer; color: var(--primary-color, #4a90e2); text-decoration: underline; display: block; margin-top: 4px;">画像を変更</label>
               <input type="file" id="story-p-avatar-input" accept="image/*" style="display: none;">
             </div>
             <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
@@ -1175,7 +1308,10 @@ export async function showStorySettingsModal() {
               <input type="text" id="story-p-name-input" value="${escapeHTML(currentStory.protagonist?.name || '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
             </div>
           </div>
-          <div style="display: flex; flex-direction: column; gap: 4px;">
+          <!-- トリミング操作用コンテナ -->
+          <div id="story-p-crop-container"></div>
+          
+          <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 8px;">
             <label style="font-size: 11px; font-weight: bold;">詳細・性格・容姿</label>
             <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
           </div>
@@ -1221,29 +1357,25 @@ export async function showStorySettingsModal() {
   closeBtn.onclick = closeModal;
   cancelBtn.onclick = closeModal;
 
-  let newAvatarBlob = null;
-  avatarInput.onchange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      newAvatarBlob = file;
-      avatarPreview.src = URL.createObjectURL(file);
-    }
-  };
+  // 主人公用クロッパーの初期化
+  const cropper = setupCropperControls(avatarInput, avatarPreview, 'story-p-crop-container');
 
   saveBtn.onclick = async () => {
     const name = modal.querySelector('#story-p-name-input').value.trim();
     const desc = modal.querySelector('#story-p-desc-input').value.trim();
     const world = modal.querySelector('#story-world-input').value.trim();
     const promptText = modal.querySelector('#story-prompt-input').value.trim();
-    const tagsText = modal.querySelector('#story-tags-input').value.trim(); // 追加
+    const tagsText = modal.querySelector('#story-tags-input').value.trim();
 
     try {
       let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
-      if (newAvatarBlob) {
+      const croppedBlob = await cropper.getCropBlob();
+
+      if (croppedBlob) {
         if (avatarAssetId) {
           await db.deleteAsset(avatarAssetId);
         }
-        avatarAssetId = await db.saveAsset(newAvatarBlob, newAvatarBlob.type);
+        avatarAssetId = await db.saveAsset(croppedBlob, 'image/jpeg');
       }
 
       currentStory.protagonist = {
@@ -1274,3 +1406,88 @@ export async function showStorySettingsModal() {
     }
   };
 }
+
+// ────────────────────────────────────────────────────────
+// 3. 視認性・可読性・スマホ特化レイアウト調整用CSSの自動注入
+// ────────────────────────────────────────────────────────
+const styleInject = document.createElement('style');
+styleInject.textContent = `
+  /* フォントサイズ設定用のクラス定義 */
+  body.font-size-small #story-viewport {
+    font-size: 13px !important;
+  }
+  body.font-size-medium #story-viewport {
+    font-size: 15px !important;
+  }
+  body.font-size-large #story-viewport {
+    font-size: 18px !important;
+  }
+  
+  body.font-size-small .chat-sender-name,
+  body.font-size-small .novel-action-badge { font-size: 11px !important; }
+  body.font-size-medium .chat-sender-name,
+  body.font-size-medium .novel-action-badge { font-size: 13px !important; }
+  body.font-size-large .chat-sender-name,
+  body.font-size-large .novel-action-badge { font-size: 15px !important; }
+
+  /* ナレーター（地の文）の可読性劇的改善 */
+  .chat-narration {
+    color: rgba(50, 50, 50, 0.9) !important;
+    background-color: rgba(243, 245, 248, 0.8) !important;
+    border-left: 4px solid var(--primary-color, #4a90e2) !important;
+    padding: 10px 14px !important;
+    margin: 16px 0 !important;
+    border-radius: 4px !important;
+    line-height: 1.75 !important;
+    letter-spacing: 0.03em !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.02) !important;
+    box-sizing: border-box !important;
+  }
+  
+  .chat-narration .narration-content p {
+    margin: 0 !important;
+  }
+
+  /* セリフ吹き出し内の行間・可読性も調整 */
+  .chat-bubble p {
+    line-height: 1.65 !important;
+    margin-bottom: 8px !important;
+  }
+  .chat-bubble p:last-child {
+    margin-bottom: 0 !important;
+  }
+
+  /* スマートフォン専用：可読性マージン調整 */
+  @media (max-width: 1023px) {
+    #story-viewport {
+      padding: 12px 8px !important;
+    }
+    .chat-message {
+      margin-bottom: 14px !important;
+      gap: 8px !important;
+    }
+    .chat-avatar {
+      width: 40px !important;
+      height: 40px !important;
+    }
+    .chat-bubble {
+      padding: 10px 12px !important;
+      max-width: 82% !important;
+    }
+    .chat-narration {
+      padding: 8px 10px !important;
+      margin: 12px 2px !important;
+      font-size: 0.95em !important;
+    }
+  }
+
+  /* ダークモード時のナレーター可読性補正 */
+  @media (prefers-color-scheme: dark) {
+    .chat-narration {
+      color: rgba(225, 228, 232, 0.95) !important;
+      background-color: rgba(30, 34, 42, 0.7) !important;
+      border-left: 4px solid var(--primary-light, #64b5f6) !important;
+    }
+  }
+`;
+document.head.appendChild(styleInject);
