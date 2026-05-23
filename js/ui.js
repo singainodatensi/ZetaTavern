@@ -291,7 +291,7 @@ export async function renderStory() {
     parsedLast = parseChoices(lastMsg.content);
   }
 
-  // Pre-load character list for avatar matching in chat mode
+  // ★ 修正：awaitを追加し、Promiseではなく配列としてキャラクターリストを正しく解決
   const characters = uiMode === 'chat' ? await db.getCharacters() : [];
 
   // Render messages
@@ -318,7 +318,7 @@ export async function renderStory() {
             narEl.innerHTML = `<div class="narration-content">${html}</div>`;
             container.appendChild(narEl);
           } else if (seg.type === 'dialogue') {
-            // 話し手が「主人公」本人かどうか判定（設定された主人公名、または「主人公」という文字列に合致するか）
+            // 話し手が「主人公」本人かどうか判定
             const protagonistName = currentStory.protagonist?.name || '主人公';
             const isProtagonist = (seg.speaker === protagonistName || seg.speaker === '主人公');
 
@@ -959,9 +959,8 @@ export function cropImageToSquareBlob(file, zoomPercent, shiftX, shiftY) {
       canvas.height = 300;
       const ctx = canvas.getContext('2d');
 
-      // 画像の短辺を1辺とした基準トリミングサイズ
-      const baseSize = Math.min(img.width, img.height);
       // ズーム値を反映したソース切り出し窓のサイズ（ズームするほど切り出す範囲は狭くなる）
+      const baseSize = Math.min(img.width, img.height);
       const sourceSize = baseSize / (zoomPercent / 100);
 
       // 中心位置を起点としたピクセル単位のシフト量を算出
@@ -986,87 +985,103 @@ export function cropImageToSquareBlob(file, zoomPercent, shiftX, shiftY) {
 }
 
 /**
- * HTML5 Canvasトリミング用の各種スライダーコントローラーUIを作成・設定します。
+ * 大きなトリミング調整専用ダイアログを表示し、円形のガイドを見ながら調整できるようにします（PC・スマホ双方に完全対応）
  */
-function setupCropperControls(imgInput, previewImg, cropContainerId) {
-  let selectedFile = null;
+export function showAvatarCropModal(file, onCropComplete) {
+  let modal = document.getElementById('avatar-crop-modal');
+  if (modal) modal.remove();
 
-  // コントローラーHTMLの生成
-  const container = document.getElementById(cropContainerId);
-  if (!container) return { getCropBlob: async () => selectedFile };
+  modal = document.createElement('div');
+  modal.id = 'avatar-crop-modal';
+  
+  // 画面中央に配置
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.6)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '4000';
 
-  container.innerHTML = `
-    <div style="display:flex; flex-direction:column; gap:8px; width:100%; border:1px dashed var(--border-color, #ccc); padding:10px; border-radius:6px; box-sizing:border-box; margin-top:8px;">
-      <span style="font-size:11px; font-weight:bold; color:var(--primary-color);">トリミング・位置調整ツール</span>
-      <div style="display:flex; flex-direction:column; gap:6px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-          <label style="font-size:11px; min-width:60px;">ズーム</label>
-          <input type="range" id="${cropContainerId}-zoom" min="100" max="300" value="100" style="flex:1; cursor:pointer;">
+  modal.innerHTML = `
+    <div style="background: var(--bg-card, #fff); color: var(--text-color, #333); width: 90%; max-width: 380px; border-radius: 8px; padding: 20px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); box-sizing: border-box;">
+      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">アバターの位置調整（トリミング）</h3>
+      
+      <!-- プレビュー枠：200px正方形の中に画像を置き、その上に透明な丸マスクを重ねる -->
+      <div style="position: relative; width: 200px; height: 200px; margin: 0 auto; background: #eee; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; display: flex; justify-content: center; align-items: center;">
+        <img id="crop-modal-preview-img" style="position: absolute; transform-origin: center; max-width: none; max-height: none; width: 100%; height: 100%; object-fit: contain;">
+        <!-- 丸い切り抜きガイドマスク（マスク外側を薄暗くするCSSデザイン） -->
+        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; box-shadow: inset 0 0 0 100px rgba(0,0,0,0.55); border-radius: 50%;"></div>
+      </div>
+
+      <!-- 位置・ズーム操作スライダー -->
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+          <span style="font-size: 11px; min-width: 50px; font-weight: bold;">ズーム</span>
+          <input type="range" id="crop-modal-zoom" min="100" max="300" value="100" style="flex: 1; cursor: pointer;">
         </div>
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-          <label style="font-size:11px; min-width:60px;">左右位置</label>
-          <input type="range" id="${cropContainerId}-shift-x" min="-100" max="100" value="0" style="flex:1; cursor:pointer;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+          <span style="font-size: 11px; min-width: 50px; font-weight: bold;">左右位置</span>
+          <input type="range" id="crop-modal-shift-x" min="-100" max="100" value="0" style="flex: 1; cursor: pointer;">
         </div>
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-          <label style="font-size:11px; min-width:60px;">上下位置</label>
-          <input type="range" id="${cropContainerId}-shift-y" min="-100" max="100" value="0" style="flex:1; cursor:pointer;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+          <span style="font-size: 11px; min-width: 50px; font-weight: bold;">上下位置</span>
+          <input type="range" id="crop-modal-shift-y" min="-100" max="100" value="0" style="flex: 1; cursor: pointer;">
         </div>
       </div>
-      <p style="font-size:10px; color:var(--text-muted, #777); margin:0;">スライダーを動かして、上のプレビューを正方形アイコンに綺麗に収めてください。</p>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
+        <button id="crop-modal-cancel-btn" style="background: none; border: 1px solid #ccc; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; color: inherit;">キャンセル</button>
+        <button id="crop-modal-apply-btn" style="background: var(--primary-color, #4a90e2); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 12px;">決定</button>
+      </div>
     </div>
   `;
 
-  const zoomSlider = container.querySelector(`#${cropContainerId}-zoom`);
-  const shiftXSlider = container.querySelector(`#${cropContainerId}-shift-x`);
-  const shiftYSlider = container.querySelector(`#${cropContainerId}-shift-y`);
+  document.body.appendChild(modal);
 
-  // スタイル変更して、丸い正方形コンテナを擬似的に表現
-  const wrapper = previewImg.parentElement;
-  if (wrapper) {
-    wrapper.style.position = 'relative';
-    wrapper.style.overflow = 'hidden';
-    wrapper.style.display = 'flex';
-    wrapper.style.justifyContent = 'center';
-    wrapper.style.alignItems = 'center';
-  }
+  const previewImg = modal.querySelector('#crop-modal-preview-img');
+  const zoomSlider = modal.querySelector('#crop-modal-zoom');
+  const shiftXSlider = modal.querySelector('#crop-modal-shift-x');
+  const shiftYSlider = modal.querySelector('#crop-modal-shift-y');
+  const cancelBtn = modal.querySelector('#crop-modal-cancel-btn');
+  const applyBtn = modal.querySelector('#crop-modal-apply-btn');
 
-  // プレビューのスタイル更新
-  const updateLivePreview = () => {
-    if (!selectedFile) return;
+  // 仮表示用のURL
+  const imgUrl = URL.createObjectURL(file);
+  previewImg.src = imgUrl;
+
+  const updatePreview = () => {
     const z = zoomSlider.value;
     const x = shiftXSlider.value;
     const y = shiftYSlider.value;
-
-    // CSS transform を使って、GPU加速された非常に滑らかな超軽量プレビューを実現 (スマホでもぬるぬる動作)
+    // CSSのズームと移動をハードウェアアクセラレーションして滑らかに同期
     previewImg.style.transform = `scale(${z / 100}) translate(${-x / 2}%, ${-y / 2}%)`;
-    previewImg.style.transformOrigin = 'center';
   };
 
-  imgInput.onchange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      selectedFile = file;
-      previewImg.src = URL.createObjectURL(file);
-      // スライダー初期化
-      zoomSlider.value = 100;
-      shiftXSlider.value = 0;
-      shiftYSlider.value = 0;
-      updateLivePreview();
-    }
+  zoomSlider.oninput = updatePreview;
+  shiftXSlider.oninput = updatePreview;
+  shiftYSlider.oninput = updatePreview;
+
+  cancelBtn.onclick = () => {
+    modal.remove();
+    URL.revokeObjectURL(imgUrl);
   };
 
-  zoomSlider.oninput = updateLivePreview;
-  shiftXSlider.oninput = updateLivePreview;
-  shiftYSlider.oninput = updateLivePreview;
-
-  // 保存時にキャンバスに切り出してBlobを取得するためのヘルパー
-  return {
-    getCropBlob: async () => {
-      if (!selectedFile) return null;
-      const z = parseFloat(zoomSlider.value);
-      const x = parseFloat(shiftXSlider.value);
-      const y = parseFloat(shiftYSlider.value);
-      return await cropImageToSquareBlob(selectedFile, z, x, y);
+  applyBtn.onclick = async () => {
+    const z = parseFloat(zoomSlider.value);
+    const x = parseFloat(shiftXSlider.value);
+    const y = parseFloat(shiftYSlider.value);
+    try {
+      const croppedBlob = await cropImageToSquareBlob(file, z, x, y);
+      onCropComplete(croppedBlob);
+      modal.remove();
+    } catch (e) {
+      alert('画像の切り出しに失敗しました。');
+    } finally {
+      URL.revokeObjectURL(imgUrl);
     }
   };
 }
@@ -1102,16 +1117,6 @@ export async function showCharacterModal(char = null) {
     tagsInput = document.getElementById('char-tags-input');
   }
 
-  // トリミングコントロール用コンテナの動的インジェクション
-  let cropContainer = document.getElementById('char-crop-container');
-  if (!cropContainer && imgInput) {
-    const parent = imgInput.parentElement;
-    const cropRow = document.createElement('div');
-    cropRow.id = 'char-crop-container';
-    parent.appendChild(cropRow);
-    cropContainer = cropRow;
-  }
-
   // Reset fields
   nameInput.value = char ? char.name : '';
   if (categoryInput) categoryInput.value = char ? char.category || '' : '';
@@ -1120,15 +1125,24 @@ export async function showCharacterModal(char = null) {
   persInput.value = char ? char.personality || '' : '';
   exInput.value = char ? char.mes_example || '' : '';
   imgInput.value = '';
-  previewImg.style.transform = 'none'; // CSS変形リセット
+  previewImg.style.transform = 'none'; // CSS変形を一旦リセット
   
   let currentAvatarAssetId = char ? char.avatarAssetId : '';
   previewImg.src = await getAvatarUrl(currentAvatarAssetId);
 
   titleEl.textContent = char ? 'キャラクター設定編集' : '新規キャラクター登録';
 
-  // クロッパーの初期化
-  const cropper = setupCropperControls(imgInput, previewImg, 'char-crop-container');
+  // 画像アップロード選択時：大画面トリミングモーダルを割り当ててポップアップ表示
+  let newFileBlob = null;
+  imgInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      showAvatarCropModal(file, (croppedBlob) => {
+        newFileBlob = croppedBlob;
+        previewImg.src = URL.createObjectURL(croppedBlob); // 綺麗にトリミングされた画像プレビュー
+      });
+    }
+  };
 
   saveBtn.onclick = async () => {
     if (!nameInput.value.trim()) {
@@ -1137,14 +1151,12 @@ export async function showCharacterModal(char = null) {
     }
 
     try {
-      // ユーザーが位置調整したトリミング画像（Blob）を取得
-      const croppedBlob = await cropper.getCropBlob();
-      
-      if (croppedBlob) {
+      // 保存
+      if (newFileBlob) {
         if (currentAvatarAssetId) {
           await db.deleteAsset(currentAvatarAssetId);
         }
-        currentAvatarAssetId = await db.saveAsset(croppedBlob, 'image/jpeg');
+        currentAvatarAssetId = await db.saveAsset(newFileBlob, 'image/jpeg');
       }
 
       const characterData = {
@@ -1256,7 +1268,7 @@ export async function importCharacterJSON(file) {
 }
 
 /**
- * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト・ストーリータグ・主人公トリミング）の編集モーダルを動的に生成・表示します。
+ * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト・ストーリータグ・主人公大画面トリミング）の編集モーダルを動的に生成・表示します。
  */
 export async function showStorySettingsModal() {
   const { currentStory } = getState();
@@ -1308,8 +1320,6 @@ export async function showStorySettingsModal() {
               <input type="text" id="story-p-name-input" value="${escapeHTML(currentStory.protagonist?.name || '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
             </div>
           </div>
-          <!-- トリミング操作用コンテナ -->
-          <div id="story-p-crop-container"></div>
           
           <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 8px;">
             <label style="font-size: 11px; font-weight: bold;">詳細・性格・容姿</label>
@@ -1357,8 +1367,17 @@ export async function showStorySettingsModal() {
   closeBtn.onclick = closeModal;
   cancelBtn.onclick = closeModal;
 
-  // 主人公用クロッパーの初期化
-  const cropper = setupCropperControls(avatarInput, avatarPreview, 'story-p-crop-container');
+  // 主人公用のアバター画像選択時：大画面クロッパーを割り当て
+  let newAvatarBlob = null;
+  avatarInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      showAvatarCropModal(file, (croppedBlob) => {
+        newAvatarBlob = croppedBlob;
+        avatarPreview.src = URL.createObjectURL(croppedBlob);
+      });
+    }
+  };
 
   saveBtn.onclick = async () => {
     const name = modal.querySelector('#story-p-name-input').value.trim();
@@ -1369,13 +1388,11 @@ export async function showStorySettingsModal() {
 
     try {
       let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
-      const croppedBlob = await cropper.getCropBlob();
-
-      if (croppedBlob) {
+      if (newAvatarBlob) {
         if (avatarAssetId) {
           await db.deleteAsset(avatarAssetId);
         }
-        avatarAssetId = await db.saveAsset(croppedBlob, 'image/jpeg');
+        avatarAssetId = await db.saveAsset(newAvatarBlob, 'image/jpeg');
       }
 
       currentStory.protagonist = {
@@ -1407,87 +1424,90 @@ export async function showStorySettingsModal() {
   };
 }
 
+/**
+ * フォントサイズをCSS変数経由で一括変更し、上書きの競合を完全に防ぎます。
+ */
+export function applyFontSize(sizeClass) {
+  let chatSize = '15px';
+  let narrationSize = '14.5px';
+  let uiSize = '13px';
+
+  if (sizeClass === 'small') {
+    chatSize = '13px';
+    narrationSize = '12.5px';
+    uiSize = '11px';
+  } else if (sizeClass === 'large') {
+    chatSize = '18px';
+    narrationSize = '17px';
+    uiSize = '15px';
+  }
+
+  const root = document.documentElement;
+  root.style.setProperty('--chat-font-size', chatSize);
+  root.style.setProperty('--narration-font-size', narrationSize);
+  root.style.setProperty('--ui-font-size', uiSize);
+}
+
+/**
+ * 地の文（ナレーション）の背景色・文字色・不透明度をCSS変数に注入します。
+ */
+export function applyNarrationStyles(bgColor, textColor, opacityPercent) {
+  const root = document.documentElement;
+  
+  let finalBg = bgColor || '#f3f5f8';
+  // HEX値をRGBAに変換して不透明度を反映
+  if (opacityPercent !== undefined && finalBg.startsWith('#') && finalBg.length === 7) {
+    const r = parseInt(finalBg.slice(1, 3), 16) || 243;
+    const g = parseInt(finalBg.slice(3, 5), 16) || 245;
+    const b = parseInt(finalBg.slice(5, 7), 16) || 248;
+    finalBg = `rgba(${r}, ${g}, ${b}, ${opacityPercent / 100})`;
+  }
+  
+  root.style.setProperty('--narration-bg', finalBg);
+  root.style.setProperty('--narration-text', textColor || '#323232');
+}
+
 // ────────────────────────────────────────────────────────
 // 3. 視認性・可読性・スマホ特化レイアウト調整用CSSの自動注入
 // ────────────────────────────────────────────────────────
 const styleInject = document.createElement('style');
 styleInject.textContent = `
-  /* フォントサイズ設定用のクラス定義 */
-  body.font-size-small #story-viewport {
-    font-size: 13px !important;
+  /* CSS変数による一括フォント・ナレーション設定 */
+  :root {
+    --chat-font-size: 15px;
+    --narration-font-size: 14.5px;
+    --ui-font-size: 13px;
+    
+    --narration-bg: rgba(243, 245, 248, 0.8);
+    --narration-text: #323232;
   }
-  body.font-size-medium #story-viewport {
-    font-size: 15px !important;
-  }
-  body.font-size-large #story-viewport {
-    font-size: 18px !important;
-  }
-  
-  body.font-size-small .chat-sender-name,
-  body.font-size-small .novel-action-badge { font-size: 11px !important; }
-  body.font-size-medium .chat-sender-name,
-  body.font-size-medium .novel-action-badge { font-size: 13px !important; }
-  body.font-size-large .chat-sender-name,
-  body.font-size-large .novel-action-badge { font-size: 15px !important; }
 
-  /* ナレーター（地の文）の可読性劇的改善 */
+  /* フォントサイズ設定の強制上書き */
+  .chat-speech, .novel-block, .chat-bubble p {
+    font-size: var(--chat-font-size) !important;
+  }
+  .narration-content, .chat-narration {
+    font-size: var(--narration-font-size) !important;
+  }
+  .chat-sender-name, .novel-action-badge {
+    font-size: var(--ui-font-size) !important;
+  }
+
+  /* ナレーター（地の文）の開始ライン・横幅を「会話の吹き出し」と完全に同期 */
   .chat-narration {
-    color: rgba(50, 50, 50, 0.9) !important;
-    background-color: rgba(243, 245, 248, 0.8) !important;
-    border-left: 4px solid var(--primary-color, #4a90e2) !important;
-    padding: 10px 14px !important;
-    margin: 16px 0 !important;
-    border-radius: 4px !important;
-    line-height: 1.75 !important;
-    letter-spacing: 0.03em !important;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.02) !important;
-    box-sizing: border-box !important;
+    display: flex;
+    justify-content: flex-start;
+    width: 100%;
+    box-sizing: border-box;
+    margin: 14px 0 !important;
   }
   
-  .chat-narration .narration-content p {
-    margin: 0 !important;
-  }
-
-  /* セリフ吹き出し内の行間・可読性も調整 */
-  .chat-bubble p {
-    line-height: 1.65 !important;
-    margin-bottom: 8px !important;
-  }
-  .chat-bubble p:last-child {
-    margin-bottom: 0 !important;
-  }
-
-  /* スマートフォン専用：可読性マージン調整 */
-  @media (max-width: 1023px) {
-    #story-viewport {
-      padding: 12px 8px !important;
-    }
-    .chat-message {
-      margin-bottom: 14px !important;
-      gap: 8px !important;
-    }
-    .chat-avatar {
-      width: 40px !important;
-      height: 40px !important;
-    }
-    .chat-bubble {
-      padding: 10px 12px !important;
-      max-width: 82% !important;
-    }
-    .chat-narration {
-      padding: 8px 10px !important;
-      margin: 12px 2px !important;
-      font-size: 0.95em !important;
-    }
-  }
-
-  /* ダークモード時のナレーター可読性補正 */
-  @media (prefers-color-scheme: dark) {
-    .chat-narration {
-      color: rgba(225, 228, 232, 0.95) !important;
-      background-color: rgba(30, 34, 42, 0.7) !important;
-      border-left: 4px solid var(--primary-light, #64b5f6) !important;
-    }
-  }
-`;
-document.head.appendChild(styleInject);
+  .narration-content {
+    /* 吹き出しのテキスト左端ライン（アバター50px + 隙間12px = 62px）に完全に揃えます */
+    padding-left: 62px !important;
+    padding-right: 16px !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+    width: 100%;
+    max-width: 82% !important; /* 吹き出しと同じ最大幅に制限 */
+    box-sizing: border-box !important;
