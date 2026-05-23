@@ -242,6 +242,24 @@ function matchCharacterByName(speakerName, characters) {
 }
 
 /**
+ * キャラクターがストーリーのタグにマッチしているか判定します（世界観絞り込みフィルタ）。
+ */
+export function isCharacterMatchingStory(char, story) {
+  if (!story) return false;
+  const storyTags = story.tags || [];
+  if (storyTags.length === 0) return true; // 物語にタグがない場合はすべてのキャラを表示（互換性維持）
+
+  const charCategory = char.category || '';
+  const charTags = char.tags || [];
+
+  // カテゴリー、またはキャラクター自身に登録された個別タグが、ストーリータグに含まれているか確認
+  const matchCategory = storyTags.includes(charCategory);
+  const matchTags = charTags.some(tag => storyTags.includes(tag));
+
+  return matchCategory || matchTags;
+}
+
+/**
  * Renders the story messages to the screen based on the current uiMode.
  */
 export async function renderStory() {
@@ -478,7 +496,10 @@ export async function renderSidebar() {
 
   const { protagonist, sceneState, characterMemory, relationshipMemory } = currentStory;
   const pAvatarUrl = await getAvatarUrl(protagonist?.avatarAssetId);
-  const characters = await db.getCharacters();
+  
+  // 世界観のタグ絞り込み（タグ一致キャラのみ抽出、タグがなければ全キャラ表示）
+  const allCharacters = await db.getCharacters();
+  const characters = allCharacters.filter(char => isCharacterMatchingStory(char, currentStory));
 
   let html = `
     <!-- Protagonist Profile Card -->
@@ -525,7 +546,7 @@ export async function renderSidebar() {
   `;
 
   if (characters.length === 0) {
-    html += `<p class="note">キャラクターライブラリにキャラクターが登録されていません。</p>`;
+    html += `<p class="note">タグの一致するキャラクター、または登録されているキャラクターはいません。</p>`;
   } else {
     for (const char of characters) {
       const charRef = currentStory.characters?.find(c => c.characterId === char.characterId);
@@ -588,13 +609,15 @@ function bindSidebarEvents() {
   if (!currentStory) return;
 
   const saveStateChanges = () => {
-    db.saveStory(currentStory).then(() => {
-      // Notify other modules of change if needed, but avoid full re-render of sidebar during active typing
+    db.saveStory(currentStory).then(async () => {
+      // 変更をグローバルStateリストに同期して整合性を維持
+      const stories = await db.getStories();
+      updateState({ stories });
       window.dispatchEvent(new CustomEvent('storyDataUpdated'));
     });
   };
 
-  // --- 主人公カードクリック時に設定モーダルを起動 ---
+  // 主人公カードクリック時に設定モーダルを起動（PC・タブレット用）
   const pCard = document.querySelector('.sidebar-protagonist-card');
   if (pCard) {
     pCard.onclick = () => {
@@ -787,7 +810,7 @@ export async function renderCharacterLibrary() {
     if (c.category) categories.add(c.category);
   });
 
-  // Rebuild filter options dynamically (keep "all" and "in-story", add categories)
+  // Rebuild filter options dynamically (keep "all", "in-story", "matching-tags" and categories)
   if (filterSelect) {
     const currentVal = filterSelect.value;
     filterSelect.innerHTML = '';
@@ -800,6 +823,15 @@ export async function renderCharacterLibrary() {
     optInStory.value = 'in-story';
     optInStory.textContent = '使用中のストーリーのみ';
     filterSelect.appendChild(optInStory);
+
+    // 追加：タグの一致するキャラクターのみを表示するフィルターオプション
+    const { currentStory } = getState();
+    if (currentStory && currentStory.tags && currentStory.tags.length > 0) {
+      const optMatchingTags = document.createElement('option');
+      optMatchingTags.value = 'matching-tags';
+      optMatchingTags.textContent = `タグ一致 (${currentStory.tags.join(', ')})`;
+      filterSelect.appendChild(optMatchingTags);
+    }
 
     for (const cat of [...categories].sort()) {
       const opt = document.createElement('option');
@@ -828,11 +860,14 @@ export async function renderCharacterLibrary() {
     filtered = filtered.filter(c =>
       c.name.toLowerCase().includes(searchQuery) ||
       (c.category || '').toLowerCase().includes(searchQuery) ||
-      (c.personality || '').toLowerCase().includes(searchQuery)
+      (c.personality || '').toLowerCase().includes(searchQuery) ||
+      (c.tags || []).some(t => t.toLowerCase().includes(searchQuery))
     );
   }
   if (filterMode === 'in-story') {
     filtered = filtered.filter(c => inStoryCharIds.has(c.characterId));
+  } else if (filterMode === 'matching-tags') {
+    filtered = filtered.filter(c => isCharacterMatchingStory(c, currentStory));
   } else if (filterMode.startsWith('cat:')) {
     const catName = filterMode.slice(4);
     filtered = filtered.filter(c => c.category === catName);
@@ -854,9 +889,17 @@ export async function renderCharacterLibrary() {
     card.className = 'char-card';
     const avatarUrl = await getAvatarUrl(char.avatarAssetId);
     
-    const categoryTag = char.category
-      ? `<span class="char-card-tag">${escapeHTML(char.category)}</span>`
-      : '';
+    let tagBadges = '';
+    if (char.category) {
+      tagBadges += `<span class="char-card-tag">${escapeHTML(char.category)}</span>`;
+    }
+    if (char.tags && char.tags.length > 0) {
+      char.tags.forEach(t => {
+        if (t !== char.category) {
+          tagBadges += `<span class="char-card-tag" style="background-color: var(--primary-light, #e1f5fe); color: var(--primary-dark, #0288d1);">${escapeHTML(t)}</span>`;
+        }
+      });
+    }
 
     card.innerHTML = `
       <div class="char-card-avatar-wrapper">
@@ -864,8 +907,8 @@ export async function renderCharacterLibrary() {
       </div>
       <div class="char-card-details">
         <strong>${escapeHTML(char.name)}</strong>
-        ${categoryTag}
-        <p class="char-card-personality">${escapeHTML(char.personality || '個性未設定')}</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">${tagBadges}</div>
+        <p class="char-card-personality" style="margin-top: 8px;">${escapeHTML(char.personality || '個性未設定')}</p>
       </div>
       <div class="char-card-actions">
         <button class="edit-char-btn" title="編集"><span class="material-symbols-outlined">edit</span></button>
@@ -888,7 +931,10 @@ export async function renderCharacterLibrary() {
     card.querySelector('.delete-char-btn').onclick = (e) => {
       e.stopPropagation();
       if (confirm(`キャラクター「${char.name}」を削除しますか？\n(紐付いているアバター画像も削除されます)`)) {
-        db.deleteCharacter(char.characterId).then(() => {
+        db.deleteCharacter(char.characterId).then(async () => {
+          // メモリ上のStateを同期
+          const updatedChars = await db.getCharacters();
+          updateState({ characters: updatedChars });
           renderCharacterLibrary();
           renderSidebar();
         });
@@ -916,9 +962,24 @@ export async function showCharacterModal(char = null) {
   const previewImg = document.getElementById('char-img-preview');
   const saveBtn = document.getElementById('char-save-btn');
 
+  // タグ（カンマ区切り）入力欄を、HTMLを変更せずJavaScriptで動的インジェクション
+  let tagsInput = document.getElementById('char-tags-input');
+  if (!tagsInput && categoryInput) {
+    const parent = categoryInput.parentElement;
+    const tagsRow = document.createElement('div');
+    tagsRow.className = 'form-row';
+    tagsRow.innerHTML = `
+      <label>タグ (カンマ区切り)</label>
+      <input type="text" id="char-tags-input" placeholder="例: 五等分の花嫁, アニメ">
+    `;
+    parent.after(tagsRow);
+    tagsInput = document.getElementById('char-tags-input');
+  }
+
   // Reset fields
   nameInput.value = char ? char.name : '';
   if (categoryInput) categoryInput.value = char ? char.category || '' : '';
+  if (tagsInput) tagsInput.value = char && char.tags ? char.tags.join(', ') : '';
   descInput.value = char ? char.description || '' : '';
   persInput.value = char ? char.personality || '' : '';
   exInput.value = char ? char.mes_example || '' : '';
@@ -959,6 +1020,7 @@ export async function showCharacterModal(char = null) {
         characterId: char ? char.characterId : undefined,
         name: nameInput.value.trim(),
         category: categoryInput ? categoryInput.value.trim() : '',
+        tags: tagsInput ? tagsInput.value.split(',').map(t => t.trim()).filter(t => t.length > 0) : [], // タグ配列を追加
         avatarAssetId: currentAvatarAssetId,
         description: descInput.value.trim(),
         personality: persInput.value.trim(),
@@ -966,6 +1028,11 @@ export async function showCharacterModal(char = null) {
       };
 
       await db.saveCharacter(characterData);
+      
+      // 保存完了時にStateを即座に更新して、F5を待たずに同期させる
+      const updatedChars = await db.getCharacters();
+      updateState({ characters: updatedChars });
+
       modal.classList.add('hidden');
       renderCharacterLibrary();
       renderSidebar();
@@ -987,6 +1054,7 @@ async function exportCharacterJSON(char) {
       version: 1,
       name: char.name,
       category: char.category || '',
+      tags: char.tags || [],
       description: char.description || '',
       personality: char.personality || '',
       mes_example: char.mes_example || '',
@@ -1035,6 +1103,7 @@ export async function importCharacterJSON(file) {
     const charData = {
       name: importObj.name,
       category: importObj.category || '',
+      tags: importObj.tags || [],
       description: importObj.description,
       personality: importObj.personality,
       mes_example: importObj.mes_example,
@@ -1042,6 +1111,11 @@ export async function importCharacterJSON(file) {
     };
 
     await db.saveCharacter(charData);
+
+    // インポート完了時にStateを同期
+    const updatedChars = await db.getCharacters();
+    updateState({ characters: updatedChars });
+
     renderCharacterLibrary();
     renderSidebar();
     alert(`キャラクター「${charData.name}」を取り込みました。`);
@@ -1051,7 +1125,7 @@ export async function importCharacterJSON(file) {
 }
 
 /**
- * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト）の編集モーダルを動的に生成・表示します。
+ * スマホ・PC双方に対応したストーリー設定（主人公・世界観・プロンプト・ストーリータグ）の編集モーダルを動的に生成・表示します。
  */
 export async function showStorySettingsModal() {
   const { currentStory } = getState();
@@ -1113,6 +1187,12 @@ export async function showStorySettingsModal() {
           <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="例：一般的な日常世界です。">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
         </div>
 
+        <!-- ストーリータグの設定（追加） -->
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">ストーリーのタグ (カンマ区切り)</label>
+          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;" placeholder="例: 五等分の花嫁, ラブコメ">
+        </div>
+
         <!-- 執筆ルールの設定 -->
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
@@ -1155,6 +1235,7 @@ export async function showStorySettingsModal() {
     const desc = modal.querySelector('#story-p-desc-input').value.trim();
     const world = modal.querySelector('#story-world-input').value.trim();
     const promptText = modal.querySelector('#story-prompt-input').value.trim();
+    const tagsText = modal.querySelector('#story-tags-input').value.trim(); // 追加
 
     try {
       let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
@@ -1172,8 +1253,16 @@ export async function showStorySettingsModal() {
       };
       currentStory.worldPrompt = world;
       currentStory.storytellerPrompt = promptText;
+      
+      // カンマ区切りのテキストをパースしてタグ配列に変換して保存
+      currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
 
       await db.saveStory(currentStory);
+      
+      // 保存完了時にState側の物語一覧データを同期する
+      const updatedStories = await db.getStories();
+      updateState({ stories: updatedStories });
+
       closeModal();
       
       // UIの再レンダリング
