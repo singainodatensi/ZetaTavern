@@ -1264,4 +1264,54 @@ export function applyNarrationStyles(bgColor, textColor, opacityPercent) {
     const r = parseInt(finalBg.slice(1, 3), 16) || 243;
     const g = parseInt(finalBg.slice(3, 5), 16) || 245;
     const b = parseInt(finalBg.slice(5, 7), 16) || 248;
-    finalBg = `rgba(${r}, ${g}, ${b}, $
+    finalBg = `rgba(${r}, ${g}, ${b}, ${opacityPercent / 100})`;
+  }
+  root.style.setProperty('--narration-bg', finalBg);
+  root.style.setProperty('--narration-text', textColor || '#323232');
+}
+
+const styleInject = document.createElement('style');
+styleInject.textContent = `
+  :root {
+    --chat-font-size: 15px;
+    --narration-font-size: 14.5px;
+    --ui-font-size: 13px;
+    --narration-bg: rgba(243, 245, 248, 0.8);
+    --narration-text: #323232;
+  }
+  .chat-speech, .novel-block, .chat-bubble p { font-size: var(--chat-font-size) !important; }
+  .narration-content, .chat-narration { font-size: var(--narration-font-size) !important; }
+  .chat-sender-name, .novel-action-badge { font-size: var(--ui-font-size) !important; }
+  .chat-narration { display: flex; justify-content: flex-start; width: 100%; box-sizing: border-box; margin: 14px 0 !important; }
+  .narration-content { padding-left: 62px !important; padding-right: 16px !important; padding-top: 8px !important; padding-bottom: 8px !important; width: 100%; max-width: 82% !important; box-sizing: border-box !important; line-height: 1.75 !important; letter-spacing: 0.03em !important; color: var(--narration-text) !important; background-color: var(--narration-bg) !important; border-left: 4px solid var(--primary-color, #4a90e2) !important; border-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.01); }
+  .narration-content p { margin: 0 !important; }
+  .chat-bubble p { line-height: 1.65 !important; margin-bottom: 8px !important; }
+  .chat-bubble p:last-child { margin-bottom: 0 !important; }
+
+  /* メッセージアクションとラッパーのCSS設定 */
+  .message-wrapper { position: relative; width: 100%; }
+  .chat-message-actions { position: absolute; top: 4px; right: 8px; display: none; gap: 4px; background: var(--bg-card, #fff); padding: 4px 6px; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); border: 1px solid var(--border-color, #eee); z-index: 10; }
+  .message-wrapper:hover .chat-message-actions { display: flex; }
+  .action-icon-btn { background: none; border: none; cursor: pointer; color: var(--text-color, #333); opacity: 0.5; padding: 2px 4px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+  .action-icon-btn:hover { opacity: 1; color: var(--primary-color, #4a90e2); }
+
+  @media (min-width: 1024px) {
+    .timeline-container { max-width: 800px !important; margin: 0 auto !important; width: 100% !important; display: flex !important; flex-direction: column !important; box-sizing: border-box !important; }
+    #story-viewport { border-left: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important; border-right: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important; }
+  }
+  @media (max-width: 1023px) {
+    #story-viewport { padding: 12px 8px !important; }
+    .chat-message { margin-bottom: 14px !important; gap: 8px !important; }
+    .chat-avatar { width: 40px !important; height: 40px !important; }
+    .chat-bubble { padding: 10px 12px !important; max-width: 82% !important; }
+    .narration-content { padding-left: 48px !important; max-width: 95% !important; font-size: 0.95em !important; }
+    
+    /* モバイル向けアクションボタンの常時薄表示対応 */
+    .chat-message-actions { display: flex; opacity: 0.2; top: -8px; right: 0px; }
+    .message-wrapper:active .chat-message-actions, .chat-message-actions:active { opacity: 1; }
+  }
+  @media (prefers-color-scheme: dark) {
+    .chat-narration { color: rgba(225, 228, 232, 0.95) !important; background-color: rgba(30, 34, 42, 0.7) !important; border-left: 4px solid var(--primary-light, #64b5f6) !important; }
+  }
+`;
+document.head.appendChild(styleInject);
