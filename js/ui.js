@@ -8,18 +8,11 @@ import { getState, updateState, setActiveStory, updateCharacterAttendance } from
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
 
-// Holds temporary blob URLs to prevent memory leaks
 const blobUrlCache = new Map();
 
 export async function getAvatarUrl(assetId) {
-  if (!assetId) {
-    return 'assets/default-silhouette.png';
-  }
-  
-  if (blobUrlCache.has(assetId)) {
-    return blobUrlCache.get(assetId);
-  }
-
+  if (!assetId) return 'assets/default-silhouette.png';
+  if (blobUrlCache.has(assetId)) return blobUrlCache.get(assetId);
   try {
     const blob = await db.getAssetBlob(assetId);
     if (blob) {
@@ -30,45 +23,36 @@ export async function getAvatarUrl(assetId) {
   } catch (err) {
     console.error('Error fetching asset blob for avatar:', err);
   }
-  
   return 'assets/default-silhouette.png';
 }
 
 export function clearBlobUrlCache() {
-  for (const url of blobUrlCache.values()) {
-    URL.revokeObjectURL(url);
-  }
+  for (const url of blobUrlCache.values()) URL.revokeObjectURL(url);
   blobUrlCache.clear();
 }
 
 export function parseChoices(text) {
   if (!text) return { bodyText: '', choices: [] };
-
   const choices = [];
   const choiceLineRegex = /^\s*(?:[-*・►▶▷>]\s*)?([A-CＡ-Ｃ])\s*[\.\):：）．、]\s*(.+?)\s*$/gm;
   const matches = [...text.matchAll(choiceLineRegex)];
-
   if (matches.length >= 2) {
     for (const match of matches) {
       const label = match[1].replace('Ａ', 'A').replace('Ｂ', 'B').replace('Ｃ', 'C');
       choices.push({ label, text: match[2].trim() });
     }
-
     const bodyText = text
       .replace(choiceLineRegex, '')
       .replace(/^\s*(?:#{1,6}\s*)?(?:[-=_─━]{3,}|選択肢|Choices?)\s*$/gmi, '')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
-
     return { bodyText, choices };
   }
-
   return { bodyText: text, choices: [] };
 }
 
 export function parseModelOutputToSegments(text) {
   if (!text) return [{ type: 'narration', text: '' }];
-
   const lines = text.split('\n');
   const segments = [];
   let currentDialogue = null;
@@ -76,9 +60,7 @@ export function parseModelOutputToSegments(text) {
 
   const flushNarration = () => {
     const joined = narrationBuffer.join('\n').trim();
-    if (joined) {
-      segments.push({ type: 'narration', text: joined });
-    }
+    if (joined) segments.push({ type: 'narration', text: joined });
     narrationBuffer = [];
   };
 
@@ -98,28 +80,20 @@ export function parseModelOutputToSegments(text) {
     if (structuredDialogueMatch) {
       flushNarration();
       flushDialogue();
-
       const speaker = structuredDialogueMatch[1].trim();
       const dialogueText = structuredDialogueMatch[2].trim();
-
       if (speaker === 'ナレーター' || speaker === 'システム' || speaker === '背景' || speaker === 'ナレーション') {
         segments.push({ type: 'narration', text: dialogueText });
         continue;
       }
-
-      currentDialogue = {
-        type: 'dialogue',
-        speaker: speaker,
-        lines: [{ kind: 'speech', text: dialogueText }]
-      };
-      flushDialogue();
+      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [{ kind: 'speech', text: dialogueText }] };
+      flushDialogue(); 
       continue;
     }
 
     const isAction = /^\*(.+)\*$/.test(trimmed) || /^＊(.+)＊$/.test(trimmed);
     if (isAction) {
       const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '').trim();
-      
       if (currentDialogue) {
         currentDialogue.lines.push({ kind: 'action', text: actionText });
       } else {
@@ -131,18 +105,12 @@ export function parseModelOutputToSegments(text) {
 
     const inlineDialogueMatch = trimmed.match(/^(.+?)「(.+)$/);
     const startsWithQuote = trimmed.startsWith('「');
-
     const isSpeakerHeader = (
-      trimmed.length > 0 &&
-      trimmed.length <= 30 &&
-      !trimmed.includes('「') &&
-      !trimmed.startsWith('#') &&
-      !trimmed.startsWith('*') &&
-      !trimmed.startsWith('―') &&
-      !trimmed.startsWith('─') &&
-      !trimmed.startsWith('-') &&
-      !trimmed.startsWith('>') &&
-      !/^[\s\d\.\-\*]+$/.test(trimmed)
+      trimmed.length > 0 && trimmed.length <= 30 &&
+      !trimmed.includes('「') && !trimmed.startsWith('#') &&
+      !trimmed.startsWith('*') && !trimmed.startsWith('―') &&
+      !trimmed.startsWith('─') && !trimmed.startsWith('-') &&
+      !trimmed.startsWith('>') && !/^[\s\d\.\-\*]+$/.test(trimmed)
     );
 
     if (inlineDialogueMatch && !startsWithQuote) {
@@ -176,28 +144,21 @@ export function parseModelOutputToSegments(text) {
       }
       flushDialogue();
     }
-
     narrationBuffer.push(line);
   }
 
   flushNarration();
   flushDialogue();
-
   return segments.length > 0 ? segments : [{ type: 'narration', text: text }];
 }
 
 function matchCharacterByName(speakerName, characters) {
   if (!speakerName || !characters || characters.length === 0) return null;
   const normalised = speakerName.trim();
-
   let match = characters.find(c => c.name === normalised);
   if (match) return match;
-
-  match = characters.find(c =>
-    c.name.includes(normalised) || normalised.includes(c.name)
-  );
+  match = characters.find(c => c.name.includes(normalised) || normalised.includes(c.name));
   if (match) return match;
-
   return null;
 }
 
@@ -205,14 +166,9 @@ export function isCharacterMatchingStory(char, story) {
   if (!story) return false;
   const storyTags = story.tags || [];
   if (storyTags.length === 0) return true;
-
   const charCategory = char.category || '';
   const charTags = char.tags || [];
-
-  const matchCategory = storyTags.includes(charCategory);
-  const matchTags = charTags.some(tag => storyTags.includes(tag));
-
-  return matchCategory || matchTags;
+  return storyTags.includes(charCategory) || charTags.some(tag => storyTags.includes(tag));
 }
 
 export async function renderStory() {
@@ -234,7 +190,6 @@ export async function renderStory() {
   }
 
   const messages = currentStory.messages || [];
-  
   const lastMsg = messages[messages.length - 1];
   const lastIsModel = lastMsg && lastMsg.role === 'model';
   
@@ -251,6 +206,11 @@ export async function renderStory() {
     const isModel = msg.role === 'model';
     const textToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
 
+    const msgWrapper = document.createElement('div');
+    msgWrapper.className = 'message-wrapper';
+
+    const contentContainer = document.createElement('div');
+
     if (uiMode === 'chat') {
       if (isModel) {
         const segments = parseModelOutputToSegments(textToRender);
@@ -258,23 +218,19 @@ export async function renderStory() {
           if (seg.type === 'narration') {
             const narEl = document.createElement('div');
             narEl.className = 'chat-message narration-role'; 
-            let html = '';
-            if (window.marked && typeof window.marked.parse === 'function') {
-              html = sanitizeHTML(window.marked.parse(seg.text));
-            } else {
-              html = sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
-            }
+            let html = window.marked && typeof window.marked.parse === 'function' 
+              ? sanitizeHTML(window.marked.parse(seg.text)) 
+              : sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
             narEl.innerHTML = `
               <div class="chat-avatar" style="visibility: hidden; flex-shrink: 0;"></div>
               <div class="chat-content-wrapper">
                 <div class="narration-content">${html}</div>
               </div>
             `;
-            container.appendChild(narEl);
+            contentContainer.appendChild(narEl);
           } else if (seg.type === 'dialogue') {
             const protagonistName = currentStory.protagonist?.name || '主人公';
             const isProtagonist = (seg.speaker === protagonistName || seg.speaker === '主人公');
-
             let avatarUrl = 'assets/default-silhouette.png';
             let roleClass = 'bot-role';
 
@@ -290,77 +246,101 @@ export async function renderStory() {
 
             const msgEl = document.createElement('div');
             msgEl.className = `chat-message ${roleClass}`;
-
             let linesHTML = '';
             for (const line of seg.lines) {
               if (line.kind === 'speech') {
-                const escaped = escapeHTML(line.text);
-                linesHTML += `<p class="chat-speech">${escaped}</p>`;
+                linesHTML += `<p class="chat-speech">${escapeHTML(line.text)}</p>`;
               } else if (line.kind === 'action') {
                 linesHTML += `<p class="chat-action"><em>*${escapeHTML(line.text)}*</em></p>`;
               }
             }
-
             msgEl.innerHTML = `
-              <div class="chat-avatar">
-                <img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}">
-              </div>
+              <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
               <div class="chat-content-wrapper">
                 <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
                 <div class="chat-bubble">${linesHTML}</div>
               </div>
             `;
-            container.appendChild(msgEl);
+            contentContainer.appendChild(msgEl);
           }
         }
       } else {
         let avatarUrl = 'assets/default-silhouette.png';
-        let senderName = 'You';
+        let senderName = currentStory.protagonist?.name || 'You';
         if (currentStory.protagonist) {
-          senderName = currentStory.protagonist.name || 'You';
           avatarUrl = await getAvatarUrl(currentStory.protagonist.avatarAssetId);
         }
-
-        let contentHTML = '';
-        if (window.marked && typeof window.marked.parse === 'function') {
-          contentHTML = sanitizeHTML(window.marked.parse(textToRender));
-        } else {
-          contentHTML = sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
-        }
-
+        let contentHTML = window.marked && typeof window.marked.parse === 'function'
+          ? sanitizeHTML(window.marked.parse(textToRender))
+          : sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
+        
         const msgEl = document.createElement('div');
         msgEl.className = 'chat-message user-role';
         msgEl.innerHTML = `
-          <div class="chat-avatar">
-            <img src="${avatarUrl}" alt="${senderName}">
-          </div>
+          <div class="chat-avatar"><img src="${avatarUrl}" alt="${senderName}"></div>
           <div class="chat-content-wrapper">
             <span class="chat-sender-name">${senderName}</span>
             <div class="chat-bubble">${contentHTML}</div>
           </div>
         `;
-        container.appendChild(msgEl);
+        contentContainer.appendChild(msgEl);
       }
-
     } else {
-      let contentHTML = '';
-      if (window.marked && typeof window.marked.parse === 'function') {
-        contentHTML = sanitizeHTML(window.marked.parse(textToRender));
-      } else {
-        contentHTML = sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
-      }
-
+      let contentHTML = window.marked && typeof window.marked.parse === 'function'
+        ? sanitizeHTML(window.marked.parse(textToRender))
+        : sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
       const blockEl = document.createElement('div');
       blockEl.className = `novel-block ${isModel ? 'story-paragraph' : 'action-paragraph'}`;
-      
       if (!isModel) {
         const pName = currentStory.protagonist?.name || '主人公';
         blockEl.innerHTML = `<span class="novel-action-badge">${pName}の行動</span>${contentHTML}`;
       } else {
         blockEl.innerHTML = contentHTML;
       }
-      container.appendChild(blockEl);
+      contentContainer.appendChild(blockEl);
     }
+
+    msgWrapper.appendChild(contentContainer);
+
+    // アクションボタン群の追加
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'chat-message-actions';
+    let actionHtml = `
+      <button class="action-icon-btn edit-msg-btn" title="メッセージを編集">
+        <span class="material-symbols-outlined" style="font-size:18px;">edit</span>
+      </button>
+      <button class="action-icon-btn delete-msg-btn" title="メッセージを削除">
+        <span class="material-symbols-outlined" style="font-size:18px;">delete</span>
+      </button>
+    `;
+    if (isModel && isLast) {
+      actionHtml += `
+        <button class="action-icon-btn regen-msg-btn" title="AIの応答を再生成">
+          <span class="material-symbols-outlined" style="font-size:18px;">refresh</span>
+        </button>
+      `;
+    }
+    actionsEl.innerHTML = actionHtml;
+
+    actionsEl.querySelector('.edit-msg-btn').onclick = () => showEditMessageModal(i);
+    actionsEl.querySelector('.delete-msg-btn').onclick = async () => {
+      if (confirm('このメッセージを削除しますか？')) {
+        currentStory.messages.splice(i, 1);
+        await db.saveStory(currentStory);
+        const stories = await db.getStories();
+        updateState({ stories });
+        renderStory();
+      }
+    };
+    if (isModel && isLast) {
+      actionsEl.querySelector('.regen-msg-btn').onclick = () => {
+        if (confirm('現在のAIの返答を破棄して、もう一度新しく生成し直しますか？')) {
+          window.dispatchEvent(new CustomEvent('requestRegenerate', { detail: { retryOnly: false } }));
+        }
+      };
+    }
+    msgWrapper.appendChild(actionsEl);
+    container.appendChild(msgWrapper);
   }
 
   if (isGenerating) {
@@ -382,15 +362,78 @@ export async function renderStory() {
     if (cancelBtn) {
       cancelBtn.onclick = () => {
         const { activeAbortController } = getState();
-        if (activeAbortController) {
-          activeAbortController.abort();
-        }
+        if (activeAbortController) activeAbortController.abort();
       };
     }
   }
 
+  // APIエラーや編集による手動中断時、AI応答待ち（最後がユーザー発言）であればリトライボタンを表示
+  if (!isGenerating && lastMsg && lastMsg.role === 'user') {
+    const retryContainer = document.createElement('div');
+    retryContainer.style = "text-align: center; margin: 16px 0;";
+    retryContainer.innerHTML = `
+      <button id="retry-generation-btn" class="primary-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 20px; border-radius: 20px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+        <span class="material-symbols-outlined" style="font-size:20px;">refresh</span> AIの応答を生成する (リトライ)
+      </button>
+    `;
+    retryContainer.querySelector('#retry-generation-btn').onclick = () => {
+      window.dispatchEvent(new CustomEvent('requestRegenerate', { detail: { retryOnly: true } }));
+    };
+    container.appendChild(retryContainer);
+  }
+
   container.scrollTop = container.scrollHeight;
   renderChoiceButtons(parsedLast.choices);
+}
+
+/**
+ * 過去のメッセージ内容を編集する専用モーダルダイアログ
+ */
+export async function showEditMessageModal(msgIndex) {
+  const { currentStory } = getState();
+  if (!currentStory || !currentStory.messages[msgIndex]) return;
+  const msg = currentStory.messages[msgIndex];
+
+  let modal = document.getElementById('msg-edit-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'msg-edit-modal';
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.6)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '5000';
+
+  modal.innerHTML = `
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #333); width: 90%; max-width: 600px; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
+      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">メッセージの編集</h3>
+      <textarea id="msg-edit-textarea" rows="12" style="width: 100%; padding: 12px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; font-family: inherit; font-size: 14px; box-sizing: border-box;">${escapeHTML(msg.content)}</textarea>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px;">
+        <button id="msg-edit-cancel-btn" class="secondary-btn" style="padding: 8px 16px; border-radius: 4px; cursor: pointer;">キャンセル</button>
+        <button id="msg-edit-save-btn" class="primary-btn" style="padding: 8px 16px; border-radius: 4px; cursor: pointer;">変更を保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#msg-edit-cancel-btn').onclick = () => modal.remove();
+  modal.querySelector('#msg-edit-save-btn').onclick = async () => {
+    const newContent = modal.querySelector('#msg-edit-textarea').value.trim();
+    if (newContent) {
+      currentStory.messages[msgIndex].content = newContent;
+      await db.saveStory(currentStory);
+      modal.remove();
+      renderStory();
+    } else {
+      alert('メッセージを空にはできません。削除したい場合はゴミ箱アイコンを使用してください。');
+    }
+  };
 }
 
 function renderChoiceButtons(choices) {
@@ -398,7 +441,6 @@ function renderChoiceButtons(choices) {
   if (!choicesContainer) return;
 
   choicesContainer.innerHTML = '';
-  
   const { showChoices, isGenerating } = getState();
   
   if (!showChoices || choices.length === 0 || isGenerating) {
@@ -407,7 +449,6 @@ function renderChoiceButtons(choices) {
   }
 
   choicesContainer.classList.remove('hidden');
-
   choices.forEach(choice => {
     const btn = document.createElement('button');
     btn.className = 'choice-btn';
@@ -435,7 +476,6 @@ export async function renderSidebar() {
 
   const { protagonist, sceneState, characterMemory, relationshipMemory } = currentStory;
   const pAvatarUrl = await getAvatarUrl(protagonist?.avatarAssetId);
-  
   const allCharacters = await db.getCharacters();
   const characters = allCharacters.filter(char => isCharacterMatchingStory(char, currentStory));
 
@@ -487,7 +527,6 @@ export async function renderSidebar() {
       const charRef = currentStory.characters?.find(c => c.characterId === char.characterId);
       const role = charRef ? charRef.attendance : 'absent';
       const avatarUrl = await getAvatarUrl(char.avatarAssetId);
-      
       const charMem = characterMemory?.[char.characterId] || {};
       const relMem = relationshipMemory?.[char.characterId] || { affinity: 50, notes: '' };
 
@@ -525,11 +564,7 @@ export async function renderSidebar() {
     }
   }
 
-  html += `
-      </div>
-    </div>
-  `;
-
+  html += `</div></div>`;
   sidebarEl.innerHTML = html;
   bindSidebarEvents();
 }
@@ -547,11 +582,7 @@ function bindSidebarEvents() {
   };
 
   const pCard = document.querySelector('.sidebar-protagonist-card');
-  if (pCard) {
-    pCard.onclick = () => {
-      showStorySettingsModal();
-    };
-  }
+  if (pCard) pCard.onclick = () => showStorySettingsModal();
 
   const locInput = document.getElementById('scene-location-input');
   const timeInput = document.getElementById('scene-time-input');
@@ -569,11 +600,8 @@ function bindSidebarEvents() {
       const role = e.target.value;
       const row = e.target.closest('.sidebar-char-row');
       const body = row.querySelector('.char-role-body');
-      if (role === 'absent') {
-        body.classList.add('hidden');
-      } else {
-        body.classList.remove('hidden');
-      }
+      if (role === 'absent') body.classList.add('hidden');
+      else body.classList.remove('hidden');
       updateCharacterAttendance(charId, role);
       saveStateChanges();
     };
@@ -583,12 +611,9 @@ function bindSidebarEvents() {
     range.oninput = (e) => {
       const charId = e.target.dataset.charId;
       const val = parseInt(e.target.value);
-      const label = e.target.previousElementSibling;
-      label.textContent = `好感度 (${val})`;
-
+      e.target.previousElementSibling.textContent = `好感度 (${val})`;
       if (!currentStory.relationshipMemory) currentStory.relationshipMemory = {};
       if (!currentStory.relationshipMemory[charId]) currentStory.relationshipMemory[charId] = { affinity: 50, notes: '' };
-      
       currentStory.relationshipMemory[charId].affinity = val;
       saveStateChanges();
     };
@@ -622,7 +647,6 @@ export async function renderStoryList() {
   container.innerHTML = '';
   const stories = await db.getStories();
   const current = getState().currentStory;
-
   stories.sort((a, b) => b.timestamp - a.timestamp);
 
   if (current) {
@@ -640,7 +664,6 @@ export async function renderStoryList() {
   stories.forEach(story => {
     const el = document.createElement('div');
     el.className = `story-list-item ${current && current.storyId === story.storyId ? 'active' : ''}`;
-    
     el.innerHTML = `
       <div class="story-item-text" style="flex: 1; min-width: 0;">
         <span class="story-item-title">${escapeHTML(story.title || '無題のストーリー')}</span>
@@ -661,13 +684,10 @@ export async function renderStoryList() {
         e.stopPropagation();
         const oldTitle = story.title || '新しいストーリー';
         const newTitle = prompt('ストーリーの名前を変更:', oldTitle);
-        
         if (newTitle !== null && newTitle.trim() !== '') {
           story.title = newTitle.trim();
           db.saveStory(story).then(() => {
-            if (current && current.storyId === story.storyId) {
-              setActiveStory(story);
-            }
+            if (current && current.storyId === story.storyId) setActiveStory(story);
             renderStoryList();
           });
         }
@@ -678,9 +698,7 @@ export async function renderStoryList() {
         e.stopPropagation();
         if (confirm(`ストーリー「${story.title}」を削除しますか？`)) {
           db.deleteStory(story.storyId).then(() => {
-            if (current && current.storyId === story.storyId) {
-              setActiveStory(null);
-            }
+            if (current && current.storyId === story.storyId) setActiveStory(null);
             renderStoryList();
           });
         }
@@ -691,7 +709,6 @@ export async function renderStoryList() {
       renderStoryList();
       document.getElementById('mobile-drawer')?.classList.remove('open');
     };
-
     container.appendChild(el);
   });
 }
@@ -702,16 +719,12 @@ export async function renderCharacterLibrary() {
 
   container.innerHTML = '';
   const characters = await db.getCharacters();
-
   const searchInput = document.getElementById('library-search-input');
   const filterSelect = document.getElementById('library-filter-select');
   const searchQuery = searchInput ? searchInput.value.trim().toLowerCase() : '';
   const filterMode = filterSelect ? filterSelect.value : 'all';
-
   const categories = new Set();
-  characters.forEach(c => {
-    if (c.category) categories.add(c.category);
-  });
+  characters.forEach(c => { if (c.category) categories.add(c.category); });
 
   if (filterSelect) {
     const currentVal = filterSelect.value;
@@ -740,7 +753,6 @@ export async function renderCharacterLibrary() {
       opt.textContent = cat;
       filterSelect.appendChild(opt);
     }
-
     filterSelect.value = currentVal;
   }
 
@@ -748,9 +760,7 @@ export async function renderCharacterLibrary() {
   const inStoryCharIds = new Set();
   if (currentStory && currentStory.characters) {
     currentStory.characters.forEach(c => {
-      if (c.attendance && c.attendance !== 'absent') {
-        inStoryCharIds.add(c.characterId);
-      }
+      if (c.attendance && c.attendance !== 'absent') inStoryCharIds.add(c.characterId);
     });
   }
 
@@ -774,10 +784,7 @@ export async function renderCharacterLibrary() {
 
   const addCard = document.createElement('div');
   addCard.className = 'char-card add-card';
-  addCard.innerHTML = `
-    <span class="material-symbols-outlined add-icon">person_add</span>
-    <strong>新しいキャラクター</strong>
-  `;
+  addCard.innerHTML = `<span class="material-symbols-outlined add-icon">person_add</span><strong>新しいキャラクター</strong>`;
   addCard.onclick = () => showCharacterModal();
   container.appendChild(addCard);
 
@@ -787,21 +794,15 @@ export async function renderCharacterLibrary() {
     const avatarUrl = await getAvatarUrl(char.avatarAssetId);
     
     let tagBadges = '';
-    if (char.category) {
-      tagBadges += `<span class="char-card-tag">${escapeHTML(char.category)}</span>`;
-    }
+    if (char.category) tagBadges += `<span class="char-card-tag">${escapeHTML(char.category)}</span>`;
     if (char.tags && char.tags.length > 0) {
       char.tags.forEach(t => {
-        if (t !== char.category) {
-          tagBadges += `<span class="char-card-tag" style="background-color: var(--primary-light, #e1f5fe); color: var(--primary-dark, #0288d1);">${escapeHTML(t)}</span>`;
-        }
+        if (t !== char.category) tagBadges += `<span class="char-card-tag" style="background-color: var(--primary-light, #e1f5fe); color: var(--primary-dark, #0288d1);">${escapeHTML(t)}</span>`;
       });
     }
 
     card.innerHTML = `
-      <div class="char-card-avatar-wrapper">
-        <img src="${avatarUrl}" alt="${char.name}">
-      </div>
+      <div class="char-card-avatar-wrapper"><img src="${avatarUrl}" alt="${char.name}"></div>
       <div class="char-card-details">
         <strong>${escapeHTML(char.name)}</strong>
         <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">${tagBadges}</div>
@@ -814,16 +815,8 @@ export async function renderCharacterLibrary() {
       </div>
     `;
 
-    card.querySelector('.edit-char-btn').onclick = (e) => {
-      e.stopPropagation();
-      showCharacterModal(char);
-    };
-    
-    card.querySelector('.export-char-btn').onclick = (e) => {
-      e.stopPropagation();
-      exportCharacterJSON(char);
-    };
-
+    card.querySelector('.edit-char-btn').onclick = (e) => { e.stopPropagation(); showCharacterModal(char); };
+    card.querySelector('.export-char-btn').onclick = (e) => { e.stopPropagation(); exportCharacterJSON(char); };
     card.querySelector('.delete-char-btn').onclick = (e) => {
       e.stopPropagation();
       if (confirm(`キャラクター「${char.name}」を削除しますか？\n(紐付いているアバター画像も削除されます)`)) {
@@ -835,7 +828,6 @@ export async function renderCharacterLibrary() {
         });
       }
     };
-
     container.appendChild(card);
   }
 }
@@ -849,32 +841,18 @@ export function cropImageToSquareBlob(file, zoomPercent, shiftX, shiftY) {
       canvas.width = 300; 
       canvas.height = 300;
       const ctx = canvas.getContext('2d');
-
       const r = 300 / 200; 
       const scale = zoomPercent / 100;
       const aspect = img.width / img.height;
-      
       let baseWidth, baseHeight;
-      if (aspect > 1) {
-        baseHeight = 200;
-        baseWidth = 200 * aspect;
-      } else {
-        baseWidth = 200;
-        baseHeight = 200 / aspect;
-      }
-
+      if (aspect > 1) { baseHeight = 200; baseWidth = 200 * aspect; }
+      else { baseWidth = 200; baseHeight = 200 / aspect; }
       const drawWidth = baseWidth * scale * r;
       const drawHeight = baseHeight * scale * r;
-
       const drawX = (300 - drawWidth) / 2 + (shiftX * r);
       const drawY = (300 - drawHeight) / 2 + (shiftY * r);
-
       ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
-
-      canvas.toBlob((blob) => {
-        resolve(blob);
-      }, 'image/jpeg', 0.9);
-
+      canvas.toBlob((blob) => { resolve(blob); }, 'image/jpeg', 0.9);
       URL.revokeObjectURL(img.src);
     };
     img.onerror = (err) => reject(err);
@@ -884,10 +862,8 @@ export function cropImageToSquareBlob(file, zoomPercent, shiftX, shiftY) {
 export function showAvatarCropModal(file, onCropComplete) {
   let modal = document.getElementById('avatar-crop-modal');
   if (modal) modal.remove();
-
   modal = document.createElement('div');
   modal.id = 'avatar-crop-modal';
-  
   modal.style.position = 'fixed';
   modal.style.top = '0';
   modal.style.left = '0';
@@ -901,13 +877,11 @@ export function showAvatarCropModal(file, onCropComplete) {
 
   modal.innerHTML = `
     <div style="background: var(--bg-card, #fff); color: var(--text-color, #333); width: 90%; max-width: 380px; border-radius: 8px; padding: 20px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); box-sizing: border-box;">
-      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">アバターの位置調整（トリミング）</h3>
-      
+      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">アバターの位置調整</h3>
       <div style="position: relative; width: 200px; height: 200px; margin: 0 auto; background: #eee; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; display: flex; justify-content: center; align-items: center;">
         <img id="crop-modal-preview-img" style="position: absolute; transform-origin: center; max-width: none; max-height: none;" alt="Crop Preview">
         <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; box-shadow: inset 0 0 0 100px rgba(0,0,0,0.55); border-radius: 50%;"></div>
       </div>
-
       <div style="display: flex; flex-direction: column; gap: 8px;">
         <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
           <span style="font-size: 11px; min-width: 50px; font-weight: bold;">ズーム</span>
@@ -922,14 +896,12 @@ export function showAvatarCropModal(file, onCropComplete) {
           <input type="range" id="crop-modal-shift-y" min="-100" max="100" value="0" style="flex: 1; cursor: pointer;">
         </div>
       </div>
-
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
         <button id="crop-modal-cancel-btn" style="background: none; border: 1px solid #ccc; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; color: inherit;">キャンセル</button>
         <button id="crop-modal-apply-btn" style="background: var(--primary-color, #4a90e2); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 12px;">決定</button>
       </div>
     </div>
   `;
-
   document.body.appendChild(modal);
 
   const previewImg = modal.querySelector('#crop-modal-preview-img');
@@ -951,13 +923,8 @@ export function showAvatarCropModal(file, onCropComplete) {
 
   previewImg.onload = () => {
     const aspect = previewImg.naturalWidth / previewImg.naturalHeight;
-    if (aspect > 1) {
-      previewImg.style.height = '200px';
-      previewImg.style.width = `${200 * aspect}px`;
-    } else {
-      previewImg.style.width = '200px';
-      previewImg.style.height = `${200 / aspect}px`;
-    }
+    if (aspect > 1) { previewImg.style.height = '200px'; previewImg.style.width = `${200 * aspect}px`; }
+    else { previewImg.style.width = '200px'; previewImg.style.height = `${200 / aspect}px`; }
     updatePreview();
   };
 
@@ -965,11 +932,7 @@ export function showAvatarCropModal(file, onCropComplete) {
   shiftXSlider.oninput = updatePreview;
   shiftYSlider.oninput = updatePreview;
 
-  cancelBtn.onclick = () => {
-    modal.remove();
-    URL.revokeObjectURL(imgUrl);
-  };
-
+  cancelBtn.onclick = () => { modal.remove(); URL.revokeObjectURL(imgUrl); };
   applyBtn.onclick = async () => {
     const z = parseFloat(zoomSlider.value);
     const x = parseFloat(shiftXSlider.value);
@@ -1005,10 +968,7 @@ export async function showCharacterModal(char = null) {
     const parent = categoryInput.parentElement;
     const tagsRow = document.createElement('div');
     tagsRow.className = 'form-row';
-    tagsRow.innerHTML = `
-      <label>タグ (カンマ区切り)</label>
-      <input type="text" id="char-tags-input" placeholder="例: 五等分の花嫁, アニメ">
-    `;
+    tagsRow.innerHTML = `<label>タグ (カンマ区切り)</label><input type="text" id="char-tags-input" placeholder="例: 五等分の花嫁, アニメ">`;
     parent.after(tagsRow);
     tagsInput = document.getElementById('char-tags-input');
   }
@@ -1038,7 +998,6 @@ export async function showCharacterModal(char = null) {
   
   let currentAvatarAssetId = char ? char.avatarAssetId : '';
   previewImg.src = await getAvatarUrl(currentAvatarAssetId);
-
   titleEl.textContent = char ? 'キャラクター設定編集' : '新規キャラクター登録';
 
   let currentOriginalFile = null;
@@ -1068,19 +1027,12 @@ export async function showCharacterModal(char = null) {
   }
 
   saveBtn.onclick = async () => {
-    if (!nameInput.value.trim()) {
-      alert('キャラクター名を入力してください。');
-      return;
-    }
-
+    if (!nameInput.value.trim()) { alert('キャラクター名を入力してください。'); return; }
     try {
       if (newFileBlob) {
-        if (currentAvatarAssetId) {
-          await db.deleteAsset(currentAvatarAssetId);
-        }
+        if (currentAvatarAssetId) await db.deleteAsset(currentAvatarAssetId);
         currentAvatarAssetId = await db.saveAsset(newFileBlob, 'image/jpeg');
       }
-
       const characterData = {
         characterId: char ? char.characterId : undefined,
         name: nameInput.value.trim(),
@@ -1091,12 +1043,9 @@ export async function showCharacterModal(char = null) {
         personality: persInput.value.trim(),
         mes_example: exInput.value.trim()
       };
-
       await db.saveCharacter(characterData);
-      
       const updatedChars = await db.getCharacters();
       updateState({ characters: updatedChars });
-
       modal.classList.add('hidden');
       renderCharacterLibrary();
       renderSidebar();
@@ -1111,74 +1060,47 @@ export async function showCharacterModal(char = null) {
 async function exportCharacterJSON(char) {
   try {
     const exportObj = {
-      spec: 'zetatavern-character',
-      version: 1,
-      name: char.name,
-      category: char.category || '',
-      tags: char.tags || [],
-      description: char.description || '',
-      personality: char.personality || '',
-      mes_example: char.mes_example || '',
-      avatarBase64: ''
+      spec: 'zetatavern-character', version: 1, name: char.name, category: char.category || '',
+      tags: char.tags || [], description: char.description || '', personality: char.personality || '',
+      mes_example: char.mes_example || '', avatarBase64: ''
     };
-
     if (char.avatarAssetId) {
       const blob = await db.getAssetBlob(char.avatarAssetId);
-      if (blob) {
-        exportObj.avatarBase64 = await db.blobToBase64(blob);
-      }
+      if (blob) exportObj.avatarBase64 = await db.blobToBase64(blob);
     }
-
     const jsonStr = JSON.stringify(exportObj, null, 2);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    
     const a = document.createElement('a');
     a.href = url;
     a.download = `${char.name}_card.json`;
     a.click();
     URL.revokeObjectURL(url);
-  } catch (err) {
-    alert(`エクスポートに失敗しました: ${err.message}`);
-  }
+  } catch (err) { alert(`エクスポートに失敗しました: ${err.message}`); }
 }
 
 export async function importCharacterJSON(file) {
   try {
     const text = await file.text();
     const importObj = JSON.parse(text);
-
-    if (importObj.spec !== 'zetatavern-character') {
-      throw new Error('サポートされていないファイル形式です。(ZetaTavernキャラクターJSONではありません)');
-    }
-
+    if (importObj.spec !== 'zetatavern-character') throw new Error('サポートされていないファイル形式です');
     let avatarAssetId = '';
     if (importObj.avatarBase64) {
       const blob = db.base64ToBlob(importObj.avatarBase64);
       avatarAssetId = await db.saveAsset(blob, blob.type);
     }
-
     const charData = {
-      name: importObj.name,
-      category: importObj.category || '',
-      tags: importObj.tags || [],
-      description: importObj.description,
-      personality: importObj.personality,
-      mes_example: importObj.mes_example,
-      avatarAssetId: avatarAssetId
+      name: importObj.name, category: importObj.category || '', tags: importObj.tags || [],
+      description: importObj.description, personality: importObj.personality,
+      mes_example: importObj.mes_example, avatarAssetId: avatarAssetId
     };
-
     await db.saveCharacter(charData);
-
     const updatedChars = await db.getCharacters();
     updateState({ characters: updatedChars });
-
     renderCharacterLibrary();
     renderSidebar();
     alert(`キャラクター「${charData.name}」を取り込みました。`);
-  } catch (err) {
-    alert(`取り込みに失敗しました: ${err.message}`);
-  }
+  } catch (err) { alert(`取り込みに失敗しました: ${err.message}`); }
 }
 
 export async function showStorySettingsModal() {
@@ -1187,7 +1109,6 @@ export async function showStorySettingsModal() {
 
   let modal = document.getElementById('story-settings-modal');
   if (modal) modal.remove();
-
   modal = document.createElement('div');
   modal.id = 'story-settings-modal';
   
@@ -1210,9 +1131,7 @@ export async function showStorySettingsModal() {
         <h3 style="margin: 0;">ストーリー設定</h3>
         <button id="story-settings-close-btn" style="background: none; border: none; font-size: 24px; cursor: pointer; color: inherit;">&times;</button>
       </div>
-      
       <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 4px;">
-        
         <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px;">
           <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">主人公設定</legend>
           <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
@@ -1229,37 +1148,30 @@ export async function showStorySettingsModal() {
             </div>
           </div>
           <div id="story-p-adjust-btn-container" style="text-align: left; margin-bottom: 8px;"></div>
-          
           <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 8px;">
             <label style="font-size: 11px; font-weight: bold;">詳細・性格・容姿</label>
             <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
           </div>
         </fieldset>
-
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
-          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="例：一般的な日常世界です。">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
+          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
         </div>
-
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">ストーリーのタグ (カンマ区切り)</label>
-          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;" placeholder="例: 五等分の花嫁, ラブコメ">
+          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
         </div>
-
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
-          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;" placeholder="空欄の場合、デフォルトのチャットロールプレイ最適化ルールが適用されます。">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
+          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
         </div>
-
       </div>
-
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
         <button id="story-settings-cancel-btn" class="secondary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">キャンセル</button>
         <button id="story-settings-save-btn" class="primary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">設定を保存</button>
       </div>
     </div>
   `;
-
   document.body.appendChild(modal);
 
   const closeBtn = modal.querySelector('#story-settings-close-btn');
@@ -1315,29 +1227,19 @@ export async function showStorySettingsModal() {
     try {
       let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
       if (newAvatarBlob) {
-        if (avatarAssetId) {
-          await db.deleteAsset(avatarAssetId);
-        }
+        if (avatarAssetId) await db.deleteAsset(avatarAssetId);
         avatarAssetId = await db.saveAsset(newAvatarBlob, 'image/jpeg');
       }
 
-      currentStory.protagonist = {
-        name: name || '主人公',
-        description: desc,
-        avatarAssetId: avatarAssetId
-      };
+      currentStory.protagonist = { name: name || '主人公', description: desc, avatarAssetId: avatarAssetId };
       currentStory.worldPrompt = world;
       currentStory.storytellerPrompt = promptText;
-      
       currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
 
       await db.saveStory(currentStory);
-      
       const updatedStories = await db.getStories();
       updateState({ stories: updatedStories });
-
       closeModal();
-      
       renderStoryList();
       renderSidebar();
       renderStory();
@@ -1357,123 +1259,9 @@ export function applyFontSize(size) {
 
 export function applyNarrationStyles(bgColor, textColor, opacityPercent) {
   const root = document.documentElement;
-  
   let finalBg = bgColor || '#f3f5f8';
   if (opacityPercent !== undefined && finalBg.startsWith('#') && finalBg.length === 7) {
     const r = parseInt(finalBg.slice(1, 3), 16) || 243;
     const g = parseInt(finalBg.slice(3, 5), 16) || 245;
     const b = parseInt(finalBg.slice(5, 7), 16) || 248;
-    finalBg = `rgba(${r}, ${g}, ${b}, ${opacityPercent / 100})`;
-  }
-  
-  root.style.setProperty('--narration-bg', finalBg);
-  root.style.setProperty('--narration-text', textColor || '#323232');
-}
-
-const styleInject = document.createElement('style');
-styleInject.textContent = `
-  :root {
-    --chat-font-size: 15px;
-    --narration-font-size: 14.5px;
-    --ui-font-size: 13px;
-    
-    --narration-bg: rgba(243, 245, 248, 0.8);
-    --narration-text: #323232;
-  }
-
-  .chat-speech, .novel-block, .chat-bubble p {
-    font-size: var(--chat-font-size) !important;
-  }
-  .narration-content, .chat-narration {
-    font-size: var(--narration-font-size) !important;
-  }
-  .chat-sender-name, .novel-action-badge {
-    font-size: var(--ui-font-size) !important;
-  }
-
-  .chat-narration {
-    display: flex;
-    justify-content: flex-start;
-    width: 100%;
-    box-sizing: border-box;
-    margin: 14px 0 !important;
-  }
-  
-  .narration-content {
-    padding-left: 62px !important;
-    padding-right: 16px !important;
-    padding-top: 8px !important;
-    padding-bottom: 8px !important;
-    width: 100%;
-    max-width: 82% !important; 
-    box-sizing: border-box !important;
-    line-height: 1.75 !important;
-    letter-spacing: 0.03em !important;
-    color: var(--narration-text) !important;
-    background-color: var(--narration-bg) !important;
-    border-left: 4px solid var(--primary-color, #4a90e2) !important;
-    border-radius: 4px;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.01);
-  }
-  
-  .narration-content p {
-    margin: 0 !important;
-  }
-
-  .chat-bubble p {
-    line-height: 1.65 !important;
-    margin-bottom: 8px !important;
-  }
-  .chat-bubble p:last-child {
-    margin-bottom: 0 !important;
-  }
-
- @media (min-width: 1024px) {
-    .timeline-container {
-      max-width: 800px !important;
-      margin: 0 auto !important;
-      width: 100% !important;
-      display: flex !important;
-      flex-direction: column !important;
-      box-sizing: border-box !important;
-    }
-    
-    #story-viewport {
-      /* 背景色の強制上書きを削除し、元の黒（テーマ色）に戻します */
-      border-left: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important;
-      border-right: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important;
-    }
-  }
-
-  @media (max-width: 1023px) {
-    #story-viewport {
-      padding: 12px 8px !important;
-    }
-    .chat-message {
-      margin-bottom: 14px !important;
-      gap: 8px !important;
-    }
-    .chat-avatar {
-      width: 40px !important;
-      height: 40px !important;
-    }
-    .chat-bubble {
-      padding: 10px 12px !important;
-      max-width: 82% !important;
-    }
-    .narration-content {
-      padding-left: 48px !important;
-      max-width: 95% !important;
-      font-size: 0.95em !important;
-    }
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .chat-narration {
-      color: rgba(225, 228, 232, 0.95) !important;
-      background-color: rgba(30, 34, 42, 0.7) !important;
-      border-left: 4px solid var(--primary-light, #64b5f6) !important;
-    }
-  }
-`;
-document.head.appendChild(styleInject);
+    finalBg = `rgba(${r}, ${g}, ${b}, $
