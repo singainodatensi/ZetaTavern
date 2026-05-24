@@ -329,6 +329,12 @@ async function bindEvents() {
     }
   });
 
+  // UI（チャットメッセージ）からの再生成・リトライ要求を受け取るイベントリスナーを追加
+  window.addEventListener('requestRegenerate', (e) => {
+    const isRetryOnly = e.detail?.retryOnly;
+    submitStoryTurn(isRetryOnly ? 'retry' : 'regen');
+  });
+
   // Send action input trigger
   const sendBtn = document.getElementById('send-btn');
   const userInputField = document.getElementById('user-input-field');
@@ -676,25 +682,47 @@ async function createNewStory() {
 
 /**
  * Main turn handler. Sends messages history and states to Gemini API and appends responses.
+ * 再生成機能やエラー時のリトライ処理にも対応。
  */
-async function submitStoryTurn() {
+async function submitStoryTurn(mode = 'normal') {
   const { currentStory, isGenerating } = getState();
   const inputEl = document.getElementById('user-input-field');
   
   if (!currentStory || isGenerating) return;
 
   const userText = inputEl ? inputEl.value.trim() : '';
-  
-  const finalUserText = userText || '（物語の続きを描写してください）';
-  
-  currentStory.messages.push({
-    role: 'user',
-    content: finalUserText,
-    timestamp: Date.now()
-  });
-  
-  if (inputEl) inputEl.value = '';
-  
+
+  if (mode === 'regen') {
+    // 【再生成】最後のAI応答（model）を削除して、再度生成を試みる
+    if (currentStory.messages.length > 0 && currentStory.messages[currentStory.messages.length - 1].role === 'model') {
+      currentStory.messages.pop();
+    }
+  } else if (mode === 'retry') {
+    // 【リトライ】メッセージ配列を操作せず、そのままAPIへ送信する（エラー後の再開や、ユーザー入力済みでの生成用）
+  } else {
+    // 【通常送信】
+    if (userText) {
+      currentStory.messages.push({
+        role: 'user',
+        content: userText,
+        timestamp: Date.now()
+      });
+      if (inputEl) inputEl.value = '';
+    } else {
+      // 送信欄が空の場合
+      const lastMsg = currentStory.messages[currentStory.messages.length - 1];
+      if (!lastMsg || lastMsg.role === 'model') {
+        currentStory.messages.push({
+          role: 'user',
+          content: '（物語の続きを描写してください）',
+          timestamp: Date.now()
+        });
+      }
+      // すでに最後のメッセージが 'user' であれば、追加せずにリトライとしてAPIを叩く
+    }
+  }
+
+  // ★ API送信前に、ユーザーの入力や編集内容を確実にDBへ保存しUIに反映
   await db.saveStory(currentStory);
   ui.renderStory();
 
@@ -732,7 +760,7 @@ async function submitStoryTurn() {
 
     alert(`ストーリーテラーの応答生成中にエラーが発生しました:\n${err.message}`);
     
-    currentStory.messages.pop();
+    // ★ エラー時にユーザーの入力を消さずに（popせずに）そのまま保存して状態を保つ
     await db.saveStory(currentStory);
 
     updateState({ isGenerating: false });
