@@ -212,9 +212,10 @@
                 </select>
               </div>
 
+              <!-- 文字サイズの数値指定フォーム -->
               <div class="form-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                 <label for="font-size-input">文字サイズ変更 (px)</label>
-                <input type="number" id="font-size-input" min="10" max="32" value="15" style="width: 80px; padding: 6px; border: 1px solid #ccc; border-radius: 4px; text-align: center; background: var(--bg-card, #fff); color: inherit;">
+                <input type="number" id="font-size-input" min="10" max="32" value="15" style="width: 80px; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; text-align: center; background: var(--bg-card, #fff); color: inherit;">
               </div>
 
               <div class="form-group">
@@ -245,12 +246,21 @@
             </div>
 
             <div class="settings-card">
-              <h3>ストーリー進行設定</h3>
+              <h3>ストーリー進行とUI設定</h3>
               <div class="form-group-checkbox">
                 <input type="checkbox" id="choices-toggle-checkbox" checked>
                 <label for="choices-toggle-checkbox">
                   <strong>A/B/Cの自動選択肢提示を有効にする</strong>
                   <span>ONにすると、ストーリーテラーは返答の最後に行動の選択肢を提示します。</span>
+                </label>
+              </div>
+              
+              <!-- ★自動スクロールのトグル追加 -->
+              <div class="form-group-checkbox" style="margin-top: 12px;">
+                <input type="checkbox" id="autoscroll-toggle-checkbox" checked>
+                <label for="autoscroll-toggle-checkbox">
+                  <strong>メッセージ更新時の自動スクロール</strong>
+                  <span>OFFにすると、新しいメッセージが追加されても画面が勝手に一番下へ移動しなくなります。</span>
                 </label>
               </div>
             </div>
