@@ -44,10 +44,13 @@ async function bootApp() {
   const characters = await db.getCharacters();
   updateState({ stories, characters });
 
-  // Select the most recent story if available
+  // ★ 前回開いていたストーリーを自動復元する
   if (stories.length > 0) {
     stories.sort((a, b) => b.timestamp - a.timestamp);
-    setActiveStory(stories[0]);
+    const lastActiveId = await db.getSetting('last_active_story_id', null);
+    let targetStory = stories.find(s => s.storyId === lastActiveId);
+    if (!targetStory) targetStory = stories[0]; // 見つからない場合は最新のもの
+    setActiveStory(targetStory);
   } else {
     setActiveStory(null);
   }
@@ -69,6 +72,10 @@ async function bootApp() {
   // Subscribe state changes to auto-render UI
   subscribe((event, state) => {
     if (event === 'storyChanged') {
+      // ★ ストーリー切り替え時にIDを保存し、次回起動時に復元できるようにする
+      if (state.currentStory && state.currentStory.storyId) {
+        db.saveSetting('last_active_story_id', state.currentStory.storyId);
+      }
       // メモリリーク防止のため、古いアバター画像Blob URLキャッシュをクリーンアップ
       ui.clearBlobUrlCache();
       ui.renderStory();
@@ -112,6 +119,7 @@ async function loadConfigurations() {
   const key = await db.getSetting('api_key', '');
   const model = await db.getSetting('model_name', 'gemini-2.5-flash');
   const choices = await db.getSetting('show_choices', true);
+  const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
   const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
   
@@ -135,6 +143,7 @@ async function loadConfigurations() {
     apiKey: key,
     modelName: model,
     showChoices: choices,
+    autoscrollEnabled: autoscroll, // ★Stateに反映
     apiTimeout: apiTimeout,
     apiRetries: apiRetries,
     fontSize: fontSize,
@@ -148,6 +157,7 @@ async function loadConfigurations() {
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
+  const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★DOM取得
   const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
   const retriesEl = document.getElementById('settings-retries-input');
   const timeoutEl = document.getElementById('settings-timeout-input');
@@ -159,6 +169,7 @@ async function loadConfigurations() {
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
   if (choicesEl) choicesEl.checked = choices;
+  if (autoscrollEl) autoscrollEl.checked = autoscroll;
   if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
   if (retriesEl) retriesEl.value = apiRetries;
   if (timeoutEl) timeoutEl.value = apiTimeout;
@@ -227,6 +238,20 @@ function fillStorySettingsForm(story) {
         pPreview.src = 'assets/default-silhouette.png';
       }
     });
+  }
+
+  // ★ フォーム更新時に高さを自動調整
+  triggerAutoResize(rPrompt);
+  triggerAutoResize(wPrompt);
+  triggerAutoResize(pDesc);
+}
+
+// ★ Textarea の Auto-resize（自動拡張）用ヘルパー関数
+function triggerAutoResize(el) {
+  if (!el) return;
+  el.style.height = 'auto'; // 一旦autoにしてscrollHeightを再計算
+  if (el.scrollHeight > 0) {
+    el.style.height = el.scrollHeight + 'px';
   }
 }
 
@@ -325,6 +350,7 @@ async function bindEvents() {
     const userInputField = document.getElementById('user-input-field');
     if (userInputField) {
       userInputField.value = e.detail;
+      triggerAutoResize(userInputField);
       submitStoryTurn();
     }
   });
@@ -350,16 +376,32 @@ async function bindEvents() {
           submitStoryTurn();
         } else {
           // Enter単体の場合はイベントをインターセプトせず、そのまま改行（textareaの標準挙動）を通す
+          // Auto-resizeを遅延実行して改行後の高さを反映させる
+          setTimeout(() => triggerAutoResize(e.target), 0);
         }
       }
     };
   }
+
+  // ★ 長文用 textarea の自動拡張イベントをバインド
+  const textareasToAutoResize = [
+    document.getElementById('user-input-field'),
+    document.getElementById('story-rule-prompt'),
+    document.getElementById('story-world-prompt'),
+    document.getElementById('protagonist-desc')
+  ];
+  textareasToAutoResize.forEach(el => {
+    if (el) {
+      el.addEventListener('input', () => triggerAutoResize(el));
+    }
+  });
 
   // 4. Save Settings Changes
   const provEl = document.getElementById('api-provider-select');
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
+  const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★自動スクロールDOM
   const customModelInput = document.getElementById('custom-model-input');
   const customModelAddBtn = document.getElementById('custom-model-add-btn');
   const retriesEl = document.getElementById('settings-retries-input');
@@ -397,6 +439,14 @@ async function bindEvents() {
       updateState({ showChoices: val });
       db.saveSetting('show_choices', val);
       ui.renderStory();
+    };
+  }
+  // ★ 自動スクロールトグルのイベント
+  if (autoscrollEl) {
+    autoscrollEl.onchange = (e) => {
+      const val = e.target.checked;
+      updateState({ autoscrollEnabled: val });
+      db.saveSetting('autoscroll_enabled', val);
     };
   }
   if (retriesEl) {
@@ -492,8 +542,8 @@ async function bindEvents() {
     });
   };
 
-  if (rPrompt) rPrompt.oninput = saveCurrentStoryConfig;
-  if (wPrompt) wPrompt.oninput = saveCurrentStoryConfig;
+  if (rPrompt) rPrompt.oninput = () => { saveCurrentStoryConfig(); triggerAutoResize(rPrompt); };
+  if (wPrompt) wPrompt.oninput = () => { saveCurrentStoryConfig(); triggerAutoResize(wPrompt); };
 
   // Protagonist Profile updates
   const pName = document.getElementById('protagonist-name');
@@ -519,7 +569,7 @@ async function bindEvents() {
   };
 
   if (pName) pName.oninput = saveProtagonistConfig;
-  if (pDesc) pDesc.oninput = saveProtagonistConfig;
+  if (pDesc) pDesc.oninput = () => { saveProtagonistConfig(); triggerAutoResize(pDesc); };
   
   if (pImgInput && pPreview) {
     pImgInput.onchange = async (e) => {
@@ -625,7 +675,7 @@ async function createNewStory() {
     title: storyTitle || '無題のストーリー',
     storytellerPrompt: DEFAULT_STORYTELLER_PROMPT,
     worldPrompt: DEFAULT_WORLD_PROMPT,
-    tags: [],
+    tags: [], // ストーリータグ用配列フィールドを追加
     protagonist: {
       name: '主人公',
       avatarAssetId: '',
@@ -698,7 +748,7 @@ async function submitStoryTurn(mode = 'normal') {
       currentStory.messages.pop();
     }
   } else if (mode === 'retry') {
-    // 【リトライ】メッセージ配列を操作せず、そのままAPIへ送信する（エラー後の再開や、ユーザー入力済みでの生成用）
+    // 【リトライ】メッセージ配列を操作せず、そのままAPIへ送信する
   } else {
     // 【通常送信】
     if (userText) {
@@ -707,7 +757,10 @@ async function submitStoryTurn(mode = 'normal') {
         content: userText,
         timestamp: Date.now()
       });
-      if (inputEl) inputEl.value = '';
+      if (inputEl) {
+        inputEl.value = '';
+        inputEl.style.height = 'auto'; // 送信後に高さをリセット
+      }
     } else {
       // 送信欄が空の場合
       const lastMsg = currentStory.messages[currentStory.messages.length - 1];
@@ -1226,7 +1279,6 @@ async function performStartupSync() {
   const freq = parseInt(await db.getSetting('dropbox_sync_frequency', '0'), 10);
   if (freq === 0) return;
 
-  // ★ 追加：多重起動（Visibility APIとの競合）を防ぐ排他処理ガード
   if (isSyncInProgress) {
     console.log('[Dropbox] 起動時同期の多重実行を回避しました。');
     return;
@@ -1235,7 +1287,6 @@ async function performStartupSync() {
   isSyncInProgress = true;
   updateSyncStatusIndicator('syncing');
   try {
-    // ★ 安全ガード：ローカルに変更がある場合は、引き戻さずに、サイレントにPush（自動退避アップロード）を行う
     if (await hasNewerLocalChanges()) {
       console.log('[Dropbox StartupSync] ローカルに最新の未同期編集があります。Pullをスキップし、Pushをバックグラウンド実行します。');
       await performDropboxPushSilent();
@@ -1246,7 +1297,6 @@ async function performStartupSync() {
       return;
     }
 
-    // Pull latest data silently
     const localAssets = await db.getAll('assets');
     const localAssetIds = new Set(localAssets.map(a => a.assetId));
 
@@ -1270,7 +1320,11 @@ async function performStartupSync() {
 
       if (updatedStories.length > 0) {
         updatedStories.sort((a, b) => b.timestamp - a.timestamp);
-        setActiveStory(updatedStories[0]);
+        // ★ ここでも起動時のラストストーリーの復元処理を連携
+        const lastActiveId = await db.getSetting('last_active_story_id', null);
+        let targetStory = updatedStories.find(s => s.storyId === lastActiveId);
+        if (!targetStory) targetStory = updatedStories[0];
+        setActiveStory(targetStory);
       }
       ui.renderStoryList();
       ui.renderCharacterLibrary();
@@ -1284,7 +1338,7 @@ async function performStartupSync() {
     console.warn('[Dropbox] 起動時同期に失敗:', e);
     updateSyncStatusIndicator('error');
   } finally {
-    isSyncInProgress = false; // ★ ガード解除
+    isSyncInProgress = false;
   }
 }
 
@@ -1296,7 +1350,14 @@ function setupVisibilitySync() {
     if (!connected) return;
     const freq = parseInt(await db.getSetting('dropbox_sync_frequency', '0'), 10);
     if (freq === 0) return;
-    // Auto-pull on tab return
+    
+    // ★ 10分以内の連続同期（タブ切り替えスパム同期）を防止するスロットル制御
+    const lastSync = parseInt(await db.getSetting('dropbox_last_sync', '0'), 10) || 0;
+    if (Date.now() - lastSync < 10 * 60 * 1000) {
+      console.log('[Dropbox] 最終同期から10分以内のため、タブ復帰時の同期をスキップします。');
+      return;
+    }
+
     await performStartupSync();
   });
 }
