@@ -418,7 +418,7 @@ export async function showEditMessageModal(msgIndex) {
   modal.style.zIndex = '5000';
 
   modal.innerHTML = `
-    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #333); width: 90%; max-width: 600px; max-height: 90vh; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #fff); width: 90%; max-width: 600px; max-height: 90vh; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
       <h3 style="margin: 0; font-size: 16px; font-weight: bold;">メッセージの編集</h3>
       <div style="flex: 1; overflow-y: auto; padding-right: 4px;">
         <textarea id="msg-edit-textarea" style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; font-family: inherit; font-size: 14px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit; line-height: 1.6; overflow-y: hidden;">${escapeHTML(msg.content)}</textarea>
