@@ -176,7 +176,8 @@ export async function renderStory() {
   if (!container) return;
 
   container.innerHTML = '';
-  const { currentStory, uiMode, isGenerating } = getState();
+  const appState = getState();
+  const { currentStory, uiMode, isGenerating, autoscrollEnabled } = appState;
 
   if (!currentStory) {
     container.innerHTML = `
@@ -206,10 +207,12 @@ export async function renderStory() {
     const isModel = msg.role === 'model';
     const textToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
 
+    // メッセージとアクションボタンを包むラッパー
     const msgWrapper = document.createElement('div');
     msgWrapper.className = 'message-wrapper';
 
     const contentContainer = document.createElement('div');
+    contentContainer.className = 'message-content-container';
 
     if (uiMode === 'chat') {
       if (isModel) {
@@ -302,7 +305,7 @@ export async function renderStory() {
 
     msgWrapper.appendChild(contentContainer);
 
-    // アクションボタン群の追加
+    // ★ 編集・削除・再生成用のアクションボタンを動的追加
     const actionsEl = document.createElement('div');
     actionsEl.className = 'chat-message-actions';
     let actionHtml = `
@@ -367,12 +370,12 @@ export async function renderStory() {
     }
   }
 
-  // APIエラーや編集による手動中断時、AI応答待ち（最後がユーザー発言）であればリトライボタンを表示
+  // ★ APIエラーや手動中断時、最後がユーザー発言であれば「リトライボタン」を表示
   if (!isGenerating && lastMsg && lastMsg.role === 'user') {
     const retryContainer = document.createElement('div');
     retryContainer.style = "text-align: center; margin: 16px 0;";
     retryContainer.innerHTML = `
-      <button id="retry-generation-btn" class="primary-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 20px; border-radius: 20px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+      <button id="retry-generation-btn" class="primary-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 20px; border-radius: 20px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.15); cursor: pointer;">
         <span class="material-symbols-outlined" style="font-size:20px;">refresh</span> AIの応答を生成する (リトライ)
       </button>
     `;
@@ -382,12 +385,16 @@ export async function renderStory() {
     container.appendChild(retryContainer);
   }
 
-  container.scrollTop = container.scrollHeight;
   renderChoiceButtons(parsedLast.choices);
+
+  // ★ 設定がONのときだけ一番下まで自動スクロールする
+  if (autoscrollEnabled !== false) {
+    container.scrollTop = container.scrollHeight;
+  }
 }
 
 /**
- * 過去のメッセージ内容を編集する専用モーダルダイアログ
+ * 過去のメッセージ内容を編集する専用モーダルダイアログ (自動拡張機能付き)
  */
 export async function showEditMessageModal(msgIndex) {
   const { currentStory } = getState();
@@ -411,9 +418,11 @@ export async function showEditMessageModal(msgIndex) {
   modal.style.zIndex = '5000';
 
   modal.innerHTML = `
-    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #333); width: 90%; max-width: 600px; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #333); width: 90%; max-width: 600px; max-height: 90vh; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
       <h3 style="margin: 0; font-size: 16px; font-weight: bold;">メッセージの編集</h3>
-      <textarea id="msg-edit-textarea" rows="12" style="width: 100%; padding: 12px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; font-family: inherit; font-size: 14px; box-sizing: border-box;">${escapeHTML(msg.content)}</textarea>
+      <div style="flex: 1; overflow-y: auto; padding-right: 4px;">
+        <textarea id="msg-edit-textarea" style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; font-family: inherit; font-size: 14px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit; line-height: 1.6; overflow-y: hidden;">${escapeHTML(msg.content)}</textarea>
+      </div>
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px;">
         <button id="msg-edit-cancel-btn" class="secondary-btn" style="padding: 8px 16px; border-radius: 4px; cursor: pointer;">キャンセル</button>
         <button id="msg-edit-save-btn" class="primary-btn" style="padding: 8px 16px; border-radius: 4px; cursor: pointer;">変更を保存</button>
@@ -422,9 +431,18 @@ export async function showEditMessageModal(msgIndex) {
   `;
   document.body.appendChild(modal);
 
+  const textarea = modal.querySelector('#msg-edit-textarea');
+  // Auto-resizeロジック
+  const autoResize = () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  };
+  textarea.addEventListener('input', autoResize);
+  setTimeout(autoResize, 0); // 初期表示時に高さを合わせる
+
   modal.querySelector('#msg-edit-cancel-btn').onclick = () => modal.remove();
   modal.querySelector('#msg-edit-save-btn').onclick = async () => {
-    const newContent = modal.querySelector('#msg-edit-textarea').value.trim();
+    const newContent = textarea.value.trim();
     if (newContent) {
       currentStory.messages[msgIndex].content = newContent;
       await db.saveStory(currentStory);
@@ -897,7 +915,7 @@ export function showAvatarCropModal(file, onCropComplete) {
         </div>
       </div>
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
-        <button id="crop-modal-cancel-btn" style="background: none; border: 1px solid #ccc; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; color: inherit;">キャンセル</button>
+        <button id="crop-modal-cancel-btn" style="background: none; border: 1px solid var(--border-color, #ccc); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; color: inherit;">キャンセル</button>
         <button id="crop-modal-apply-btn" style="background: var(--primary-color, #4a90e2); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 12px;">決定</button>
       </div>
     </div>
@@ -1144,26 +1162,26 @@ export async function showStorySettingsModal() {
             </div>
             <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
               <label style="font-size: 11px; font-weight: bold;">名前</label>
-              <input type="text" id="story-p-name-input" value="${escapeHTML(currentStory.protagonist?.name || '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+              <input type="text" id="story-p-name-input" value="${escapeHTML(currentStory.protagonist?.name || '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
             </div>
           </div>
           <div id="story-p-adjust-btn-container" style="text-align: left; margin-bottom: 8px;"></div>
           <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 8px;">
             <label style="font-size: 11px; font-weight: bold;">詳細・性格・容姿</label>
-            <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
+            <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
           </div>
         </fieldset>
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
-          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
+          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">ストーリーのタグ (カンマ区切り)</label>
-          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
-          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; box-sizing: border-box;">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
+          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
         </div>
       </div>
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
@@ -1173,6 +1191,17 @@ export async function showStorySettingsModal() {
     </div>
   `;
   document.body.appendChild(modal);
+
+  // Auto-resize logic for settings textareas
+  const textareas = modal.querySelectorAll('textarea');
+  textareas.forEach(ta => {
+    const autoResize = () => {
+      ta.style.height = 'auto';
+      if (ta.scrollHeight > 0) ta.style.height = ta.scrollHeight + 'px';
+    };
+    ta.addEventListener('input', autoResize);
+    setTimeout(autoResize, 0);
+  });
 
   const closeBtn = modal.querySelector('#story-settings-close-btn');
   const cancelBtn = modal.querySelector('#story-settings-cancel-btn');
@@ -1289,8 +1318,9 @@ styleInject.textContent = `
   .chat-bubble p:last-child { margin-bottom: 0 !important; }
 
   /* メッセージアクションとラッパーのCSS設定 */
-  .message-wrapper { position: relative; width: 100%; }
-  .chat-message-actions { position: absolute; top: 4px; right: 8px; display: none; gap: 4px; background: var(--bg-card, #fff); padding: 4px 6px; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); border: 1px solid var(--border-color, #eee); z-index: 10; }
+  .message-wrapper { position: relative; width: 100%; display: flex; flex-direction: column; }
+  .message-content-container { width: 100%; }
+  .chat-message-actions { position: absolute; top: 0px; right: 8px; display: none; gap: 4px; background: var(--bg-card, #fff); padding: 4px 6px; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); border: 1px solid var(--border-color, #eee); z-index: 10; }
   .message-wrapper:hover .chat-message-actions { display: flex; }
   .action-icon-btn { background: none; border: none; cursor: pointer; color: var(--text-color, #333); opacity: 0.5; padding: 2px 4px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
   .action-icon-btn:hover { opacity: 1; color: var(--primary-color, #4a90e2); }
