@@ -60,6 +60,7 @@ async function bootApp() {
   ui.renderCharacterLibrary();
   ui.renderStory();
   ui.renderSidebar();
+  ui.bindScrollJumpControls();
 
   // Fill story settings form after initial render
   if (getState().currentStory) {
@@ -366,8 +367,8 @@ async function bindEvents() {
   const userInputField = document.getElementById('user-input-field');
 
   if (sendBtn && userInputField) {
+    ui.bindMentionAutocomplete(userInputField);
     sendBtn.onclick = () => submitStoryTurn();
-    
     // キーバインド改修：Ctrl+Enter(Command+Enter)でのみ送信、通常のEnterは改行を許可
     userInputField.onkeydown = (e) => {
       if (e.key === 'Enter') {
@@ -752,9 +753,12 @@ async function submitStoryTurn(mode = 'normal') {
   } else {
     // 【通常送信】
     if (userText) {
+    const directedInput = parseDirectedUserInput(userText);
       currentStory.messages.push({
         role: 'user',
         content: userText,
+        aiContent: directedInput.aiContent,
+        directedUtterances: directedInput.utterances,
         timestamp: Date.now()
       });
       if (inputEl) {
@@ -820,7 +824,45 @@ async function submitStoryTurn(mode = 'normal') {
     ui.renderStory();
   }
 }
+function parseDirectedUserInput(text) {
+  const utterances = [];
+  const passthrough = [];
+  const directiveRegex = /^@:\s*([^「」:：\n]+?)\s*(?:「([^」]*)」|[:：]\s*(.+)|\s+(.+))\s*$/;
 
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const match = trimmed.match(directiveRegex);
+    if (!match) {
+      if (trimmed) passthrough.push(line);
+      continue;
+    }
+
+    const speaker = match[1].trim();
+    const speech = (match[2] ?? match[3] ?? match[4] ?? '').trim();
+    if (!speaker || !speech) {
+      passthrough.push(line);
+      continue;
+    }
+    utterances.push({ speaker, speech });
+  }
+
+  if (utterances.length === 0) {
+    return { aiContent: text, utterances: [] };
+  }
+
+  const lines = [
+    '【ユーザー指定発言】',
+    '以下の発言はユーザーが直接指定した台詞です。指定された発言者の発言として扱い、次の展開に自然に反映してください。'
+  ];
+  for (const item of utterances) {
+    lines.push(`${item.speaker}: 「${item.speech}」`);
+  }
+  if (passthrough.length > 0) {
+    lines.push('', '【ユーザー補足】', ...passthrough);
+  }
+
+  return { aiContent: lines.join('\n'), utterances };
+}
 // ============================================================
 // Dropbox 同期ヘルパー
 // ============================================================
@@ -1346,18 +1388,11 @@ async function performStartupSync() {
 function setupVisibilitySync() {
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState !== 'visible') return;
-    const connected = await dropbox.isConnected();
-    if (!connected) return;
-    const freq = parseInt(await db.getSetting('dropbox_sync_frequency', '0'), 10);
-    if (freq === 0) return;
-    
-    // ★ 10分以内の連続同期（タブ切り替えスパム同期）を防止するスロットル制御
-    const lastSync = parseInt(await db.getSetting('dropbox_last_sync', '0'), 10) || 0;
-    if (Date.now() - lastSync < 10 * 60 * 1000) {
-      console.log('[Dropbox] 最終同期から10分以内のため、タブ復帰時の同期をスキップします。');
-      return;
+// タブ復帰だけでは同期しない。同期は起動時・チャット更新時・明示操作に限定する。
+    // Chrome などのフォーカス変更で過剰同期が走るのを避けるため、ここでは表示だけ整える。
+    if (await dropbox.isConnected()) {
+      updateSyncStatusIndicator('idle');
     }
 
-    await performStartupSync();
   });
 }

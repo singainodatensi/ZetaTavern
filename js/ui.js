@@ -171,6 +171,123 @@ export function isCharacterMatchingStory(char, story) {
   return storyTags.includes(charCategory) || charTags.some(tag => storyTags.includes(tag));
 }
 
+function getMentionQuery(textarea) {
+  const caret = textarea.selectionStart ?? 0;
+  const before = textarea.value.slice(0, caret);
+  const lineStart = Math.max(before.lastIndexOf('\n') + 1, 0);
+  const line = before.slice(lineStart);
+  const match = line.match(/(?:^|\s)(@:?\s*([^\s「」:：]*)?)$/);
+  if (!match) return null;
+  const token = match[1] || '@';
+  return {
+    query: (match[2] || '').trim(),
+    start: caret - token.length,
+    end: caret
+  };
+}
+
+async function getMentionCandidates(query) {
+  const { currentStory } = getState();
+  const characters = await db.getCharacters();
+  const storyIds = new Set((currentStory?.characters || [])
+    .filter(ref => ref.attendance !== 'absent')
+    .map(ref => ref.characterId));
+  const protagonist = currentStory?.protagonist?.name
+    ? [{ name: currentStory.protagonist.name, avatarAssetId: currentStory.protagonist.avatarAssetId, isProtagonist: true }]
+    : [];
+
+  const sorted = [
+    ...protagonist,
+    ...characters
+      .map(char => ({ ...char, inStory: storyIds.has(char.characterId) }))
+      .sort((a, b) => Number(b.inStory) - Number(a.inStory) || (a.name || '').localeCompare(b.name || '', 'ja'))
+  ];
+
+  const normalizedQuery = query.toLowerCase();
+  return sorted
+    .filter(char => {
+      const haystack = `${char.name || ''} ${char.category || ''} ${(char.tags || []).join(' ')}`.toLowerCase();
+      return !normalizedQuery || haystack.includes(normalizedQuery);
+    })
+    .slice(0, 8);
+}
+
+export function bindMentionAutocomplete(textarea) {
+  if (!textarea || textarea.dataset.mentionBound === 'true') return;
+  textarea.dataset.mentionBound = 'true';
+
+  const popup = document.createElement('div');
+  popup.id = 'mention-autocomplete';
+  popup.className = 'mention-autocomplete hidden';
+  textarea.closest('.input-panel-wrapper')?.appendChild(popup);
+
+  let activeQuery = null;
+
+  const hide = () => {
+    popup.classList.add('hidden');
+    popup.innerHTML = '';
+    activeQuery = null;
+  };
+
+  const insertMention = (name) => {
+    if (!activeQuery) return;
+    const before = textarea.value.slice(0, activeQuery.start);
+    const after = textarea.value.slice(activeQuery.end);
+    const insertion = `@:${name}`;
+    textarea.value = `${before}${insertion}${after}`;
+    const caret = before.length + insertion.length;
+    textarea.focus();
+    textarea.setSelectionRange(caret, caret);
+    hide();
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const refresh = async () => {
+    const query = getMentionQuery(textarea);
+    if (!query) {
+      hide();
+      return;
+    }
+    activeQuery = query;
+    const candidates = await getMentionCandidates(query.query);
+    if (candidates.length === 0) {
+      hide();
+      return;
+    }
+
+    popup.innerHTML = '';
+    for (const candidate of candidates) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mention-candidate';
+      const avatarUrl = await getAvatarUrl(candidate.avatarAssetId);
+      btn.innerHTML = `
+        <img src="${avatarUrl}" alt="">
+        <span>${escapeHTML(candidate.name || '名前なし')}</span>
+        ${candidate.inStory || candidate.isProtagonist ? '<small>登場中</small>' : ''}
+      `;
+      btn.onclick = () => insertMention(candidate.name || '');
+      popup.appendChild(btn);
+    }
+    popup.classList.remove('hidden');
+  };
+
+  textarea.addEventListener('input', refresh);
+  textarea.addEventListener('keyup', refresh);
+  textarea.addEventListener('click', refresh);
+  textarea.addEventListener('blur', () => setTimeout(hide, 160));
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hide();
+    if (e.key === 'Tab' && !popup.classList.contains('hidden')) {
+      const first = popup.querySelector('.mention-candidate');
+      if (first) {
+        e.preventDefault();
+        first.click();
+      }
+    }
+  });
+}
+
 export async function renderStory() {
   const container = document.getElementById('story-viewport');
   if (!container) return;

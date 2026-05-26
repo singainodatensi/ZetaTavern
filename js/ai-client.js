@@ -264,7 +264,7 @@ export async function generateStoryResponse(story) {
   // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
   const contents = story.messages.map(msg => ({
     role: msg.role === 'user' ? 'user' : 'model',
-    parts: [{ text: msg.content }]
+parts: [{ text: msg.aiContent || msg.content }]
   }));
 
   const modelName = appState.modelName || 'gemini-2.5-flash';
