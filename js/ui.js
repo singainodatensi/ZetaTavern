@@ -395,26 +395,79 @@ export async function renderStory() {
             contentContainer.appendChild(msgEl);
           }
         }
-      } else {
-        let avatarUrl = 'assets/default-silhouette.png';
-        let senderName = currentStory.protagonist?.name || 'You';
-        if (currentStory.protagonist) {
-          avatarUrl = await getAvatarUrl(currentStory.protagonist.avatarAssetId);
+} else {
+        // ユーザー入力を改行で分割し、「@:キャラクター名」の指定がある行と通常の行を仕分ける
+        const lines = textToRender.split('\n');
+        const userSegments = [];
+        let currentUserBuffer = [];
+
+        const flushUser = () => {
+          if (currentUserBuffer.length > 0) {
+            const joined = currentUserBuffer.join('\n').trim();
+            if (joined) userSegments.push({ type: 'user', text: joined });
+            currentUserBuffer = [];
+          }
+        };
+
+        const directiveRegex = /^@:\s*([^「」:：\n]+?)\s*(?:「([^」]*)」|[:：]\s*(.+)|\s+(.+))\s*$/;
+
+        for (const line of lines) {
+          const match = line.match(directiveRegex);
+          if (match) {
+            flushUser();
+            const speaker = match[1].trim();
+            const speech = (match[2] ?? match[3] ?? match[4] ?? '').trim();
+            userSegments.push({ type: 'character', speaker, text: speech });
+          } else {
+            currentUserBuffer.push(line);
+          }
         }
-        let contentHTML = window.marked && typeof window.marked.parse === 'function'
-          ? sanitizeHTML(window.marked.parse(textToRender))
-          : sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
-        
-        const msgEl = document.createElement('div');
-        msgEl.className = 'chat-message user-role';
-        msgEl.innerHTML = `
-          <div class="chat-avatar"><img src="${avatarUrl}" alt="${senderName}"></div>
-          <div class="chat-content-wrapper">
-            <span class="chat-sender-name">${senderName}</span>
-            <div class="chat-bubble">${contentHTML}</div>
-          </div>
-        `;
-        contentContainer.appendChild(msgEl);
+        flushUser();
+
+        // 抽出したセグメントを順番に画面に描画する
+        for (const seg of userSegments) {
+          if (seg.type === 'character') {
+            // ① 指定キャラクターの発言（左側に表示）
+            const charMatch = matchCharacterByName(seg.speaker, characters);
+            let avatarUrl = 'assets/default-silhouette.png';
+            if (charMatch) {
+              avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
+            }
+            const msgEl = document.createElement('div');
+            msgEl.className = 'chat-message bot-role'; // 左側に配置
+            msgEl.innerHTML = `
+              <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
+              <div class="chat-content-wrapper">
+                <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
+                <div class="chat-bubble">
+                  <p class="chat-speech">「${escapeHTML(seg.text)}」</p>
+                </div>
+              </div>
+            `;
+            contentContainer.appendChild(msgEl);
+          } else {
+            // ② 主人公の通常発言・行動（右側に表示）
+            let avatarUrl = 'assets/default-silhouette.png';
+            let senderName = currentStory.protagonist?.name || 'You';
+            if (currentStory.protagonist) {
+              avatarUrl = await getAvatarUrl(currentStory.protagonist.avatarAssetId);
+            }
+            let contentHTML = window.marked && typeof window.marked.parse === 'function'
+              ? sanitizeHTML(window.marked.parse(seg.text))
+              : sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
+            
+            const msgEl = document.createElement('div');
+            msgEl.className = 'chat-message user-role'; // 右側に配置
+            msgEl.innerHTML = `
+              <div class="chat-avatar"><img src="${avatarUrl}" alt="${senderName}"></div>
+              <div class="chat-content-wrapper">
+                <span class="chat-sender-name">${senderName}</span>
+                <div class="chat-bubble">${contentHTML}</div>
+              </div>
+            `;
+            contentContainer.appendChild(msgEl);
+          }
+        }
       }
     } else {
       let contentHTML = window.marked && typeof window.marked.parse === 'function'
