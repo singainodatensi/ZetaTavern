@@ -433,7 +433,7 @@ export async function renderStory() {
 
     msgWrapper.appendChild(contentContainer);
 
-    // 編集・削除・再生成用のアクションボタンを動的追加
+    // ★ 編集・削除・再生成用のアクションボタンを動的追加
     const actionsEl = document.createElement('div');
     actionsEl.className = 'chat-message-actions';
     let actionHtml = `
@@ -497,6 +497,68 @@ export async function renderStory() {
       };
     }
   }
+
+  // ★ APIエラーや手動中断時、最後がユーザー発言であれば「リトライボタン」を表示
+  if (!isGenerating && lastMsg && lastMsg.role === 'user') {
+    const retryContainer = document.createElement('div');
+    retryContainer.style = "text-align: center; margin: 16px 0;";
+    retryContainer.innerHTML = `
+      <button id="retry-generation-btn" class="primary-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 20px; border-radius: 20px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.15); cursor: pointer;">
+        <span class="material-symbols-outlined" style="font-size:20px;">refresh</span> AIの応答を生成する (リトライ)
+      </button>
+    `;
+    retryContainer.querySelector('#retry-generation-btn').onclick = () => {
+      window.dispatchEvent(new CustomEvent('requestRegenerate', { detail: { retryOnly: true } }));
+    };
+    container.appendChild(retryContainer);
+  }
+
+  renderChoiceButtons(parsedLast.choices);
+
+  // ★ 設定がONのときだけ一番下まで自動スクロールする
+  if (autoscrollEnabled !== false) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+/**
+ * チャット最上段・最下段へのジャンプボタンのイベント登録及び表示制御
+ */
+export function bindScrollJumpControls() {
+  const container = document.getElementById('story-viewport');
+  const jumpControls = document.getElementById('scroll-jump-controls');
+  const topBtn = document.getElementById('scroll-top-btn');
+  const bottomBtn = document.getElementById('scroll-bottom-btn');
+  if (!container || !jumpControls) return;
+
+  // スクロール状態を監視して、ある程度スクロールされたらジャンプボタンを表示
+  container.addEventListener('scroll', () => {
+    // 1画面分以上スクロールされているか、最下部から一定距離離れている場合に表示
+    const threshold = 150;
+    const isScrollable = container.scrollHeight > container.clientHeight;
+    const isOffset = container.scrollTop > threshold || (container.scrollHeight - container.scrollTop - container.clientHeight) > threshold;
+    
+    if (isScrollable && isOffset) {
+      jumpControls.classList.add('visible');
+      jumpControls.classList.remove('hidden');
+    } else {
+      jumpControls.classList.remove('visible');
+      jumpControls.classList.add('hidden');
+    }
+  });
+
+  if (topBtn) {
+    topBtn.onclick = () => {
+      container.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  }
+  if (bottomBtn) {
+    bottomBtn.onclick = () => {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    };
+  }
+}
+
 /**
  * キャラクターの吹き出し（セグメント）ごとの編集モーダルを表示する関数
  */
@@ -616,66 +678,6 @@ export async function showEditSegmentModal(msgIndex, seg) {
       alert('テキストの置換箇所を特定できませんでした。AIの出力フォーマットが複雑なため、左下の「メッセージ全体を編集する」から修正を行ってください。');
     }
   };
-}
-  // ★ APIエラーや手動中断時、最後がユーザー発言であれば「リトライボタン」を表示
-  if (!isGenerating && lastMsg && lastMsg.role === 'user') {
-    const retryContainer = document.createElement('div');
-    retryContainer.style = "text-align: center; margin: 16px 0;";
-    retryContainer.innerHTML = `
-      <button id="retry-generation-btn" class="primary-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 20px; border-radius: 20px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.15); cursor: pointer;">
-        <span class="material-symbols-outlined" style="font-size:20px;">refresh</span> AIの応答を生成する (リトライ)
-      </button>
-    `;
-    retryContainer.querySelector('#retry-generation-btn').onclick = () => {
-      window.dispatchEvent(new CustomEvent('requestRegenerate', { detail: { retryOnly: true } }));
-    };
-    container.appendChild(retryContainer);
-  }
-
-  renderChoiceButtons(parsedLast.choices);
-
-  // ★ 設定がONのときだけ一番下まで自動スクロールする
-  if (autoscrollEnabled !== false) {
-    container.scrollTop = container.scrollHeight;
-  }
-}
-
-/**
- * チャット最上段・最下段へのジャンプボタンのイベント登録及び表示制御
- */
-export function bindScrollJumpControls() {
-  const container = document.getElementById('story-viewport');
-  const jumpControls = document.getElementById('scroll-jump-controls');
-  const topBtn = document.getElementById('scroll-top-btn');
-  const bottomBtn = document.getElementById('scroll-bottom-btn');
-  if (!container || !jumpControls) return;
-
-  // スクロール状態を監視して、ある程度スクロールされたらジャンプボタンを表示
-  container.addEventListener('scroll', () => {
-    // 1画面分以上スクロールされているか、最下部から一定距離離れている場合に表示
-    const threshold = 150;
-    const isScrollable = container.scrollHeight > container.clientHeight;
-    const isOffset = container.scrollTop > threshold || (container.scrollHeight - container.scrollTop - container.clientHeight) > threshold;
-    
-    if (isScrollable && isOffset) {
-      jumpControls.classList.add('visible');
-      jumpControls.classList.remove('hidden');
-    } else {
-      jumpControls.classList.remove('visible');
-      jumpControls.classList.add('hidden');
-    }
-  });
-
-  if (topBtn) {
-    topBtn.onclick = () => {
-      container.scrollTo({ top: 0, behavior: 'smooth' });
-    };
-  }
-  if (bottomBtn) {
-    bottomBtn.onclick = () => {
-      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
-    };
-  }
 }
 
 /**
