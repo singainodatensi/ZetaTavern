@@ -433,7 +433,7 @@ export async function renderStory() {
 
     msgWrapper.appendChild(contentContainer);
 
-    // ★ 編集・削除・再生成用のアクションボタンを動的追加
+    // 編集・削除・再生成用のアクションボタンを動的追加
     const actionsEl = document.createElement('div');
     actionsEl.className = 'chat-message-actions';
     let actionHtml = `
