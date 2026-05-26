@@ -497,7 +497,126 @@ export async function renderStory() {
       };
     }
   }
+/**
+ * キャラクターの吹き出し（セグメント）ごとの編集モーダルを表示する関数
+ */
+export async function showEditSegmentModal(msgIndex, seg) {
+  const { currentStory } = getState();
+  if (!currentStory || !currentStory.messages[msgIndex]) return;
+  const msg = currentStory.messages[msgIndex];
 
+  // 編集用のテキストを構築（スピーチとアクションを結合）
+  let originalText = '';
+  if (seg.type === 'dialogue') {
+    originalText = seg.lines.map(l => {
+      if (l.kind === 'speech') return l.text;
+      if (l.kind === 'action') return `*${l.text}*`;
+      return l.text;
+    }).join('\n');
+  } else {
+    originalText = seg.text;
+  }
+
+  let modal = document.getElementById('segment-edit-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'segment-edit-modal';
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.6)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '5000';
+
+  modal.innerHTML = `
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #fff); width: 90%; max-width: 500px; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
+      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">${escapeHTML(seg.speaker || 'ナレーション')} の台詞を編集</h3>
+      <textarea id="seg-edit-textarea" style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; font-family: inherit; font-size: 14px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit; line-height: 1.6;">${escapeHTML(originalText)}</textarea>
+      
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+        <button id="seg-edit-full-btn" style="background: none; border: none; font-size: 12px; text-decoration: underline; color: var(--primary-color, #4a90e2); cursor: pointer; padding: 0;">メッセージ全体を編集する</button>
+        <div style="display: flex; gap: 10px;">
+          <button id="seg-edit-cancel-btn" class="secondary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">キャンセル</button>
+          <button id="seg-edit-save-btn" class="primary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">変更を保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const textarea = modal.querySelector('#seg-edit-textarea');
+  const autoResize = () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  };
+  textarea.addEventListener('input', autoResize);
+  setTimeout(autoResize, 0);
+
+  // キャンセル処理
+  modal.querySelector('#seg-edit-cancel-btn').onclick = () => modal.remove();
+  
+  // 部分的な置換が難しい場合のための「全体編集への切り替え」
+  modal.querySelector('#seg-edit-full-btn').onclick = () => {
+    modal.remove();
+    showEditMessageModal(msgIndex);
+  };
+
+  // 保存処理（テキストの一部置換を行う）
+  modal.querySelector('#seg-edit-save-btn').onclick = async () => {
+    const newText = textarea.value.trim();
+    if (!newText) {
+      alert('台詞を空にはできません。削除したい場合は「メッセージ全体を編集する」から行ってください。');
+      return;
+    }
+
+    let updatedContent = msg.content;
+    let replaceSuccess = false;
+
+    // 元のテキスト内で該当箇所を探して置換する
+    const firstLine = seg.type === 'dialogue' && seg.lines.length > 0 
+      ? (seg.lines[0].kind === 'action' ? `*${seg.lines[0].text}*` : seg.lines[0].text) 
+      : originalText;
+
+    // パターン1: そのままの文字列でマッチする場合
+    if (updatedContent.includes(firstLine)) {
+      updatedContent = updatedContent.replace(firstLine, newText);
+      // 複数行あった場合は、残りの古い行を削除して整合性をとる
+      if (seg.type === 'dialogue' && seg.lines.length > 1) {
+        for (let i = 1; i < seg.lines.length; i++) {
+          const l = seg.lines[i];
+          const target = l.kind === 'action' ? `*${l.text}*` : l.text;
+          updatedContent = updatedContent.replace(target, '');
+        }
+      }
+      replaceSuccess = true;
+    } 
+    // パターン2: [キャラクター名] 「セリフ」 の形式で生データが保存されている場合
+    else {
+      const formattedFallback = `[${seg.speaker}] ${firstLine}`;
+      if (updatedContent.includes(formattedFallback)) {
+        updatedContent = updatedContent.replace(formattedFallback, `[${seg.speaker}] ${newText}`);
+        replaceSuccess = true;
+      }
+    }
+
+    if (replaceSuccess) {
+      // 連続する改行をきれいにする
+      updatedContent = updatedContent.replace(/\n{3,}/g, '\n\n');
+      
+      currentStory.messages[msgIndex].content = updatedContent;
+      await db.saveStory(currentStory);
+      modal.remove();
+      renderStory();
+    } else {
+      alert('テキストの置換箇所を特定できませんでした。AIの出力フォーマットが複雑なため、左下の「メッセージ全体を編集する」から修正を行ってください。');
+    }
+  };
+}
   // ★ APIエラーや手動中断時、最後がユーザー発言であれば「リトライボタン」を表示
   if (!isGenerating && lastMsg && lastMsg.role === 'user') {
     const retryContainer = document.createElement('div');
