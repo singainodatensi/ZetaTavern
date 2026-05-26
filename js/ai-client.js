@@ -300,7 +300,7 @@ parts: [{ text: msg.aiContent || msg.content }]
     }, timeoutSeconds * 1000);
 
 try {
-      const response = await fetch(url, {
+     const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -310,7 +310,11 @@ try {
           systemInstruction: {
             parts: [{ text: systemInstruction }]
           },
-          generationConfig
+          generationConfig,
+          // ↓この tools ブロックを追加するだけ！
+          tools: [
+            { googleSearch: {} }
+          ]
         }),
         signal: attemptController.signal
       });
