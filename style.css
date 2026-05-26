@@ -286,6 +286,55 @@ body {
   flex-direction: column;
   gap: 24px;
   min-height: 0;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: strict;
+}
+
+.scroll-jump-controls {
+  position: absolute;
+  right: 18px;
+  bottom: 118px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.scroll-jump-controls.visible {
+  opacity: 0.9;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.scroll-jump-btn {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  background: rgba(19, 19, 26, 0.86);
+  color: var(--text-main);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: var(--glass-blur);
+  transition: var(--transition-smooth);
+}
+
+.scroll-jump-btn:hover {
+  border-color: var(--primary-hover);
+  color: #fff;
+  background: rgba(124, 77, 255, 0.32);
+}
+
+.scroll-jump-btn.hidden {
+  display: none;
 }
 
 /* Empty State */
@@ -313,6 +362,10 @@ body {
   width: 100%;
   opacity: 0;
   animation: fadeInUp 0.5s forwards ease-out;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: strict;
+  hyphens: none;
 }
 
 .story-paragraph {
@@ -383,6 +436,9 @@ body {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-sub);
+  word-break: keep-all;
+  overflow-wrap: normal;
+  line-break: strict;
 }
 
 .chat-bubble {
@@ -390,6 +446,10 @@ body {
   border-radius: 18px;
   font-size: 15px;
   line-height: 1.6;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: strict;
+  hyphens: none;
 }
 
 /* Bot / character style */
@@ -445,6 +505,10 @@ body {
   line-height: 1.9;
   letter-spacing: 0.04em;
   font-style: italic;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: strict;
+  hyphens: none;
 }
 
 .narration-content p {
@@ -513,8 +577,58 @@ body {
   padding-bottom: 24px;
   z-index: 5;
   flex-shrink: 0;
+  position: relative;
 }
 
+.mention-autocomplete {
+  position: absolute;
+  left: 32px;
+  right: 88px;
+  bottom: calc(100% - 10px);
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: rgba(19, 19, 26, 0.96);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: var(--glass-blur);
+  z-index: 30;
+}
+.mention-candidate {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-main);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.mention-candidate:hover,
+.mention-candidate:focus {
+  border-color: var(--primary-hover);
+  background: rgba(124, 77, 255, 0.2);
+}
+
+.mention-candidate img {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.mention-candidate small {
+  color: var(--primary-hover);
+  font-size: 10px;
+}
 .input-form {
   display: flex;
   gap: 12px;
@@ -1146,7 +1260,8 @@ body {
   background: rgba(124, 77, 255, 0.12);
   padding: 2px 6px;
   border-radius: 4px;
-  word-break: break-all;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 .settings-note span {
@@ -1301,6 +1416,21 @@ body {
 
 .dropbox-disconnect-btn {
   width: fit-content;
+}
+
+.api-runtime-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.compact-number-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.compact-number-field input {
+  width: 100%;
 }
 
 .icon-btn-circle {
@@ -1779,10 +1909,26 @@ body {
     font-size: 13px;
   }
 
+  .scroll-jump-controls {
+    right: 12px;
+    bottom: calc(112px + env(safe-area-inset-bottom));
+    gap: 6px;
+  }
+
+  .scroll-jump-btn {
+    width: 36px;
+    height: 36px;
+  }
+
   .choices-container {
     padding: 12px 16px 0 16px;
   }
-
+  .mention-autocomplete {
+    left: 12px;
+    right: 64px;
+    bottom: calc(100% - 6px);
+    padding: 7px;
+  }
   .choice-btn {
     padding: 10px 14px;
     font-size: 13px;
