@@ -376,11 +376,22 @@ export async function renderStory() {
             }
             msgEl.innerHTML = `
               <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
-              <div class="chat-content-wrapper">
+              <div class="chat-content-wrapper" style="position: relative;">
                 <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
-                <div class="chat-bubble">${linesHTML}</div>
+                <div class="chat-bubble" style="position: relative;">
+                  ${linesHTML}
+                  <button class="segment-edit-btn" title="この台詞を編集" style="position: absolute; right: -28px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; opacity: 0; transition: opacity 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-sub);"><span class="material-symbols-outlined" style="font-size:16px;">edit</span></button>
+                </div>
               </div>
             `;
+            // ホバー時に編集ボタンを表示
+            const bubbleEl = msgEl.querySelector('.chat-bubble');
+            const editBtn = msgEl.querySelector('.segment-edit-btn');
+            if (bubbleEl && editBtn) {
+              bubbleEl.addEventListener('mouseenter', () => editBtn.style.opacity = '1');
+              bubbleEl.addEventListener('mouseleave', () => editBtn.style.opacity = '0');
+              editBtn.onclick = () => showEditSegmentModal(i, seg);
+            }
             contentContainer.appendChild(msgEl);
           }
         }
@@ -426,8 +437,8 @@ export async function renderStory() {
     const actionsEl = document.createElement('div');
     actionsEl.className = 'chat-message-actions';
     let actionHtml = `
-      <button class="action-icon-btn edit-msg-btn" title="メッセージを編集">
-        <span class="material-symbols-outlined" style="font-size:18px;">edit</span>
+      <button class="action-icon-btn edit-msg-btn" title="メッセージ全体を編集">
+        <span class="material-symbols-outlined" style="font-size:18px;">edit_note</span>
       </button>
       <button class="action-icon-btn delete-msg-btn" title="メッセージを削除">
         <span class="material-symbols-outlined" style="font-size:18px;">delete</span>
@@ -507,6 +518,44 @@ export async function renderStory() {
   // ★ 設定がONのときだけ一番下まで自動スクロールする
   if (autoscrollEnabled !== false) {
     container.scrollTop = container.scrollHeight;
+  }
+}
+
+/**
+ * チャット最上段・最下段へのジャンプボタンのイベント登録及び表示制御
+ */
+export function bindScrollJumpControls() {
+  const container = document.getElementById('story-viewport');
+  const jumpControls = document.getElementById('scroll-jump-controls');
+  const topBtn = document.getElementById('scroll-top-btn');
+  const bottomBtn = document.getElementById('scroll-bottom-btn');
+  if (!container || !jumpControls) return;
+
+  // スクロール状態を監視して、ある程度スクロールされたらジャンプボタンを表示
+  container.addEventListener('scroll', () => {
+    // 1画面分以上スクロールされているか、最下部から一定距離離れている場合に表示
+    const threshold = 150;
+    const isScrollable = container.scrollHeight > container.clientHeight;
+    const isOffset = container.scrollTop > threshold || (container.scrollHeight - container.scrollTop - container.clientHeight) > threshold;
+    
+    if (isScrollable && isOffset) {
+      jumpControls.classList.add('visible');
+      jumpControls.classList.remove('hidden');
+    } else {
+      jumpControls.classList.remove('visible');
+      jumpControls.classList.add('hidden');
+    }
+  });
+
+  if (topBtn) {
+    topBtn.onclick = () => {
+      container.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  }
+  if (bottomBtn) {
+    bottomBtn.onclick = () => {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    };
   }
 }
 
