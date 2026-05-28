@@ -292,10 +292,6 @@ export async function renderStory() {
   const container = document.getElementById('story-viewport');
   if (!container) return;
 
-  // ★追加：DOMをクリアする前に、現在のスクロール位置を記憶しておく
-  const previousScrollTop = container.scrollTop;
-
-  container.innerHTML = '';
   const appState = getState();
   const { currentStory, uiMode, isGenerating, autoscrollEnabled } = appState;
 
@@ -309,6 +305,9 @@ export async function renderStory() {
     `;
     return;
   }
+
+  // ★ 追加：裏側でDOMを構築するための「仮想の箱（フラグメント）」を用意
+  const fragment = document.createDocumentFragment();
 
   const messages = currentStory.messages || [];
   const lastMsg = messages[messages.length - 1];
@@ -327,7 +326,6 @@ export async function renderStory() {
     const isModel = msg.role === 'model';
     const textToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
 
-    // メッセージとアクションボタンを包むラッパー
     const msgWrapper = document.createElement('div');
     msgWrapper.className = 'message-wrapper';
 
@@ -387,7 +385,6 @@ export async function renderStory() {
                 </div>
               </div>
             `;
-            // ホバー時に編集ボタンを表示
             const bubbleEl = msgEl.querySelector('.chat-bubble');
             const editBtn = msgEl.querySelector('.segment-edit-btn');
             if (bubbleEl && editBtn) {
@@ -398,8 +395,8 @@ export async function renderStory() {
             contentContainer.appendChild(msgEl);
           }
         }
-} else {
-        // ユーザー入力を改行で分割し、「@:キャラクター名」の指定がある行と通常の行を仕分ける
+      } else {
+        // ★ 前回追加したユーザー入力の「@:キャラクター名」の分離処理
         const lines = textToRender.split('\n');
         const userSegments = [];
         let currentUserBuffer = [];
@@ -427,17 +424,15 @@ export async function renderStory() {
         }
         flushUser();
 
-        // 抽出したセグメントを順番に画面に描画する
         for (const seg of userSegments) {
           if (seg.type === 'character') {
-            // ① 指定キャラクターの発言（左側に表示）
             const charMatch = matchCharacterByName(seg.speaker, characters);
             let avatarUrl = 'assets/default-silhouette.png';
             if (charMatch) {
               avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
             }
             const msgEl = document.createElement('div');
-            msgEl.className = 'chat-message bot-role'; // 左側に配置
+            msgEl.className = 'chat-message bot-role';
             msgEl.innerHTML = `
               <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
               <div class="chat-content-wrapper">
@@ -449,7 +444,6 @@ export async function renderStory() {
             `;
             contentContainer.appendChild(msgEl);
           } else {
-            // ② 主人公の通常発言・行動（右側に表示）
             let avatarUrl = 'assets/default-silhouette.png';
             let senderName = currentStory.protagonist?.name || 'You';
             if (currentStory.protagonist) {
@@ -460,7 +454,7 @@ export async function renderStory() {
               : sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
             
             const msgEl = document.createElement('div');
-            msgEl.className = 'chat-message user-role'; // 右側に配置
+            msgEl.className = 'chat-message user-role';
             msgEl.innerHTML = `
               <div class="chat-avatar"><img src="${avatarUrl}" alt="${senderName}"></div>
               <div class="chat-content-wrapper">
@@ -489,7 +483,6 @@ export async function renderStory() {
 
     msgWrapper.appendChild(contentContainer);
 
-    // ★ 編集・削除・再生成用のアクションボタンを動的追加
     const actionsEl = document.createElement('div');
     actionsEl.className = 'chat-message-actions';
     let actionHtml = `
@@ -527,7 +520,9 @@ export async function renderStory() {
       };
     }
     msgWrapper.appendChild(actionsEl);
-    container.appendChild(msgWrapper);
+
+    // ★ 画面（container）ではなく、裏側の箱（fragment）に要素を追加する
+    fragment.appendChild(msgWrapper);
   }
 
   if (isGenerating) {
@@ -543,8 +538,6 @@ export async function renderStory() {
         生成を停止する
       </button>
     `;
-    container.appendChild(loader);
-
     const cancelBtn = loader.querySelector('#cancel-generation-btn');
     if (cancelBtn) {
       cancelBtn.onclick = () => {
@@ -552,9 +545,9 @@ export async function renderStory() {
         if (activeAbortController) activeAbortController.abort();
       };
     }
+    fragment.appendChild(loader);
   }
 
-  // ★ APIエラーや手動中断時、最後がユーザー発言であれば「リトライボタン」を表示
   if (!isGenerating && lastMsg && lastMsg.role === 'user') {
     const retryContainer = document.createElement('div');
     retryContainer.style = "text-align: center; margin: 16px 0;";
@@ -566,16 +559,26 @@ export async function renderStory() {
     retryContainer.querySelector('#retry-generation-btn').onclick = () => {
       window.dispatchEvent(new CustomEvent('requestRegenerate', { detail: { retryOnly: true } }));
     };
-    container.appendChild(retryContainer);
+    fragment.appendChild(retryContainer);
   }
 
+  // =========================================================================
+  // ★ ここですべての非同期処理が完了！
+  // この瞬間の「ユーザーが実際に見ているスクロール位置」を正確に記憶する
+  const previousScrollTop = container.scrollTop;
+
+  // 画面をクリアし、裏側で作っておいた全要素を一瞬で流し込む
+  container.innerHTML = '';
+  container.appendChild(fragment);
+
+  // 選択肢ボタンの描画
   renderChoiceButtons(parsedLast.choices);
 
-  // ★ 修正：設定がONの時は一番下までスクロール。
-  // OFFの時は、再描画によってリセットされてしまったスクロール位置を元の位置に復元する。
+  // ★ 最後にスクロール位置の調整
   if (autoscrollEnabled !== false) {
     container.scrollTop = container.scrollHeight;
   } else {
+    // オフの場合は、画面が空になる直前に記憶した位置へ完璧に復元
     container.scrollTop = previousScrollTop;
   }
 }
