@@ -366,3 +366,116 @@ try {
 async function getApiKeyFromStorage() {
   return localStorage.getItem('zetatavern_api_key') || '';
 }
+/**
+ * キャラクタープロフィールをGoogle検索経由で自動生成し、JSONで返す関数
+ */
+export async function generateCharacterProfile(name, category) {
+  const appState = getState();
+  const apiKey = appState.apiKey || await getApiKeyFromStorage();
+  
+  if (!apiKey) {
+    throw new Error('APIキーが設定されていません。設定画面で登録してください。');
+  }
+
+  const prompt = `
+# キャラクタープロフィール生成 指示書
+
+## 概要
+このタスクは、単なるキャラクター解説記事を作るものではない。
+目的は、AIによるロールプレイ・会話生成・人格再現を行うための「構造化キャラクターデータ」を生成することである。
+
+対象キャラクター名: ${name}
+${category ? `対象作品 / カテゴリー: ${category}` : ''}
+
+生成するプロフィールは、以下の用途で利用される。
+* AIチャット / キャラクターロールプレイ / シナリオ生成 / 会話生成 / 感情シミュレーション
+そのため、単なる設定紹介ではなく、「どのように話すか」「何を嫌うか」「どう感情変化するか」「どんな人間関係を持つか」を重視して記述すること。
+
+---
+
+# 情報収集ルール
+## 優先参照順位
+1. 公式サイト  2. 原作  3. 信頼性の高いWiki  4. インタビュー・設定資料集  5. その他Web情報
+## 禁止事項
+以下を事実として扱わないこと： 二次創作設定 / ネタ画像・ミーム / Fanon（ファン解釈） / 明確な根拠のない考察 / AIの推測のみで補完した情報
+## 情報不足時
+不明な情報は無理に埋めず、「不明」「作中で明言なし」と記載する。
+
+---
+（以下、要求する出力内容の項目。これらを元に後のJSONを作成すること）
+1. 基本プロファイル (Identity & Visuals)
+年齢・役割、外見的特徴、性格タグ（5〜10個）、表の性格、裏の性格/本音、キャラクター崩壊になりやすい要素（過剰なデレなどAIが誤りやすい点）
+
+2. 話し方と口調 (Speech Patterns)
+一人称/二人称、口癖・語尾、トーン、会話テンポ、NGワード、NG行動
+
+3. 代表的なセリフ集 (Dialogue Examples)
+状況A：初対面で敵対している時 / 状況B：戦闘中・能力使用時 / 状況C：照れ・好意を隠している時 / 状況D：日常会話 / 状況E：パニック / 状況F：怒り / 状況G：弱みを見せる時
+※各状況ごとに、感情・相手との距離感・実際のセリフをセットで記述。
+
+4. 人間関係と行動原理 (Relationships & Motivation)
+主人公への態度（時系列変化）、ユーザーへの適応方針（AIチャット時の立場）、関連人物との関係性、行動原理、恐れているもの
+
+5. 特記事項 (Trivia & Deep Lore)
+好物・趣味・弱点、日常習慣、感情トリガー、重要キーワード（3つ以上）
+
+---
+
+# 最終出力フォーマット（厳守）
+上記の分析結果を踏まえ、システムに登録するためのデータを以下の JSON フォーマットで出力してください。Markdownのコードブロック（\`\`\`json ... \`\`\`）で囲むこと。必ず以下のキーを持つJSONオブジェクト1つを出力してください。
+
+\`\`\`json
+{
+  "description": "【1. 基本プロファイル】【5. 特記事項】の内容をまとめた詳細な文章。",
+  "personality": "【4. 人間関係と行動原理】の内容（行動原理、恐れているもの、関係性など）、および性格の詳細をまとめた文章。",
+  "mes_example": "【2. 話し方と口調】【3. 代表的なセリフ集】を詳細にまとめた文章。セリフは必ず [キャラクター名] 「セリフ」 の形式を含めること。",
+  "tags": ["特徴1", "特徴2", "特徴3"]
+}
+\`\`\`
+`;
+
+  const modelName = appState.modelName || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  // 検索用のツールをONにし、JSON生成のため少しだけ温度を低め(0.7)に設定
+  const generationConfig = { temperature: 0.7, topP: 0.9, maxOutputTokens: 8192 };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig,
+      tools: [{ googleSearch: {} }]
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error?.message || `HTTP status ${response.status}`);
+  }
+
+  const result = await response.json();
+  const parts = result?.candidates?.[0]?.content?.parts;
+  if (!parts?.length) throw new Error('APIから有効なテキストが返されませんでした。');
+
+  // thought（思考）部分を除外し、出力テキストだけを結合
+  const text = parts.filter(p => !p.thought).map(p => p.text).join('\n').trim();
+
+  // ```json の中身だけを正規表現でくり抜く
+  const jsonMatch = text.match(/\`\`\`json\s*(\{[\s\S]*?\})\s*\`\`\`/);
+  let parsed = null;
+  
+  if (jsonMatch) {
+    try { parsed = JSON.parse(jsonMatch[1]); } catch (e) {}
+  } else {
+    try { parsed = JSON.parse(text); } catch (e) {}
+  }
+
+  if (!parsed) {
+    console.error('AI Raw Response:', text);
+    throw new Error('AIが正しいJSON形式で出力しませんでした。');
+  }
+
+  return parsed;
+}
