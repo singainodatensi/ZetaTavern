@@ -1692,5 +1692,15 @@ styleInject.textContent = `
   @media (prefers-color-scheme: dark) {
     .chat-narration { color: rgba(225, 228, 232, 0.95) !important; background-color: rgba(30, 34, 42, 0.7) !important; border-left: 4px solid var(--primary-light, #64b5f6) !important; }
   }
+    /* ★追加: テキストの折り返しと幅の計算を正常化する */
+  .chat-content-wrapper {
+    flex: 1;
+    min-width: 0;
+  }
+  .chat-bubble p, .narration-content, .narration-content p, .chat-speech, .chat-action {
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    line-break: loose !important;
+  }
 `;
 document.head.appendChild(styleInject);
