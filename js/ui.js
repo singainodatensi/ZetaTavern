@@ -7,6 +7,7 @@
 import { getState, updateState, setActiveStory, updateCharacterAttendance } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
+import { generateCharacterProfile } from './ai-client.js';
 
 const blobUrlCache = new Map();
 
@@ -1339,7 +1340,63 @@ export async function showCharacterModal(char = null) {
     parent.after(tagsRow);
     tagsInput = document.getElementById('char-tags-input');
   }
+  // --- 追加開始：AI自動生成ボタンの設置と処理 ---
+  let aiGenBtn = document.getElementById('char-ai-gen-btn');
+  if (!aiGenBtn && tagsInput) {
+    const btn = document.createElement('button');
+    btn.id = 'char-ai-gen-btn';
+    btn.type = 'button';
+    btn.className = 'primary-btn';
+    // 魔法っぽいグラデーションのボタンデザイン
+    btn.style = "margin-top: 16px; margin-bottom: 8px; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #4a90e2, #9013fe); border: none;";
+    btn.innerHTML = '<span class="material-symbols-outlined">travel_explore</span> ネット検索でプロフィールを自動生成';
+    tagsInput.parentElement.after(btn);
+    aiGenBtn = btn;
+  }
 
+  if (aiGenBtn) {
+    aiGenBtn.onclick = async () => {
+      const name = nameInput.value.trim();
+      const cat = categoryInput ? categoryInput.value.trim() : '';
+      if (!name) {
+        alert('先に「キャラクター名」を入力してください。\n（カテゴリーも入力すると検索精度が上がります）');
+        return;
+      }
+      if (!confirm(`「${name}」のプロフィールをネット検索で自動生成しますか？\n（現在入力されている内容は上書きされます。完了まで数十秒かかります）`)) return;
+
+      const originalHtml = aiGenBtn.innerHTML;
+      aiGenBtn.innerHTML = '<span class="material-symbols-outlined" style="animation: spin 1s linear infinite;">sync</span> 生成中 (数十秒かかります)...';
+      aiGenBtn.disabled = true;
+
+      try {
+        const generated = await generateCharacterProfile(name, cat);
+        if (generated) {
+          // AIが返してきたJSONを各テキストエリアに流し込む
+          if (generated.description) descInput.value = generated.description;
+          if (generated.personality) persInput.value = generated.personality;
+          if (generated.mes_example) exInput.value = generated.mes_example;
+          if (generated.tags && Array.isArray(generated.tags)) {
+            tagsInput.value = generated.tags.join(', ');
+          }
+          
+          // 流し込んだ文字数に合わせて、テキストエリアの高さを自動で広げる
+          [descInput, persInput, exInput].forEach(ta => {
+            ta.style.height = 'auto';
+            if (ta.scrollHeight > 0) ta.style.height = ta.scrollHeight + 'px';
+          });
+          
+          alert('プロフィールの自動生成が完了しました！\n内容を確認・手直しし、問題なければ一番下の「保存」を押してください。');
+        }
+      } catch (err) {
+        alert('生成に失敗しました: ' + err.message);
+      } finally {
+        // ボタンを元の状態に戻す
+        aiGenBtn.innerHTML = originalHtml;
+        aiGenBtn.disabled = false;
+      }
+    };
+  }
+  // --- 追加終了 ---
   let adjustBtn = document.getElementById('char-adjust-crop-btn');
   if (!adjustBtn && imgInput) {
     const parent = imgInput.parentElement;
