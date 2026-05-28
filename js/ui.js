@@ -292,6 +292,9 @@ export async function renderStory() {
   const container = document.getElementById('story-viewport');
   if (!container) return;
 
+  // ★追加：DOMをクリアする前に、現在のスクロール位置を記憶しておく
+  const previousScrollTop = container.scrollTop;
+
   container.innerHTML = '';
   const appState = getState();
   const { currentStory, uiMode, isGenerating, autoscrollEnabled } = appState;
@@ -568,9 +571,12 @@ export async function renderStory() {
 
   renderChoiceButtons(parsedLast.choices);
 
-  // ★ 設定がONのときだけ一番下まで自動スクロールする
+  // ★ 修正：設定がONの時は一番下までスクロール。
+  // OFFの時は、再描画によってリセットされてしまったスクロール位置を元の位置に復元する。
   if (autoscrollEnabled !== false) {
     container.scrollTop = container.scrollHeight;
+  } else {
+    container.scrollTop = previousScrollTop;
   }
 }
 
