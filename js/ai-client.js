@@ -14,59 +14,78 @@ import { getCharacter } from './db.js';
 export async function buildSystemInstruction(story) {
   if (!story) return '';
 
-  const { storytellerPrompt, worldPrompt, protagonist, sceneState, characterMemory, relationshipMemory } = story;
+  // ★ momentum と worldTone を取り出すように追加
+  const { storytellerPrompt, worldPrompt, protagonist, sceneState, characterMemory, relationshipMemory, momentum, worldTone } = story;
   const showChoices = getState().showChoices;
 
-  // 1. Core Role and Storyteller Instructions
+  // 1. Core Role and Instructions (固定のエンジン哲学)
   let instruction = `# 役割\n`;
-  instruction += `あなたは卓越したストーリーテラー（語り手・ゲームマスター）です。\n`;
-  instruction += `以下の【執筆ルール】、【世界観設定】、および登録された【登場人物】や【シーン状況】に従い、プレイヤー（主人公）の行動に対する物語の展開を描写してください。\n\n`;
+  instruction += `あなたは卓越したゲームマスターであり、物語の演出家です。\n`;
+  instruction += `以下の【GM哲学】、【演出モジュール】、および登録された【登場人物】に従い、インタラクティブな群像劇を展開してください。\n\n`;
 
   instruction += `【出力形式（厳守・最優先）】\n`;
-  instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。英語は一切使わない。\n`;
-  instruction += `- 思考過程・執筆メモ・分析・計画・User input・Context・Goal・Setting・Drafting・Let's などの**メタ記述は出力しない**（頭の中で考えてよいが、画面には出さない）。\n`;
-  instruction += `- 「承知しました」「了解」「I understand」などの前置き応答も禁止。\n`;
-  instruction += `- 執筆ルールの文字数目安に従い、**本文を十分な長さ**で書く。短い要約やプロット箇条書きで済ませない。\n\n`;
+  instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。メタな思考過程や英語は一切出力しない。\n`;
+  instruction += `- 執筆ルールの文字数目安に従い、本文を十分な長さで書く。\n\n`;
 
-  // --- 追加：チャットパース用の構造化指定 ---
   instruction += `【重要：チャットUI表示のための記述フォーマット】\n`;
-  instruction += `UI側で発言者と描写を分離して吹き出し描画を行うため、物語本文は以下の記法ルールを**絶対に厳守**して出力してください。小説のようなプレーンな文章は出力しないでください。\n`;
-  instruction += `1. **セリフ（発言）**:\n`;
-  instruction += `   必ず行の先頭に \`[発言者名] 「セリフ内容」\` の形式で1行ずつ記述してください。前後に不要な空白は入れないでください。\n`;
-  instruction += `   ※主人公（${protagonist?.name || '主人公'}）自身が発言する場合も、必ず \`[${protagonist?.name || '主人公'}] 「〜〜〜」\` と記述してください。\n`;
-  instruction += `   ※主要人物や補助人物が発言する場合も、必ず \`[登場人物の名前] 「〜〜〜」\` と記述してください。\n`;
-  instruction += `   （例: \`[中野四葉] 「おはようございまーす！」\`）\n`;
-  instruction += `2. **動作描写・仕草・状況説明・ナレーション（地の文）**:\n`;
-  instruction += `   セリフ以外のすべての描写は、必ず独立した行とし、その行全体をアスタリスク（*）で囲んで記述してください。アスタリスク行の中に「」を含めてはいけません。\n`;
-  instruction += `   （例: \`*全力で駆け寄ってくる*\`）\n`;
-  instruction += `   （例: \`*放課後の教室。夕日が窓から差し込んでいる。*\`）\n\n`;
+  instruction += `UI側で発言者と描写を分離して吹き出し描画を行うため、物語本文は以下の記法ルールを**絶対に厳守**してください。小説のようなプレーンな文章は禁止です。\n`;
+  instruction += `1. **セリフ（発言）**: 必ず行の先頭に \`[発言者名] 「セリフ内容」\` の形式で1行ずつ記述してください。主人公（${protagonist?.name || '主人公'}）の場合も同様です。\n`;
+  instruction += `2. **動作描写・ナレーション（地の文）**: 必ず独立した行とし、その行全体をアスタリスク（*）で囲んで記述してください。例: \`*放課後の教室。夕日が差し込んでいる。*\`\n\n`;
 
-  // デフォルトのチャットロールプレイ最適化執筆ルール
-  const defaultStorytellerPrompt = 
-    `・三人称主人公視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
-    `・「語るな、見せろ（Show, don't tell）」を厳守してください。キャラクターの感情を「嬉しい」「怒る」などと地の文で直接説明せず、声のトーン、視線、間（ま）、仕草、セリフの選び方で生き生きと表現してください。\n` +
-    `・各登場人物は、主人公や他のキャラクターの話し方に影響（汚染・伝染）されず、固有の一人称・二人称・敬語レベル・語尾を厳格に維持して発言させてください。\n` +
-    `・一度の出力で事態を勝手に解決・完結させず、主人公（ユーザー）が次のターンで介入（発言や行動の選択）できる明確な「判断の余白」を残した時点で物語の記述を終了してください。`;
+  // === 新設：GM哲学（コア思想・固定） ===
+  instruction += `【GMとしての基本哲学（絶対ルール）】\n`;
+  instruction += `1. **行動の尊重と世界の抵抗**: ユーザーの行動（試み）は肯定し見せ場を作るが、成功や結果は安易に保証しない。世界や敵は自らの法則で抵抗する。\n`;
+  instruction += `2. **NPCの生気と群像劇**: 世界は停止しない。NPCは自律し、主人公の指示待ち人形にならず、自らの感情と行動原理で動く。NPC同士の会話や対立も描くこと。\n`;
+  instruction += `3. **誘導（ナッジ）によるテンポ管理**: 会話や場面の区切りでは、強制的なシーン切り替えではなく「窓の外は夕闇に染まっていた――」のように情景や空気感の変化を描写し、次へ進むべきタイミングをユーザーに誘導（提案）すること。\n`;
+  instruction += `4. **判断の余白**: 一度の出力で事態を勝手に解決・完結させず、主人公が次のターンで介入・選択できる明確な「余白」を残した時点で出力を止める（ターンの制御）。\n\n`;
 
-  instruction += `【執筆ルール】\n`;
-  instruction += `${storytellerPrompt || defaultStorytellerPrompt}\n\n`;
+  // === 新設：UI設定による演出モジュール（可変） ===
+  const curMomentum = momentum || 'balanced';
+  const curTone = worldTone || 'balanced';
 
+  instruction += `【演出モジュール（現在のセッション設定）】\n`;
+  
+  instruction += `■ 展開のペース: `;
+  if (curMomentum === 'passive') {
+    instruction += `[日常・まったり]\nAIは深刻なトラブルを起こさず、日常の解像度を上げることに注力する。平和な会話と空気感を楽しむペースメイクを行うこと。\n`;
+  } else if (curMomentum === 'aggressive') {
+    instruction += `[劇的・波乱万丈]\nAIは積極的にアクシデント、対立、予期せぬイベントを発生させ、物語を停滞させずユーザーに行動と決断を迫ること。\n`;
+  } else {
+    instruction += `[標準・バランス]\n基本はユーザーの行動に応じる受動的な姿勢だが、物語が完全に停滞した時のみ、軽い変化やイベントを起こして場を回すこと。\n`;
+  }
+
+  instruction += `■ 世界の温度: `;
+  if (curTone === 'cozy') {
+    instruction += `[優しい世界]\nNPCは基本的に好意的・寛容であり、失敗しても致命的な結果にはならない。ユーザーに安心感を与える空気感を維持すること。\n`;
+  } else if (curTone === 'harsh') {
+    instruction += `[シビア・残酷]\n世界はユーザーに冷酷である。NPCの裏切り、理不尽な暴力、致命的な失敗が起こり得る。甘い選択には厳しい代償とリアクションで応じること。\n`;
+  } else {
+    instruction += `[標準・現実的]\n現実的な因果関係。好意には好意で、敵対には敵対で世界が応じる。妥当な結果とリアクションを返すこと。\n`;
+  }
+  instruction += `\n`;
+
+  // 既存のストーリーテラープロンプト（ユーザーが書いたローカルルール）
+  if (storytellerPrompt) {
+    instruction += `【追加のローカルルール（独自設定）】\n${storytellerPrompt}\n\n`;
+  }
+
+  // 選択肢の提示ルール
   if (showChoices) {
     instruction += `【選択肢の提示ルール】\n`;
-    instruction += `応答の末尾に、必ずストーリーを次の展開に進めるための選択肢を以下の【A/B/C形式】で出力してください。それ以外の形式（箇条書きの変更など）は禁止します。\n`;
+    instruction += `応答の末尾に、必ずストーリーを次の展開に進めるための選択肢を以下の【A/B/C形式】で出力してください。それ以外の形式は禁止します。\n`;
     instruction += `──────────────\n`;
-    instruction += `► A.（関係を前に進める行動・セリフ）\n`;
-    instruction += `► B.（様子を見る・保留する行動・セリフ）\n`;
-    instruction += `► C.（意外性のある・場を動かす行動・セリフ）\n`;
-    instruction += `──────────────\n`;
-    instruction += `※選択肢は主人公（${protagonist?.name || '主人公'}）の行動またはセリフとして提示し、それぞれ全く異なる性質を持たせてください。\n\n`;
+    instruction += `► A.（関係を進める・能動的な行動やセリフ）\n`;
+    instruction += `► B.（様子を見る・保留する行動やセリフ）\n`;
+    instruction += `► C.（意外性のある・場を動かす行動やセリフ）\n`;
+    instruction += `──────────────\n\n`;
   } else {
     instruction += `【選択肢の提示ルール】\n`;
     instruction += `応答の末尾に選択肢（► A, B, C）を提示しないでください。ストーリーの描写のみで終了してください。\n\n`;
   }
 
-  // 2. World Concept Settings
+  // 2. World Concept Settings (以降は元のコードのまま)
   instruction += `【世界観設定・あらすじ】\n`;
+  // ... 以下既存のコードが続く ...
   instruction += `${worldPrompt || '特に設定されていません。一般的な日常世界です。'}\n\n`;
 
   // 3. Protagonist Settings
