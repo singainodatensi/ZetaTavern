@@ -673,10 +673,12 @@ async function createNewStory() {
   if (storyTitle === null) return;
 
   const newStory = {
-    title: storyTitle || '無題のストーリー',
-    storytellerPrompt: DEFAULT_STORYTELLER_PROMPT,
+title: storyTitle || '無題のストーリー',
+    storytellerPrompt: '', // ★デフォルトの長い指示はコアに移動したため空でOK
     worldPrompt: DEFAULT_WORLD_PROMPT,
-    tags: [], // ストーリータグ用配列フィールドを追加
+    tags: [],
+    momentum: 'balanced',   // ★追加：展開のペース
+    worldTone: 'balanced',  // ★追加：世界の温度
     protagonist: {
       name: '主人公',
       avatarAssetId: '',
