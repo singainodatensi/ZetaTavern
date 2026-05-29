@@ -1679,12 +1679,19 @@ saveBtn.onclick = async () => {
     const promptText = modal.querySelector('#story-prompt-input').value.trim();
     const tagsText = modal.querySelector('#story-tags-input').value.trim();
     
-    // ★追加：セレクトボックスの値を取得
-    const momentum = modal.querySelector('#story-momentum-select').value;
-    const worldTone = modal.querySelector('#story-tone-select').value;
+    // ★追加：セレクトボックスの値を取得（要素がない場合の安全対策含む）
+    const momentumEl = modal.querySelector('#story-momentum-select');
+    const toneEl = modal.querySelector('#story-tone-select');
+    const momentum = momentumEl ? momentumEl.value : 'balanced';
+    const worldTone = toneEl ? toneEl.value : 'balanced';
 
     try {
-      // ... (アバターの保存処理などはそのまま)
+      // 既存のアバター保存処理（前回の省略でここが消えてしまったのがエラーの原因です）
+      let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
+      if (newAvatarBlob) {
+        if (avatarAssetId) await db.deleteAsset(avatarAssetId);
+        avatarAssetId = await db.saveAsset(newAvatarBlob, 'image/jpeg');
+      }
 
       currentStory.protagonist = { name: name || '主人公', description: desc, avatarAssetId: avatarAssetId };
       currentStory.worldPrompt = world;
@@ -1695,7 +1702,6 @@ saveBtn.onclick = async () => {
       currentStory.momentum = momentum;
       currentStory.worldTone = worldTone;
 
-      await db.saveStory(currentStory);
       await db.saveStory(currentStory);
       const updatedStories = await db.getStories();
       updateState({ stories: updatedStories });
