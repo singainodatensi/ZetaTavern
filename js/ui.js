@@ -77,23 +77,27 @@ export function parseModelOutputToSegments(text) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    const structuredDialogueMatch = trimmed.match(/^\[([^\]]+)\]\s*(「[^」]+」|.*)$/);
-    if (structuredDialogueMatch) {
+    // 【環境描写】の抽出
+    const envMatch = trimmed.match(/^【(.+)】$/);
+    if (envMatch) {
       flushNarration();
       flushDialogue();
-      const speaker = structuredDialogueMatch[1].trim();
-      const dialogueText = structuredDialogueMatch[2].trim();
-      if (speaker === 'ナレーター' || speaker === 'システム' || speaker === '背景' || speaker === 'ナレーション') {
-        segments.push({ type: 'narration', text: dialogueText });
-        continue;
-      }
-      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [{ kind: 'speech', text: dialogueText }] };
-      flushDialogue(); 
+      segments.push({ type: 'narration', text: `【${envMatch[1]}】` });
       continue;
     }
 
+    // **地の文** の抽出
+    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+    if (boldMatch) {
+      flushNarration();
+      flushDialogue();
+      segments.push({ type: 'narration', text: boldMatch[1] });
+      continue;
+    }
+
+    // 既存の *アクション* (過去ログ互換用)
     const isAction = /^\*(.+)\*$/.test(trimmed) || /^＊(.+)＊$/.test(trimmed);
-    if (isAction) {
+    if (isAction && !boldMatch) {
       const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '').trim();
       if (currentDialogue) {
         currentDialogue.lines.push({ kind: 'action', text: actionText });
@@ -104,47 +108,52 @@ export function parseModelOutputToSegments(text) {
       continue;
     }
 
-    const inlineDialogueMatch = trimmed.match(/^(.+?)「(.+)$/);
-    const startsWithQuote = trimmed.startsWith('「');
-    const isSpeakerHeader = (
-      trimmed.length > 0 && trimmed.length <= 30 &&
-      !trimmed.includes('「') && !trimmed.startsWith('#') &&
-      !trimmed.startsWith('*') && !trimmed.startsWith('―') &&
-      !trimmed.startsWith('─') && !trimmed.startsWith('-') &&
-      !trimmed.startsWith('>') && !/^[\s\d\.\-\*]+$/.test(trimmed)
-    );
+    // ★ 新・キャラクター行の検出 (台本形式 ＆ 過去ログ互換)
+    let speaker = null;
+    let action = null;
+    let speech = null;
 
-    if (inlineDialogueMatch && !startsWithQuote) {
-      const speakerCandidate = inlineDialogueMatch[1].trim();
-      if (speakerCandidate.length <= 20 && !/[#\*\-►▶]/.test(speakerCandidate)) {
-        flushNarration();
-        flushDialogue();
-        currentDialogue = { type: 'dialogue', speaker: speakerCandidate, lines: [] };
-        const speechText = '「' + inlineDialogueMatch[2];
-        currentDialogue.lines.push({ kind: 'speech', text: speechText });
-        continue;
-      }
+    const oldMatch = trimmed.match(/^\[([^\]]+)\]\s*(?:「([^」]+)」|(.+))$/);
+    const newMatch = trimmed.match(/^([^「（\(\[:：\n]{1,30}?)(?:[（\(]([^）\)]+)[）\)])?[\s:：]*(?:「([^」]*)」)?$/);
+    const fbMatch = trimmed.match(/^([^「]{1,30}?)「([^」]*)」?$/);
+
+    if (oldMatch) {
+      speaker = oldMatch[1].trim();
+      speech = (oldMatch[2] || oldMatch[3] || '').trim();
+    } else if (newMatch && (newMatch[2] || newMatch[3] !== undefined || /[:：]/.test(trimmed))) {
+      speaker = newMatch[1].trim();
+      action = newMatch[2] ? newMatch[2].trim() : null;
+      speech = newMatch[3] !== undefined ? newMatch[3].trim() : null;
+    } else if (fbMatch) {
+      speaker = fbMatch[1].trim();
+      speech = fbMatch[2].trim();
     }
 
-    if (isSpeakerHeader) {
-      let nextIdx = i + 1;
-      while (nextIdx < lines.length && lines[nextIdx].trim() === '') nextIdx++;
-      const nextLine = nextIdx < lines.length ? lines[nextIdx].trim() : '';
-      if (nextLine.startsWith('「') || /^\*(.+)\*$/.test(nextLine) || /^＊(.+)＊$/.test(nextLine)) {
-        flushNarration();
-        flushDialogue();
-        currentDialogue = { type: 'dialogue', speaker: trimmed, lines: [] };
-        continue;
+    if (speaker && !['ナレーター', 'システム', '背景', 'ナレーション', '環境描写', '地の文'].includes(speaker)) {
+      flushNarration();
+      flushDialogue();
+      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [] };
+      if (action) {
+        currentDialogue.lines.push({ kind: 'action', text: action });
       }
+      if (speech) {
+        currentDialogue.lines.push({ kind: 'speech', text: `「${speech}」` });
+      }
+      flushDialogue();
+      continue;
     }
 
+    // 継続のセリフ行
     if (currentDialogue) {
-      if (startsWithQuote || trimmed.includes('「')) {
-        currentDialogue.lines.push({ kind: 'speech', text: trimmed });
+      if (trimmed.startsWith('「') || trimmed.includes('「') || trimmed.endsWith('」')) {
+        const cleaned = trimmed.replace(/^「|」$/g, '');
+        currentDialogue.lines.push({ kind: 'speech', text: `「${cleaned}」` });
         continue;
       }
       flushDialogue();
     }
+
+    // いずれにも当てはまらない場合はナレーションバッファへ
     narrationBuffer.push(line);
   }
 
@@ -410,15 +419,17 @@ export async function renderStory() {
           }
         };
 
-        const directiveRegex = /^@:\s*([^「」:：\n]+?)\s*(?:「([^」]*)」|[:：]\s*(.+)|\s+(.+))\s*$/;
+ // 新形式の入力（動作の括弧を含む）に対応した正規表現
+        const directiveRegex = /^@:\s*([^「（\(\[:：\n]+?)(?:[（\(]([^）\)]+)[）\)])?[\s:：]*(?:「([^」]*)」|(.+))?\s*$/;
 
         for (const line of lines) {
           const match = line.match(directiveRegex);
           if (match) {
             flushUser();
             const speaker = match[1].trim();
-            const speech = (match[2] ?? match[3] ?? match[4] ?? '').trim();
-            userSegments.push({ type: 'character', speaker, text: speech });
+            const action = match[2] ? match[2].trim() : null;
+            const speech = (match[3] ?? match[4] ?? '').trim();
+            userSegments.push({ type: 'character', speaker, action, text: speech });
           } else {
             currentUserBuffer.push(line);
           }
@@ -432,14 +443,24 @@ export async function renderStory() {
             if (charMatch) {
               avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
             }
-            const msgEl = document.createElement('div');
+          const msgEl = document.createElement('div');
             msgEl.className = 'chat-message bot-role';
+            
+            let linesHTML = '';
+            if (seg.action) {
+              linesHTML += `<p class="chat-action"><em>*${escapeHTML(seg.action)}*</em></p>`;
+            }
+            if (seg.text) {
+              const displaySpeech = seg.text.startsWith('「') ? seg.text : `「${seg.text}」`;
+              linesHTML += `<p class="chat-speech">${escapeHTML(displaySpeech)}</p>`;
+            }
+
             msgEl.innerHTML = `
               <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
               <div class="chat-content-wrapper">
                 <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
                 <div class="chat-bubble">
-                  <p class="chat-speech">「${escapeHTML(seg.text)}」</p>
+                  ${linesHTML}
                 </div>
               </div>
             `;
