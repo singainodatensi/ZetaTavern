@@ -1577,6 +1577,26 @@ export async function showStorySettingsModal() {
             <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
           </div>
         </fieldset>
+
+        <div style="display: flex; gap: 12px; margin-bottom: 8px;">
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 4px;">
+            <label style="font-weight: bold; font-size: 13px;">展開のペース (Momentum)</label>
+            <select id="story-momentum-select" style="padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; background: var(--bg-input, transparent); color: inherit;">
+              <option value="passive" ${currentStory.momentum === 'passive' ? 'selected' : ''}>🌱 日常・まったり (受動的)</option>
+              <option value="balanced" ${(currentStory.momentum === 'balanced' || !currentStory.momentum) ? 'selected' : ''}>⚖️ 標準 (バランス)</option>
+              <option value="aggressive" ${currentStory.momentum === 'aggressive' ? 'selected' : ''}>🔥 劇的・波乱万丈 (能動的)</option>
+            </select>
+          </div>
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 4px;">
+            <label style="font-weight: bold; font-size: 13px;">世界の温度 (World Tone)</label>
+            <select id="story-tone-select" style="padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; background: var(--bg-input, transparent); color: inherit;">
+              <option value="cozy" ${currentStory.worldTone === 'cozy' ? 'selected' : ''}>🌸 優しい世界 (甘め)</option>
+              <option value="balanced" ${(currentStory.worldTone === 'balanced' || !currentStory.worldTone) ? 'selected' : ''}>⚖️ 標準 (現実的)</option>
+              <option value="harsh" ${currentStory.worldTone === 'harsh' ? 'selected' : ''}>💀 シビア・残酷 (ハード)</option>
+            </select>
+          </div>
+        </div>
+
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
           <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
@@ -1652,25 +1672,30 @@ export async function showStorySettingsModal() {
     }
   };
 
-  saveBtn.onclick = async () => {
+saveBtn.onclick = async () => {
     const name = modal.querySelector('#story-p-name-input').value.trim();
     const desc = modal.querySelector('#story-p-desc-input').value.trim();
     const world = modal.querySelector('#story-world-input').value.trim();
     const promptText = modal.querySelector('#story-prompt-input').value.trim();
     const tagsText = modal.querySelector('#story-tags-input').value.trim();
+    
+    // ★追加：セレクトボックスの値を取得
+    const momentum = modal.querySelector('#story-momentum-select').value;
+    const worldTone = modal.querySelector('#story-tone-select').value;
 
     try {
-      let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
-      if (newAvatarBlob) {
-        if (avatarAssetId) await db.deleteAsset(avatarAssetId);
-        avatarAssetId = await db.saveAsset(newAvatarBlob, 'image/jpeg');
-      }
+      // ... (アバターの保存処理などはそのまま)
 
       currentStory.protagonist = { name: name || '主人公', description: desc, avatarAssetId: avatarAssetId };
       currentStory.worldPrompt = world;
       currentStory.storytellerPrompt = promptText;
       currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
+      
+      // ★追加：値をストーリーオブジェクトに保存
+      currentStory.momentum = momentum;
+      currentStory.worldTone = worldTone;
 
+      await db.saveStory(currentStory);
       await db.saveStory(currentStory);
       const updatedStories = await db.getStories();
       updateState({ stories: updatedStories });
