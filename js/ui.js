@@ -1565,24 +1565,70 @@ export async function importCharacterJSON(file) {
   try {
     const text = await file.text();
     const importObj = JSON.parse(text);
-    if (importObj.spec !== 'zetatavern-character') throw new Error('サポートされていないファイル形式です');
-    let avatarAssetId = '';
-    if (importObj.avatarBase64) {
-      const blob = db.base64ToBlob(importObj.avatarBase64);
-      avatarAssetId = await db.saveAsset(blob, blob.type);
-    }
-    const charData = {
-      name: importObj.name, category: importObj.category || '', tags: importObj.tags || [],
-      description: importObj.description, personality: importObj.personality,
-      mes_example: importObj.mes_example, avatarAssetId: avatarAssetId
+    
+    // ZetaTavernに取り込むための基本データ構造
+    let charData = {
+      name: '名称未設定', category: '', tags: [],
+      description: '', personality: '',
+      mes_example: '', avatarAssetId: ''
     };
+    
+    let avatarBase64 = '';
+
+    // パターン1: ZetaTavern専用フォーマット
+    if (importObj.spec === 'zetatavern-character') {
+      charData.name = importObj.name || charData.name;
+      charData.category = importObj.category || '';
+      charData.tags = importObj.tags || [];
+      charData.description = importObj.description || '';
+      charData.personality = importObj.personality || '';
+      charData.mes_example = importObj.mes_example || '';
+      avatarBase64 = importObj.avatarBase64 || '';
+    } 
+    // パターン2: Character Card V2 / V3 フォーマット (SillyTavern, Chub等)
+    else if (importObj.spec === 'chara_card_v2' || importObj.spec === 'chara_card_v3') {
+      const data = importObj.data || {};
+      charData.name = data.name || charData.name;
+      charData.description = data.description || '';
+      
+      // V2カードの各種設定（クリエイターノートやシステムプロンプトなど）をpersonalityにまとめる
+      let combinedPersonality = data.personality || '';
+      if (data.system_prompt) combinedPersonality += `\n\n【システム設定】\n${data.system_prompt}`;
+      if (data.creator_notes) combinedPersonality += `\n\n【クリエイターノート】\n${data.creator_notes}`;
+      
+      charData.personality = combinedPersonality.trim();
+      charData.mes_example = data.mes_example || '';
+      charData.tags = data.tags || [];
+    } 
+    // パターン3: 古い V1 フォーマット (元祖 TavernAI)
+    else if (importObj.name && importObj.description !== undefined) {
+      charData.name = importObj.name;
+      charData.description = importObj.description || '';
+      charData.personality = importObj.personality || '';
+      charData.mes_example = importObj.mes_example || '';
+    } 
+    else {
+      throw new Error('キャラクターデータが見つかりませんでした。\n対応フォーマット: ZetaTavern, V2, V3, V1 JSON');
+    }
+
+    // アバター画像の復元 (ZetaTavernからのエクスポート時のみ画像がBase64で同梱されている)
+    if (avatarBase64) {
+      // db.js の base64ToBlob が必要になります
+      const blob = db.base64ToBlob(avatarBase64);
+      charData.avatarAssetId = await db.saveAsset(blob, blob.type);
+    }
+
+    // データベースに保存し、UIを更新
     await db.saveCharacter(charData);
     const updatedChars = await db.getCharacters();
     updateState({ characters: updatedChars });
     renderCharacterLibrary();
     renderSidebar();
-    alert(`キャラクター「${charData.name}」を取り込みました。`);
-  } catch (err) { alert(`取り込みに失敗しました: ${err.message}`); }
+    
+    alert(`キャラクター「${charData.name}」を取り込みました。\n（※画像は含まれていないため、編集画面からアバター画像を手動で設定してください）`);
+  } catch (err) { 
+    alert(`取り込みに失敗しました:\n${err.message}\n\n※正しいキャラクターカードのJSONファイルを選択してください。`); 
+  }
 }
 
 export async function showStorySettingsModal() {
