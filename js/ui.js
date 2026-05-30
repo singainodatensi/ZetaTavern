@@ -1012,54 +1012,7 @@ function bindSidebarEvents() {
   const timeInput = document.getElementById('scene-time-input');
   const atmosInput = document.getElementById('scene-atmosphere-input');
   const objInput = document.getElementById('scene-objective-input');
-  // --- ★ AIディレクターUIの連動処理 ---
-  const presetSelect = modal.querySelector('#director-preset-select');
-  const presetDesc = modal.querySelector('#director-preset-desc');
-  const sliders = modal.querySelectorAll('.director-slider');
-  
-  // 現在の設定値を読み込む（なければデフォルトのラブコメ設定）
-  const currentSettings = currentStory.directorSettings || DIRECTOR_PRESETS.romcom_subtle.params;
-  
-  // スライダーに初期値をセット
-  sliders.forEach(slider => {
-    const id = slider.dataset.id;
-    slider.value = currentSettings[id] !== undefined ? currentSettings[id] : 50;
-    modal.querySelector(`#val-${id}`).textContent = slider.value;
-  });
 
-  // プリセットが手動でいじられているか判定してセレクトボックスを合わせる
-  const isMatchingPreset = Object.entries(DIRECTOR_PRESETS).find(([_, p]) => 
-    Object.entries(p.params).every(([key, val]) => currentSettings[key] == val)
-  );
-  if (isMatchingPreset) {
-    presetSelect.value = isMatchingPreset[0];
-    presetDesc.textContent = isMatchingPreset[1].description;
-  } else {
-    presetSelect.value = 'custom';
-    presetDesc.textContent = 'スライダーを手動で調整中...';
-  }
-
-  // スライダーを動かしたら「カスタム」に変更し、数値をリアルタイム更新
-  sliders.forEach(slider => {
-    slider.addEventListener('input', (e) => {
-      modal.querySelector(`#val-${e.target.dataset.id}`).textContent = e.target.value;
-      presetSelect.value = 'custom';
-      presetDesc.textContent = 'スライダーを手動で調整中...';
-    });
-  });
-
-  // プリセットを選んだら、スライダーの値を一斉に自動変更（スナップ）する
-  presetSelect.addEventListener('change', (e) => {
-    const presetKey = e.target.value;
-    if (presetKey === 'custom') return;
-    const pData = DIRECTOR_PRESETS[presetKey];
-    presetDesc.textContent = pData.description;
-    sliders.forEach(slider => {
-      const id = slider.dataset.id;
-      slider.value = pData.params[id];
-      modal.querySelector(`#val-${id}`).textContent = slider.value;
-    });
-  });
   // ----------------------------------
 
   if (locInput) locInput.oninput = (e) => { currentStory.sceneState.location = e.target.value; saveStateChanges(); };
@@ -1750,6 +1703,55 @@ export async function showStorySettingsModal() {
   const avatarInput = modal.querySelector('#story-p-avatar-input');
   const avatarPreview = modal.querySelector('#story-p-avatar-preview');
   const adjustBtnContainer = modal.querySelector('#story-p-adjust-btn-container');
+
+  // --- ★ AIディレクターUIの連動処理 ---
+  const presetSelect = modal.querySelector('#director-preset-select');
+  const presetDesc = modal.querySelector('#director-preset-desc');
+  const sliders = modal.querySelectorAll('.director-slider');
+  
+  // 現在の設定値を読み込む（なければデフォルトのラブコメ設定）
+  const currentSettings = currentStory.directorSettings || DIRECTOR_PRESETS.romcom_subtle.params;
+  
+  // スライダーに初期値をセット
+  sliders.forEach(slider => {
+    const id = slider.dataset.id;
+    slider.value = currentSettings[id] !== undefined ? currentSettings[id] : 50;
+    modal.querySelector(`#val-${id}`).textContent = slider.value;
+  });
+
+  // プリセットが手動でいじられているか判定してセレクトボックスを合わせる
+  const isMatchingPreset = Object.entries(DIRECTOR_PRESETS).find(([_, p]) => 
+    Object.entries(p.params).every(([key, val]) => currentSettings[key] == val)
+  );
+  if (isMatchingPreset) {
+    presetSelect.value = isMatchingPreset[0];
+    presetDesc.textContent = isMatchingPreset[1].description;
+  } else {
+    presetSelect.value = 'custom';
+    presetDesc.textContent = 'スライダーを手動で調整中...';
+  }
+
+  // スライダーを動かしたら「カスタム」に変更し、数値をリアルタイム更新
+  sliders.forEach(slider => {
+    slider.addEventListener('input', (e) => {
+      modal.querySelector(`#val-${e.target.dataset.id}`).textContent = e.target.value;
+      presetSelect.value = 'custom';
+      presetDesc.textContent = 'スライダーを手動で調整中...';
+    });
+  });
+
+  // プリセットを選んだら、スライダーの値を一斉に自動変更（スナップ）する
+  presetSelect.addEventListener('change', (e) => {
+    const presetKey = e.target.value;
+    if (presetKey === 'custom') return;
+    const pData = DIRECTOR_PRESETS[presetKey];
+    presetDesc.textContent = pData.description;
+    sliders.forEach(slider => {
+      const id = slider.dataset.id;
+      slider.value = pData.params[id];
+      modal.querySelector(`#val-${id}`).textContent = slider.value;
+    });
+  });
 
   const closeModal = () => modal.remove();
   closeBtn.onclick = closeModal;
