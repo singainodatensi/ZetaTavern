@@ -677,8 +677,8 @@ title: storyTitle || '無題のストーリー',
     storytellerPrompt: '', // ★デフォルトの長い指示はコアに移動したため空でOK
     worldPrompt: DEFAULT_WORLD_PROMPT,
     tags: [],
-    momentum: 'balanced',   // ★追加：展開のペース
-    worldTone: 'balanced',  // ★追加：世界の温度
+    // ★ プリセットデータの初期値を丸ごとセットする（デフォルトはラブコメ）
+    directorSettings: { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 },
     protagonist: {
       name: '主人公',
       avatarAssetId: '',
