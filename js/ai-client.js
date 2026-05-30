@@ -37,38 +37,75 @@ export async function buildSystemInstruction(story) {
   instruction += `2. **環境描写・状況説明**: 必ず \`【】\` で囲んで記述してください。例: \`【放課後の図書室。夕日が窓から差し込んでいる。】\`\n`;
   instruction += `3. **心理描写・地の文**: 必ず \`**\` で囲んで記述してください。例: \`**彼の平穏な放課後は、今日も遠い。**\`\n\n`;
 
-  // === 新設：GM哲学（コア思想・固定） ===
+// === 新設：GM哲学（コア思想・固定） ===
   instruction += `【GMとしての基本哲学（絶対ルール）】\n`;
   instruction += `1. **行動の尊重と世界の抵抗**: ユーザーの行動（試み）は肯定し見せ場を作るが、成功や結果は安易に保証しない。世界や敵は自らの法則で抵抗する。\n`;
   instruction += `2. **NPCの生気と群像劇**: 世界は停止しない。NPCは自律し、主人公の指示待ち人形にならず、自らの感情と行動原理で動く。NPC同士の会話や対立も描くこと。\n`;
   instruction += `3. **誘導（ナッジ）によるテンポ管理**: 会話や場面の区切りでは、強制的なシーン切り替えではなく「窓の外は夕闇に染まっていた――」のように情景や空気感の変化を描写し、次へ進むべきタイミングをユーザーに誘導（提案）すること。\n`;
   instruction += `4. **判断の余白**: 一度の出力で事態を勝手に解決・完結させず、主人公が次のターンで介入・選択できる明確な「余白」を残した時点で出力を止める（ターンの制御）。\n\n`;
 
-  // === 新設：UI設定による演出モジュール（可変） ===
-  const curMomentum = momentum || 'balanced';
-  const curTone = worldTone || 'balanced';
+  // === 新設：AIディレクターモジュール（パラメータの翻訳） ===
+  const curSettings = story.directorSettings || { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 };
 
   instruction += `【演出モジュール（現在のセッション設定）】\n`;
   
-  instruction += `■ 展開のペース: `;
-  if (curMomentum === 'passive') {
-    instruction += `[日常・まったり]\nAIは深刻なトラブルを起こさず、日常の解像度を上げることに注力する。平和な会話と空気感を楽しむペースメイクを行うこと。\n`;
-  } else if (curMomentum === 'aggressive') {
-    instruction += `[劇的・波乱万丈]\nAIは積極的にアクシデント、対立、予期せぬイベントを発生させ、物語を停滞させずユーザーに行動と決断を迫ること。\n`;
+  // 1. Momentum (展開の推進力)
+  instruction += `■ 展開の推進力: `;
+  if (curSettings.momentum >= 70) {
+    instruction += `[劇的・能動的] AIの裁量で積極的にアクシデント、ハプニング、対立を発生させ、物語を停滞させずユーザーに行動を迫ること。\n`;
+  } else if (curSettings.momentum <= 30) {
+    instruction += `[日常・受動的] ユーザーの行動を待ち、日常や会話の解像度を上げることに注力。AIから急激な場面転換や事件は起こさないこと。\n`;
   } else {
-    instruction += `[標準・バランス]\n基本はユーザーの行動に応じる受動的な姿勢だが、物語が完全に停滞した時のみ、軽い変化やイベントを起こして場を回すこと。\n`;
+    instruction += `[標準的] 基本はユーザーの行動に応じるが、物語が完全に停滞した時のみ、軽い変化やイベントを起こすこと。\n`;
   }
 
+  // 2. World Tone (世界の温度)
   instruction += `■ 世界の温度: `;
-  if (curTone === 'cozy') {
-    instruction += `[優しい世界]\nNPCは基本的に好意的・寛容であり、失敗しても致命的な結果にはならない。ユーザーに安心感を与える空気感を維持すること。\n`;
-  } else if (curTone === 'harsh') {
-    instruction += `[シビア・残酷]\n世界はユーザーに冷酷である。NPCの裏切り、理不尽な暴力、致命的な失敗が起こり得る。甘い選択には厳しい代償とリアクションで応じること。\n`;
+  if (curSettings.worldTone <= 30) {
+    instruction += `[優しい・甘め] NPCは基本的に好意的・寛容であり、失敗しても致命的な結果にはならない。安心感を与える空気感を維持すること。\n`;
+  } else if (curSettings.worldTone >= 70) {
+    instruction += `[シビア・残酷] 世界はユーザーに冷酷である。NPCの裏切り、理不尽な暴力、致命的な失敗が起こり得る。甘い選択には厳しい代償で応じること。\n`;
   } else {
-    instruction += `[標準・現実的]\n現実的な因果関係。好意には好意で、敵対には敵対で世界が応じる。妥当な結果とリアクションを返すこと。\n`;
+    instruction += `[現実的] 現実的な因果関係。好意には好意で、敵対には敵対で世界が妥当なリアクションを返すこと。\n`;
+  }
+
+  // 3. Autonomy (NPCの自律性)
+  instruction += `■ NPCの自律性: `;
+  if (curSettings.autonomy >= 70) {
+    instruction += `[独立した群像劇] NPCは主人公の指示待ちにならず、独自の行動原理で動く。NPC同士の会話、意見の対立、主人公の知らない場所での行動も積極的に描くこと。\n`;
+  } else if (curSettings.autonomy <= 30) {
+    instruction += `[主人公フォーカス] NPCは主に主人公に向けてアクションを行い、主人公の行動に対するリアクションを中心に描写すること。\n`;
+  } else {
+    instruction += `[標準的] 基本は主人公との関係を中心に描くが、時折NPC独自の意思や行動も見せること。\n`;
+  }
+
+  // 4. Background Tension (不穏さ)
+  if (curSettings.backgroundTension >= 70) {
+    instruction += `■ 不穏さ: 画面の端々に、不穏な空気、見えない悪意、あるいは説明のつかない違和感を常に漂わせること。\n`;
+  } else if (curSettings.backgroundTension <= 30) {
+    instruction += `■ 不穏さ: 緊迫感はなく、徹底的に平和で安心できる空気感をベースとすること。\n`;
+  }
+
+  // 5. Romantic Visibility (恋愛・好意の露出)
+  instruction += `■ 恋愛・好意の露出: `;
+  if (curSettings.romanticVisibility <= 30) {
+    instruction += `[秘匿・行間] 好意や恋愛感情は直接言葉に出さず、視線の泳ぎ、僅かな焦り、距離感の躊躇いなど、秘匿された感情として繊細に描写すること。\n`;
+  } else if (curSettings.romanticVisibility >= 70) {
+    instruction += `[直接的・露骨] 好意や感情は隠さず、直接的な言葉や大胆なスキンシップとして明確に表現すること。\n`;
+  } else {
+    instruction += `[自然な表現] 状況や親密度に応じて、自然な形で好意や感情を表現すること。\n`;
+  }
+
+  // 6. Relationship Drift (関係性の変動)
+  if (curSettings.relationshipDrift >= 70) {
+    instruction += `■ 関係性の変動: キャラクター同士の好感度や信頼関係は固定ではない。ちょっとしたすれ違いで疑心暗鬼になったり急接近したりと、関係性をダイナミックに揺さぶること。\n`;
+  }
+
+  // 7. Intrusion Rate (非日常の侵入)
+  if (curSettings.intrusionRate >= 70) {
+    instruction += `■ 非日常の侵入: 平和な日常描写の最中であっても、唐突に非日常（敵の襲撃、異変、事件のトリガー）を侵入させ、空気を一変させること。\n`;
   }
   instruction += `\n`;
-
   // 既存のストーリーテラープロンプト（ユーザーが書いたローカルルール）
   if (storytellerPrompt) {
     instruction += `【追加のローカルルール（独自設定）】\n${storytellerPrompt}\n\n`;
