@@ -123,6 +123,7 @@ async function loadConfigurations() {
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
   const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
+  const thinkingLevel = await db.getSetting('thinking_level', 'standard');
   
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
   const apiTimeout = await db.getSetting('api_timeout', 60);
@@ -150,7 +151,8 @@ async function loadConfigurations() {
     fontSize: fontSize,
     narrationBg: narrationBg,
     narrationColor: narrationColor,
-    narrationOpacity: narrationOpacity
+    narrationOpacity: narrationOpacity,
+    thinkingLevel: thinkingLevel // ★ 追加
   });
 
   // Prefill settings form
@@ -166,6 +168,7 @@ async function loadConfigurations() {
   const nBgEl = document.getElementById('narration-bg-input');
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
+  const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
@@ -178,6 +181,7 @@ async function loadConfigurations() {
   if (nBgEl) nBgEl.value = narrationBg;
   if (nColorEl) nColorEl.value = narrationColor;
   if (nOpacityEl) nOpacityEl.value = narrationOpacity;
+  if (thinkingEl) thinkingEl.value = thinkingLevel; // ★ 追加
 
   if (modelEl) {
     const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it'];
@@ -411,6 +415,7 @@ async function bindEvents() {
   const nBgEl = document.getElementById('narration-bg-input');
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
+  const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
 
   if (provEl) {
     provEl.onchange = (e) => {
@@ -473,7 +478,13 @@ async function bindEvents() {
       ui.applyFontSize(val); // UIフォントサイズの一括・即時反映
     };
   }
-
+  if (thinkingEl) {
+    thinkingEl.onchange = (e) => {
+      const val = e.target.value;
+      updateState({ thinkingLevel: val });
+      db.saveSetting('thinking_level', val);
+    };
+  }
   // ナレーション表示設定変更のイベント監視
   const onNarrationStyleChange = () => {
     const bg = nBgEl ? nBgEl.value : '#f3f5f8';
@@ -790,11 +801,12 @@ async function submitStoryTurn(mode = 'normal') {
   ui.renderStory();
 
   try {
-    const aiTextResponse = await generateStoryResponse(currentStory);
+    const aiResponse = await generateStoryResponse(currentStory); // ★ 変数名を変更
 
     currentStory.messages.push({
       role: 'model',
-      content: aiTextResponse,
+      content: aiResponse.text,         // ★ 本文
+      thought: aiResponse.thought || '', // ★ 思考内容を追加保存
       timestamp: Date.now()
     });
 
