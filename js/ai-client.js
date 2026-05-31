@@ -43,7 +43,10 @@ export async function buildSystemInstruction(story) {
   instruction += `2. **NPCの生気と群像劇**: 世界は停止しない。NPCは自律し、主人公の指示待ち人形にならず、自らの感情と行動原理で動く。NPC同士の会話や対立も描くこと。\n`;
   instruction += `3. **誘導（ナッジ）によるテンポ管理**: 会話や場面の区切りでは、強制的なシーン切り替えではなく「窓の外は夕闇に染まっていた――」のように情景や空気感の変化を描写し、次へ進むべきタイミングをユーザーに誘導（提案）すること。\n`;
   instruction += `4. **判断の余白**: 一度の出力で事態を勝手に解決・完結させず、主人公が次のターンで介入・選択できる明確な「余白」を残した時点で出力を止める（ターンの制御）。\n\n`;
-
+  // ★ 追加：検索ツールの強制使用ルール
+  instruction += `【重要：世界観の正確な描写と検索ツールの使用】\n`;
+  instruction += `実在の作品名（アニメ、漫画等）をベースにした世界観の場合、安易にオリジナルの敵、魔法、地名、設定を捏造してはいけません。\n`;
+  instruction += `登場人物、モンスター、専門用語などを物語に出す際は、**必ずGoogle検索ツールを使用して原作の正確な情報を取得・参照**し、原作に忠実な展開を行ってください。\n\n`;
   // === 新設：AIディレクターモジュール（パラメータの翻訳） ===
   const curSettings = story.directorSettings || { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 };
 
@@ -264,44 +267,46 @@ export function stripLeakedThinkingText(text) {
 /**
  * API レスポンスから物語本文だけを取り出す（thought パートを除外）
  */
-export function extractStoryTextFromApiResponse(result) {
+export function extractStoryTextAndThoughtFromApiResponse(result) {
   const parts = result?.candidates?.[0]?.content?.parts;
-  if (!parts?.length) return null;
+  if (!parts?.length) return { text: null, thought: null };
 
-  const storyChunks = [];
+  let storyChunks = [];
+  let thoughtChunks = [];
 
   for (const part of parts) {
     const t = part?.text;
     if (!t) continue;
     if (part.thought === true) {
-      continue;
+      thoughtChunks.push(t);
+    } else {
+      storyChunks.push(t);
     }
-    storyChunks.push(t);
   }
 
-  if (storyChunks.length > 0) {
-    const joined = storyChunks.join('\n\n').trim();
-    return stripLeakedThinkingText(joined);
+  const storyText = storyChunks.length > 0 ? stripLeakedThinkingText(storyChunks.join('\n\n').trim()) : null;
+  // もしthoughtフラグがなく混ざっているモデル（2.5 Flash等）へのフォールバック
+  if (!storyText && thoughtChunks.length === 0) {
+    const full = parts.map(p => p.text).filter(Boolean).join('\n\n').trim();
+    return { text: stripLeakedThinkingText(full), thought: null };
   }
 
-  // thought フラグ無しで全部1パートに混ざるケース（2.5 Flash 等）
-  const full = parts.map(p => p.text).filter(Boolean).join('\n\n').trim();
-  return stripLeakedThinkingText(full);
+  return { text: storyText, thought: thoughtChunks.join('\n\n').trim() };
 }
 
-/** モデル別 thinking 設定（2.5 Flash は 0 で思考オフ） */
-function buildThinkingConfig(modelName) {
-  const m = (modelName || '').toLowerCase();
-  if (m.includes('2.5-pro')) {
-    return { thinkingBudget: 512 };
+/** UIの思考レベル設定から、API送信用の Thinking Budget 数値を決定する */
+function buildThinkingConfig(thinkingLevel) {
+  let budget = 1024; // デフォルトは Standard
+
+  if (thinkingLevel === 'none') {
+    return null; // 思考機能をオフ（プロパティごと除外するのが一番安全）
+  } else if (thinkingLevel === 'minimal') {
+    budget = 512;
+  } else if (thinkingLevel === 'high') {
+    budget = 4096;
   }
-  if (m.includes('2.5-flash') || m.includes('2.5-flash-lite') || m.includes('robotics-er')) {
-    return { thinkingBudget: 0 };
-  }
-  if (m.includes('gemini-2.5')) {
-    return { thinkingBudget: 0 };
-  }
-  return null;
+
+  return { thinkingBudget: budget };
 }
 
 /**
@@ -337,7 +342,9 @@ parts: [{ text: msg.aiContent || msg.content }]
     maxOutputTokens: 8192
   };
 
-  const thinkingConfig = buildThinkingConfig(modelName);
+// ★ モデル名ではなく、設定した thinkingLevel を渡すように変更
+  const thinkingLevel = appState.thinkingLevel || 'standard';
+  const thinkingConfig = buildThinkingConfig(thinkingLevel);
   if (thinkingConfig) {
     generationConfig.thinkingConfig = thinkingConfig;
   }
@@ -390,14 +397,14 @@ try {
       }
 
       const result = await response.json();
-      const text = extractStoryTextFromApiResponse(result);
+      const extracted = extractStoryTextAndThoughtFromApiResponse(result);
 
-      if (!text) {
+      if (!extracted.text) {
         throw new Error('有効なテキストが得られませんでした。');
       }
 
       updateState({ activeAbortController: null });
-      return text;
+      return extracted; // ★ テキストと思考のオブジェクトを返す
 
     } catch (err) {
       clearTimeout(timeoutId);
