@@ -365,19 +365,17 @@ export async function renderStory() {
 
   const characters = uiMode === 'chat' ? await db.getCharacters() : [];
 
-  for (let i = 0; i < messages.length; i++) {
+for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     const isLast = i === messages.length - 1;
     const isModel = msg.role === 'model';
     const textToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
 
+    // ★ msgWrapperの宣言は1回だけ！
     const msgWrapper = document.createElement('div');
     msgWrapper.className = 'message-wrapper';
 
-const msgWrapper = document.createElement('div');
-    msgWrapper.className = 'message-wrapper';
-
-    // ★ 追加：思考（Thought）データが存在する場合は折りたたみUIを表示
+    // ★ 思考（Thought）データが存在する場合は折りたたみUIを表示
     if (isModel && msg.thought) {
       const thoughtEl = document.createElement('div');
       thoughtEl.className = 'ai-thought-container';
@@ -403,8 +401,7 @@ const msgWrapper = document.createElement('div');
       msgWrapper.appendChild(thoughtEl);
     }
 
-    const contentContainer = document.createElement('div');
-
+    // ★ その次にcontentContainerを作る
     const contentContainer = document.createElement('div');
     contentContainer.className = 'message-content-container';
 
