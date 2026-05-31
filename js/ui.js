@@ -374,6 +374,37 @@ export async function renderStory() {
     const msgWrapper = document.createElement('div');
     msgWrapper.className = 'message-wrapper';
 
+const msgWrapper = document.createElement('div');
+    msgWrapper.className = 'message-wrapper';
+
+    // ★ 追加：思考（Thought）データが存在する場合は折りたたみUIを表示
+    if (isModel && msg.thought) {
+      const thoughtEl = document.createElement('div');
+      thoughtEl.className = 'ai-thought-container';
+      thoughtEl.style = "margin-bottom: 8px; font-size: 12px;";
+      thoughtEl.innerHTML = `
+        <details style="background: var(--bg-card, rgba(0,0,0,0.05)); border: 1px solid var(--border-color, rgba(0,0,0,0.1)); border-radius: 6px; padding: 4px 8px;">
+          <summary style="cursor: pointer; font-weight: bold; color: var(--text-sub); display: flex; align-items: center; justify-content: space-between;">
+            <div style="display: flex; align-items: center; gap: 4px;">
+              <span class="material-symbols-outlined" style="font-size: 16px;">psychology</span> 
+              AIの思考プロセス (Thinking)
+            </div>
+          </summary>
+          <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-color, #ccc); color: var(--text-color, #666); white-space: pre-wrap; font-family: monospace;">
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 4px;">
+              <button onclick="window.translateAiThought(this, ${i})" style="background: none; border: 1px solid var(--border-color, #ccc); border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; color: inherit;">
+                <span class="material-symbols-outlined" style="font-size: 14px;">translate</span> 翻訳する
+              </button>
+            </div>
+            <div class="ai-thought-content" data-original-text="${escapeHTML(msg.thought)}" data-translated="false">${escapeHTML(msg.thought)}</div>
+          </div>
+        </details>
+      `;
+      msgWrapper.appendChild(thoughtEl);
+    }
+
+    const contentContainer = document.createElement('div');
+
     const contentContainer = document.createElement('div');
     contentContainer.className = 'message-content-container';
 
@@ -1897,6 +1928,40 @@ export function applyNarrationStyles(bgColor, textColor, opacityPercent) {
   root.style.setProperty('--narration-text', textColor || '#323232');
 }
 
+// ★ 追加：Google無料翻訳APIを利用した簡易翻訳機能
+window.translateAiThought = async (btnEl, msgIndex) => {
+  const container = btnEl.closest('.ai-thought-container');
+  const textEl = container.querySelector('.ai-thought-content');
+  const originalText = textEl.dataset.originalText;
+  
+  if (textEl.dataset.translated === 'true') {
+    // 既に翻訳済みの場合は元に戻す
+    textEl.textContent = originalText;
+    textEl.dataset.translated = 'false';
+    btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px;">translate</span> 翻訳する';
+    return;
+  }
+
+  btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px; animation: spin 1s linear infinite;">sync</span> 翻訳中...';
+  btnEl.disabled = true;
+
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ja&dt=t&q=${encodeURIComponent(originalText)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const translatedText = data[0].map(item => item[0]).join('');
+    
+    textEl.textContent = translatedText;
+    textEl.dataset.translated = 'true';
+    btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px;">history</span> 原文に戻す';
+  } catch (e) {
+    alert('翻訳に失敗しました。');
+    btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px;">translate</span> 翻訳する';
+  } finally {
+    btnEl.disabled = false;
+  }
+};
+
 const styleInject = document.createElement('style');
 styleInject.textContent = `
   :root {
@@ -1914,7 +1979,7 @@ styleInject.textContent = `
   .narration-content p { margin: 0 !important; }
   .chat-bubble p { line-height: 1.65 !important; margin-bottom: 8px !important; }
   .chat-bubble p:last-child { margin-bottom: 0 !important; }
-
+  
   /* メッセージアクションとラッパーのCSS設定 */
   .message-wrapper { position: relative; width: 100%; display: flex; flex-direction: column; }
   .message-content-container { width: 100%; }
