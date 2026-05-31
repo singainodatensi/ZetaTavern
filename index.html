@@ -241,7 +241,16 @@
                   <option value="gemma-3-27b-it">gemma-3-27b-it (Gemma 3・高推論)</option>
                 </select>
               </div>
-
+        <div class="form-row">
+          <label for="thinking-level-select">思考レベル (Thinking Level)</label>
+          <select id="thinking-level-select" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color);">
+            <option value="none">オフ (思考なし)</option>
+            <option value="minimal">少なめ (Minimal - 512)</option>
+            <option value="standard">標準 (Standard - 1024)</option>
+            <option value="high">深く考える (High - 4096)</option>
+          </select>
+          <small style="color: var(--text-sub); display: block; margin-top: 4px;">※深く考えるほど、原作の検索や文脈の整理を丁寧に行いますが、レスポンスが遅くなります。</small>
+        </div>
               <!-- カスタムモデルの追加入力フィールド -->
               <div class="form-group" style="margin-top: -8px;">
                 <label for="custom-model-input">カスタムモデルの追加</label>
