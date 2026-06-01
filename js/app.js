@@ -20,6 +20,8 @@ const DEFAULT_WORLD_PROMPT = `【世界観】\n現代の高校を舞台にした
 
 let hasBooted = false;
 let isSyncInProgress = false; // 同期の多重実行を防ぐ排他ガードフラグ
+let isDropboxAutoSyncRunning = false;
+let pendingDropboxAutoSync = null;
 
 const DROPBOX_SYNC_SETTING_KEYS = [
   'api_provider',
@@ -855,8 +857,8 @@ async function submitStoryTurn(mode = 'normal') {
     ui.renderStory();
     ui.renderStoryList();
 
-    // Auto-sync to Dropbox (silent)
-    await performAutoDropboxSync();
+    // Auto-sync to Dropbox in the background.
+    queueDropboxAutoSync(currentStory.storyId);
 
   } catch (err) {
     // ユーザーによる意図的なキャンセル（手動停止）の場合
@@ -1251,7 +1253,26 @@ async function performDropboxPull() {
 }
 
 /** ターン終了後に自動同期を行うか確認する（静的UI表示） */
-async function performAutoDropboxSync() {
+function queueDropboxAutoSync(storyId = null) {
+  pendingDropboxAutoSync = { storyId };
+  if (isDropboxAutoSyncRunning) return;
+
+  isDropboxAutoSyncRunning = true;
+  setTimeout(async () => {
+    try {
+      while (pendingDropboxAutoSync) {
+        const next = pendingDropboxAutoSync;
+        pendingDropboxAutoSync = null;
+        await performAutoDropboxSync(next.storyId);
+      }
+    } finally {
+      isDropboxAutoSyncRunning = false;
+      if (pendingDropboxAutoSync) queueDropboxAutoSync(pendingDropboxAutoSync.storyId);
+    }
+  }, 0);
+}
+
+async function performAutoDropboxSync(storyId = null) {
   const connected = await dropbox.isConnected();
   if (!connected) return;
 
@@ -1266,7 +1287,7 @@ async function performAutoDropboxSync() {
     console.log('[Dropbox] 自動同期を開始...');
     updateSyncStatusIndicator('syncing');
     try {
-      await performDropboxPushSilent();
+      await performDropboxPushSilent({ storyId, preferDelta: true });
       const now = Date.now();
       await db.saveSetting('dropbox_last_sync', now);
       updateLastSyncText(now);
@@ -1281,9 +1302,23 @@ async function performAutoDropboxSync() {
 /**
  * Silent push (no alert, no button disable — for auto-sync).
  */
-async function performDropboxPushSilent() {
+async function performDropboxPushSilent({ storyId = null, preferDelta = false } = {}) {
   const stories    = await db.getStories();
   const characters = await db.getCharacters();
+  const settings = await collectDropboxSettings();
+
+  if (preferDelta && storyId) {
+    const story = stories.find(item => item.storyId === storyId);
+    if (story) {
+      const result = await dropbox.pushStoryDeltaToDropbox({
+        story,
+        settings,
+        onProgress: msg => console.log('[Dropbox AutoSync]', msg)
+      });
+      if (result) return;
+      console.log('[Dropbox AutoSync] 差分同期の基準がないため、初回のみフル同期します。');
+    }
+  }
 
   const assetIds = new Set();
   [...stories, ...characters].forEach(item => {
@@ -1301,7 +1336,7 @@ async function performDropboxPushSilent() {
   await dropbox.pushToDropbox({
     stories,
     characters,
-    settings: await collectDropboxSettings(),
+    settings,
     assets,
     onProgress: msg => console.log('[Dropbox AutoSync]', msg)
   });
