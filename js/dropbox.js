@@ -413,31 +413,71 @@ async function uploadV2Data({ stories = [], characters = [], settings = {}, onPr
   progress(`ストーリー ${stories.length} 件を同期中...`);
   for (const story of stories) {
     if (!story?.storyId) continue;
-    const storyDir = `${V2_STORY_DIR}/${story.storyId}`;
-    await ensureFolderExists(storyDir);
-
-    const { meta, chunks } = splitStoryForSync(story);
-    const metaPath = `${storyDir}/meta.json`;
-    await uploadJson(metaPath, meta);
-
-    const messageChunks = [];
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkName = `messages_${String(i + 1).padStart(4, '0')}.json`;
-      const chunkPath = `${storyDir}/${chunkName}`;
-      await uploadJson(chunkPath, { index: i, messages: chunks[i] });
-      messageChunks.push(chunkPath);
-    }
-
-    manifest.stories[story.storyId] = {
-      metaPath,
-      messageChunks,
-      updatedAt: story.timestamp || now
-    };
+    manifest.stories[story.storyId] = await uploadV2Story(story, now);
   }
 
   progress('同期目次を更新中...');
   await uploadJson(V2_MANIFEST, manifest);
   return manifest;
+}
+
+async function uploadV2Story(story, now = Date.now()) {
+  const storyDir = `${V2_STORY_DIR}/${story.storyId}`;
+  await ensureFolderExists(storyDir);
+
+  const { meta, chunks } = splitStoryForSync(story);
+  const metaPath = `${storyDir}/meta.json`;
+  await uploadJson(metaPath, meta);
+
+  const messageChunks = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkName = `messages_${String(i + 1).padStart(4, '0')}.json`;
+    const chunkPath = `${storyDir}/${chunkName}`;
+    await uploadJson(chunkPath, { index: i, messages: chunks[i] });
+    messageChunks.push(chunkPath);
+  }
+
+  return {
+    metaPath,
+    messageChunks,
+    messageCount: Array.isArray(story.messages) ? story.messages.length : 0,
+    updatedAt: story.timestamp || now
+  };
+}
+
+async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) {
+  if (!previousEntry || !Number.isFinite(previousEntry.messageCount)) {
+    return uploadV2Story(story, now);
+  }
+
+  const storyDir = `${V2_STORY_DIR}/${story.storyId}`;
+  await ensureFolderExists(storyDir);
+
+  const { meta, chunks } = splitStoryForSync(story);
+  const nextMessageCount = Array.isArray(story.messages) ? story.messages.length : 0;
+  if (nextMessageCount < previousEntry.messageCount) {
+    return uploadV2Story(story, now);
+  }
+
+  const metaPath = `${storyDir}/meta.json`;
+  await uploadJson(metaPath, meta);
+
+  const messageChunks = chunks.map((_, index) => {
+    const chunkName = `messages_${String(index + 1).padStart(4, '0')}.json`;
+    return `${storyDir}/${chunkName}`;
+  });
+
+  const firstChangedChunk = Math.max(0, Math.floor(Math.max(previousEntry.messageCount - 1, 0) / MESSAGE_CHUNK_SIZE));
+  for (let i = firstChangedChunk; i < chunks.length; i++) {
+    await uploadJson(messageChunks[i], { index: i, messages: chunks[i] });
+  }
+
+  return {
+    metaPath,
+    messageChunks,
+    messageCount: nextMessageCount,
+    updatedAt: story.timestamp || now
+  };
 }
 
 async function downloadV2Data({ localAssetIds, onProgress }) {
@@ -723,6 +763,55 @@ export async function pushToDropbox({ stories, characters, settings, assets, onP
     }
 
     progress('プッシュ完了！');
+  } finally {
+    try {
+      await deleteLockFile();
+    } catch (error) {
+      console.warn('[Dropbox] ロックファイル削除に失敗しました。期限切れ後に自動解除されます。', error);
+    }
+  }
+}
+
+export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
+  const progress = msg => { console.log('[Dropbox Delta Push]', msg); if (onProgress) onProgress(msg); };
+
+  if (!story?.storyId) {
+    throw new Error('差分同期するストーリーが見つかりません。');
+  }
+
+  progress('差分同期を開始します...');
+  const lock = await checkLockFile();
+  if (lock) {
+    throw new Error(`他の端末が同期中です (${lock.operation}) 。しばらく待ってから再試行してください。`);
+  }
+
+  await uploadLockFile('delta-push');
+  try {
+    const manifest = await downloadJson(V2_MANIFEST);
+    if (!manifest || manifest.schemaVersion !== 2) {
+      return null;
+    }
+
+    const now = Date.now();
+    await ensureFolderExists('/ZetaTavern');
+    await ensureFolderExists(V2_ROOT);
+    await ensureFolderExists(V2_STORY_DIR);
+
+    if (settings) {
+      progress('設定を差分アップロード中...');
+      await uploadJson(manifest.settingsPath || V2_SETTINGS, { settings, updatedAt: now });
+      manifest.settingsPath = manifest.settingsPath || V2_SETTINGS;
+    }
+
+    progress('現在のストーリーを差分アップロード中...');
+    manifest.stories = manifest.stories || {};
+    manifest.stories[story.storyId] = await uploadV2StoryAppendDelta(story, manifest.stories[story.storyId], now);
+    manifest.updatedAt = now;
+
+    progress('同期目次を更新中...');
+    await uploadJson(V2_MANIFEST, manifest);
+    progress('差分同期完了！');
+    return manifest;
   } finally {
     try {
       await deleteLockFile();
