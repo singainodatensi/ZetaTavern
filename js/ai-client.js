@@ -329,8 +329,10 @@ export async function generateStoryResponse(story) {
   }
 
   // --- 設定から値を取得（なければ安全なデフォルト値を使用） ---
-  const timeoutSeconds = appState.apiTimeout ? parseInt(appState.apiTimeout) : 60;
-  const maxRetries = appState.apiRetries !== undefined ? parseInt(appState.apiRetries) : 3;
+  const parsedTimeout = parseInt(appState.apiTimeout, 10);
+  const parsedRetries = parseInt(appState.apiRetries, 10);
+  const timeoutSeconds = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 60;
+  const maxRetries = Number.isFinite(parsedRetries) && parsedRetries > 0 ? parsedRetries : 1;
 
   const systemInstruction = await buildSystemInstruction(story);
 
@@ -433,6 +435,9 @@ try {
       await new Promise(r => setTimeout(r, delay));
     }
   }
+
+  updateState({ activeAbortController: null });
+  throw new Error('AI応答の生成が開始されませんでした。リトライ回数の設定を確認してください。');
 }
 
 /**
