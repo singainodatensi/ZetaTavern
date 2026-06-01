@@ -37,6 +37,14 @@ const METADATA_PATH   = '/ZetaTavern_data.json';
 const ASSETS_DIR_PATH = '/ZetaTavern_Assets';
 const LOCK_PATH       = '/.zetatavern_sync_lock';
 const TOKENS_KEY      = 'dropboxTokens';
+const CLIENT_ID_KEY   = 'dropboxClientId';
+const LOCK_TTL_MS     = 30 * 60 * 1000;
+const V2_ROOT         = '/ZetaTavern/v2';
+const V2_MANIFEST     = `${V2_ROOT}/manifest.json`;
+const V2_SETTINGS     = `${V2_ROOT}/settings.json`;
+const V2_CHAR_DIR     = `${V2_ROOT}/characters`;
+const V2_STORY_DIR    = `${V2_ROOT}/stories`;
+const MESSAGE_CHUNK_SIZE = 100;
 
 // ============================================================
 // 内部ヘルパー
@@ -85,6 +93,15 @@ async function _getTokens() {
 
 async function _saveTokens(tokens) {
   await saveSetting(TOKENS_KEY, tokens);
+}
+
+async function _getClientId() {
+  let id = await getSetting(CLIENT_ID_KEY, '');
+  if (!id) {
+    id = crypto.randomUUID();
+    await saveSetting(CLIENT_ID_KEY, id);
+  }
+  return id;
 }
 
 async function _refreshAccessToken(refreshToken) {
@@ -306,6 +323,171 @@ export async function downloadMetadata() {
   }
 }
 
+async function uploadJson(path, value) {
+  const payload = JSON.stringify(value);
+  const args = { path, mode: 'overwrite', mute: true };
+  return _request('content', '/files/upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Dropbox-API-Arg': JSON.stringify(args),
+    },
+    body: payload,
+  });
+}
+
+async function downloadJson(path) {
+  try {
+    const blob = await _request('content', '/files/download', {
+      method: 'POST',
+      headers: { 'Dropbox-API-Arg': JSON.stringify({ path }) },
+    });
+    return JSON.parse(await blob.text());
+  } catch (error) {
+    if (error.message.includes('path/not_found')) return null;
+    throw error;
+  }
+}
+
+async function ensureFolderExists(path) {
+  try {
+    await _request('api', '/files/get_metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+  } catch (error) {
+    if (error.message.includes('path/not_found')) {
+      await _request('api', '/files/create_folder_v2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, autorename: false }),
+      });
+      return;
+    }
+    throw error;
+  }
+}
+
+function splitStoryForSync(story) {
+  const { messages = [], ...meta } = story || {};
+  const chunks = [];
+  for (let i = 0; i < messages.length; i += MESSAGE_CHUNK_SIZE) {
+    chunks.push(messages.slice(i, i + MESSAGE_CHUNK_SIZE));
+  }
+  if (chunks.length === 0) chunks.push([]);
+  return { meta, chunks };
+}
+
+async function uploadV2Data({ stories = [], characters = [], settings = {}, onProgress }) {
+  const now = Date.now();
+  const progress = msg => { if (onProgress) onProgress(msg); };
+
+  await ensureFolderExists('/ZetaTavern');
+  await ensureFolderExists(V2_ROOT);
+  await ensureFolderExists(V2_CHAR_DIR);
+  await ensureFolderExists(V2_STORY_DIR);
+
+  progress('設定を分割アップロード中...');
+  await uploadJson(V2_SETTINGS, { settings, updatedAt: now });
+
+  const manifest = {
+    schemaVersion: 2,
+    updatedAt: now,
+    settingsPath: V2_SETTINGS,
+    characters: {},
+    stories: {}
+  };
+
+  progress(`キャラクター ${characters.length} 件を同期中...`);
+  for (const character of characters) {
+    if (!character?.characterId) continue;
+    const path = `${V2_CHAR_DIR}/${character.characterId}.json`;
+    await uploadJson(path, character);
+    manifest.characters[character.characterId] = {
+      path,
+      updatedAt: character.timestamp || now
+    };
+  }
+
+  progress(`ストーリー ${stories.length} 件を同期中...`);
+  for (const story of stories) {
+    if (!story?.storyId) continue;
+    const storyDir = `${V2_STORY_DIR}/${story.storyId}`;
+    await ensureFolderExists(storyDir);
+
+    const { meta, chunks } = splitStoryForSync(story);
+    const metaPath = `${storyDir}/meta.json`;
+    await uploadJson(metaPath, meta);
+
+    const messageChunks = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkName = `messages_${String(i + 1).padStart(4, '0')}.json`;
+      const chunkPath = `${storyDir}/${chunkName}`;
+      await uploadJson(chunkPath, { index: i, messages: chunks[i] });
+      messageChunks.push(chunkPath);
+    }
+
+    manifest.stories[story.storyId] = {
+      metaPath,
+      messageChunks,
+      updatedAt: story.timestamp || now
+    };
+  }
+
+  progress('同期目次を更新中...');
+  await uploadJson(V2_MANIFEST, manifest);
+  return manifest;
+}
+
+async function downloadV2Data({ localAssetIds, onProgress }) {
+  const progress = msg => { if (onProgress) onProgress(msg); };
+  const manifest = await downloadJson(V2_MANIFEST);
+  if (!manifest || manifest.schemaVersion !== 2) return null;
+
+  progress('同期目次を取得しました。差分を復元中...');
+  const settingsPayload = await downloadJson(manifest.settingsPath || V2_SETTINGS);
+  const settings = settingsPayload?.settings || {};
+
+  const characters = [];
+  for (const entry of Object.values(manifest.characters || {})) {
+    const character = await downloadJson(entry.path);
+    if (character) characters.push(character);
+  }
+
+  const stories = [];
+  for (const entry of Object.values(manifest.stories || {})) {
+    const meta = await downloadJson(entry.metaPath);
+    if (!meta) continue;
+    const messages = [];
+    for (const chunkPath of entry.messageChunks || []) {
+      const chunk = await downloadJson(chunkPath);
+      if (Array.isArray(chunk?.messages)) messages.push(...chunk.messages);
+    }
+    stories.push({ ...meta, messages });
+  }
+
+  const requiredAssetIds = new Set();
+  [...stories, ...characters].forEach(item => {
+    if (item.protagonist?.avatarAssetId) requiredAssetIds.add(item.protagonist.avatarAssetId);
+    if (item.avatarAssetId) requiredAssetIds.add(item.avatarAssetId);
+  });
+
+  const missingIds = [...requiredAssetIds].filter(id => id && !localAssetIds.has(id));
+  const newAssets = [];
+  if (missingIds.length > 0) {
+    progress(`不足アセット ${missingIds.length} 件を取得中...`);
+    for (let i = 0; i < missingIds.length; i++) {
+      const assetId = missingIds[i];
+      progress(`アセット ${i + 1}/${missingIds.length} を取得中...`);
+      const blob = await downloadAsset(assetId);
+      if (blob) newAssets.push({ assetId, blob });
+    }
+  }
+
+  return { stories, characters, settings, newAssets };
+}
+
 // ============================================================
 // アセット (Blob 画像) の同期
 // ============================================================
@@ -443,7 +625,14 @@ export async function uploadAssetsInBatches(items, progressCallback) {
 // ============================================================
 
 export async function uploadLockFile(operation) {
-  const body = JSON.stringify({ timestamp: new Date().toISOString(), operation });
+  const now = Date.now();
+  const body = JSON.stringify({
+    ownerId: await _getClientId(),
+    operation,
+    timestamp: new Date(now).toISOString(),
+    createdAt: now,
+    expiresAt: now + LOCK_TTL_MS
+  });
   return _request('content', '/files/upload', {
     method: 'POST',
     headers: {
@@ -474,7 +663,19 @@ export async function checkLockFile() {
       headers: { 'Dropbox-API-Arg': JSON.stringify({ path: LOCK_PATH }) },
     });
     const text = await blob.text();
-    return JSON.parse(text);
+    const lock = JSON.parse(text);
+    const expiresAt = Number(lock.expiresAt || 0);
+    const timestamp = Date.parse(lock.timestamp || '');
+    const fallbackExpiresAt = Number.isFinite(timestamp) ? timestamp + LOCK_TTL_MS : 0;
+    const effectiveExpiresAt = expiresAt || fallbackExpiresAt;
+
+    if (effectiveExpiresAt && Date.now() > effectiveExpiresAt) {
+      console.warn('[Dropbox] Stale sync lock detected. Removing it automatically.', lock);
+      await deleteLockFile();
+      return null;
+    }
+
+    return lock;
   } catch (error) {
     if (error.message.includes('path/not_found')) return null;
     throw error;
@@ -510,8 +711,8 @@ export async function pushToDropbox({ stories, characters, settings, assets, onP
 
   await uploadLockFile('push');
   try {
-    progress('メタデータをアップロード中...');
-    await uploadMetadata(stories, characters, settings);
+    progress('分割メタデータをアップロード中...');
+    await uploadV2Data({ stories, characters, settings, onProgress });
 
     progress('アセットフォルダを確認中...');
     await ensureAssetsFolderExists();
@@ -523,7 +724,11 @@ export async function pushToDropbox({ stories, characters, settings, assets, onP
 
     progress('プッシュ完了！');
   } finally {
-    await deleteLockFile();
+    try {
+      await deleteLockFile();
+    } catch (error) {
+      console.warn('[Dropbox] ロックファイル削除に失敗しました。期限切れ後に自動解除されます。', error);
+    }
   }
 }
 
@@ -540,47 +745,48 @@ export async function pullFromDropbox({ localAssetIds, onProgress }) {
   const progress = msg => { console.log('[Dropbox Pull]', msg); if (onProgress) onProgress(msg); };
 
   progress('クラウドからデータを取得中...');
+  const v2Data = await downloadV2Data({ localAssetIds, onProgress });
+  if (v2Data) {
+    progress('プル完了！');
+    return v2Data;
+  }
+
   const lock = await checkLockFile();
   if (lock) {
     throw new Error(`他の端末が同期中です (${lock.operation}) 。しばらく待ってから再試行してください。`);
   }
 
-  await uploadLockFile('pull');
-  try {
-    const metaText = await downloadMetadata();
-    if (!metaText) {
-      progress('クラウドにデータがありませんでした。');
-      return { stories: null, characters: null, settings: null, newAssets: [] };
-    }
+  const metaText = await downloadMetadata();
+  if (!metaText) {
+    progress('クラウドにデータがありませんでした。');
+    return { stories: null, characters: null, settings: null, newAssets: [] };
+  }
 
-    const { stories, characters, settings } = JSON.parse(metaText);
+  const { stories, characters, settings } = JSON.parse(metaText);
 
-    // 必要なアセットIDを収集
-    const requiredAssetIds = new Set();
-    [...(stories || []), ...(characters || [])].forEach(item => {
-      if (item.protagonist?.avatarAssetId) requiredAssetIds.add(item.protagonist.avatarAssetId);
-      if (item.avatarAssetId) requiredAssetIds.add(item.avatarAssetId);
-    });
+  // 必要なアセットIDを収集
+  const requiredAssetIds = new Set();
+  [...(stories || []), ...(characters || [])].forEach(item => {
+    if (item.protagonist?.avatarAssetId) requiredAssetIds.add(item.protagonist.avatarAssetId);
+    if (item.avatarAssetId) requiredAssetIds.add(item.avatarAssetId);
+  });
 
-    // ローカルに存在しないアセットだけダウンロード
-    const missingIds = [...requiredAssetIds].filter(id => id && !localAssetIds.has(id));
-    const newAssets = [];
+  // ローカルに存在しないアセットだけダウンロード
+  const missingIds = [...requiredAssetIds].filter(id => id && !localAssetIds.has(id));
+  const newAssets = [];
 
-    if (missingIds.length > 0) {
-      progress(`${missingIds.length}件のアセットをダウンロード中...`);
-      for (let i = 0; i < missingIds.length; i++) {
-        const assetId = missingIds[i];
-        progress(`アセット ${i + 1}/${missingIds.length} をダウンロード中...`);
-        const blob = await downloadAsset(assetId);
-        if (blob) {
-          newAssets.push({ assetId, blob });
-        }
+  if (missingIds.length > 0) {
+    progress(`${missingIds.length}件のアセットをダウンロード中...`);
+    for (let i = 0; i < missingIds.length; i++) {
+      const assetId = missingIds[i];
+      progress(`アセット ${i + 1}/${missingIds.length} をダウンロード中...`);
+      const blob = await downloadAsset(assetId);
+      if (blob) {
+        newAssets.push({ assetId, blob });
       }
     }
-
-    progress('プル完了！');
-    return { stories, characters, settings, newAssets };
-  } finally {
-    await deleteLockFile();
   }
+
+  progress('プル完了！');
+  return { stories, characters, settings, newAssets };
 }
