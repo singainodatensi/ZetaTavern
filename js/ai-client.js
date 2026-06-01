@@ -295,11 +295,18 @@ export function extractStoryTextAndThoughtFromApiResponse(result) {
 }
 
 /** UIの思考レベル設定から、API送信用の Thinking Budget 数値を決定する */
-function buildThinkingConfig(thinkingLevel) {
+function buildThinkingConfig(thinkingLevel, modelName) {
+  const m = (modelName || '').toLowerCase();
+  
+  // ★ 安全装置：Gemmaシリーズや、Thinkingに非対応な古いモデルの場合は強制的にオフにする
+  if (m.includes('gemma') || m.includes('1.5') || (m.includes('2.0') && !m.includes('thinking'))) {
+    return null;
+  }
+
   let budget = 1024; // デフォルトは Standard
 
   if (thinkingLevel === 'none') {
-    return null; // 思考機能をオフ（プロパティごと除外するのが一番安全）
+    return null; // 思考機能をオフ
   } else if (thinkingLevel === 'minimal') {
     budget = 512;
   } else if (thinkingLevel === 'high') {
@@ -342,9 +349,9 @@ parts: [{ text: msg.aiContent || msg.content }]
     maxOutputTokens: 8192
   };
 
-// ★ モデル名ではなく、設定した thinkingLevel を渡すように変更
+// ★ モデル名も一緒に渡して、非対応モデルならエラーを回避する
   const thinkingLevel = appState.thinkingLevel || 'standard';
-  const thinkingConfig = buildThinkingConfig(thinkingLevel);
+  const thinkingConfig = buildThinkingConfig(thinkingLevel, modelName);
   if (thinkingConfig) {
     generationConfig.thinkingConfig = thinkingConfig;
   }
