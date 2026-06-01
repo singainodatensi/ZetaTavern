@@ -841,6 +841,9 @@ async function submitStoryTurn(mode = 'normal') {
 
   try {
     const aiResponse = await generateStoryResponse(currentStory); // ★ 変数名を変更
+    if (!aiResponse?.text) {
+      throw new Error('AIから有効な本文が返されませんでした。');
+    }
 
     currentStory.messages.push({
       role: 'model',
