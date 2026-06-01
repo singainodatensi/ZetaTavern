@@ -21,6 +21,43 @@ const DEFAULT_WORLD_PROMPT = `【世界観】\n現代の高校を舞台にした
 let hasBooted = false;
 let isSyncInProgress = false; // 同期の多重実行を防ぐ排他ガードフラグ
 
+const DROPBOX_SYNC_SETTING_KEYS = [
+  'api_provider',
+  'api_key',
+  'model_name',
+  'show_choices',
+  'autoscroll_enabled',
+  'custom_models',
+  'dropbox_app_key',
+  'dropbox_sync_frequency',
+  'thinking_level',
+  'api_timeout',
+  'api_retries',
+  'font_size',
+  'narration_bg',
+  'narration_color',
+  'narration_opacity'
+];
+
+async function collectDropboxSettings() {
+  const settings = {};
+  for (const key of DROPBOX_SYNC_SETTING_KEYS) {
+    const value = await db.getSetting(key, undefined);
+    if (value !== undefined) settings[key] = value;
+  }
+  return settings;
+}
+
+async function restoreDropboxSettings(settings) {
+  if (!settings || typeof settings !== 'object') return;
+  for (const key of DROPBOX_SYNC_SETTING_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(settings, key)) {
+      await db.saveSetting(key, settings[key]);
+    }
+  }
+  await loadConfigurations();
+}
+
 // Boot strap execution
 async function bootApp() {
   if (hasBooted) return;
@@ -1121,6 +1158,7 @@ async function performDropboxPush() {
     await dropbox.pushToDropbox({
       stories,
       characters,
+      settings: await collectDropboxSettings(),
       assets,
       onProgress: msg => setDropboxProgress(msg)
     });
@@ -1154,7 +1192,7 @@ async function performDropboxPull() {
     const localAssets = await db.getAll('assets');
     const localAssetIds = new Set(localAssets.map(a => a.assetId));
 
-    const { stories, characters, newAssets } = await dropbox.pullFromDropbox({
+    const { stories, characters, settings, newAssets } = await dropbox.pullFromDropbox({
       localAssetIds,
       onProgress: msg => setDropboxProgress(msg)
     });
@@ -1166,6 +1204,8 @@ async function performDropboxPull() {
     }
 
     setDropboxProgress('ローカルデータを更新中...');
+
+    await restoreDropboxSettings(settings);
 
     for (const { assetId, blob } of newAssets) {
       await db.saveAssetWithId(assetId, blob, blob.type);
@@ -1261,6 +1301,7 @@ async function performDropboxPushSilent() {
   await dropbox.pushToDropbox({
     stories,
     characters,
+    settings: await collectDropboxSettings(),
     assets,
     onProgress: msg => console.log('[Dropbox AutoSync]', msg)
   });
@@ -1356,12 +1397,14 @@ async function performStartupSync() {
     const localAssets = await db.getAll('assets');
     const localAssetIds = new Set(localAssets.map(a => a.assetId));
 
-    const { stories, characters, newAssets } = await dropbox.pullFromDropbox({
+    const { stories, characters, settings, newAssets } = await dropbox.pullFromDropbox({
       localAssetIds,
       onProgress: msg => console.log('[Dropbox StartupSync]', msg)
     });
 
     if (stories) {
+      await restoreDropboxSettings(settings);
+
       for (const { assetId, blob } of newAssets) {
         await db.saveAssetWithId(assetId, blob, blob.type);
       }
