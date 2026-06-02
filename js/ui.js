@@ -1992,7 +1992,7 @@ styleInject.textContent = `
   @media (max-width: 1023px) {
     #story-viewport { padding: 12px 8px !important; }
     .chat-message { margin-bottom: 14px !important; gap: 8px !important; }
-    .chat-avatar { width: 40px !important; height: 40px !important; }
+    .chat-avatar { width: 60px !important; height: 60px !important; }
     .chat-bubble { padding: 10px 12px !important; max-width: 82% !important; }
     .narration-content { padding-left: 48px !important; max-width: 95% !important; font-size: 0.95em !important; }
     
