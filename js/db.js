@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = 'ZetaTavern_PWA_Unique_v1_DB'; // 他のアプリと絶対衝突しない名前に変更
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -37,6 +37,13 @@ function getDB() {
       // Stories Store: { storyId: string, title: string, storytellerPrompt: string, worldPrompt: string, protagonist: Object, characters: Array, messages: Array, sceneState: Object, characterMemory: Object, relationshipMemory: Object, timestamp: number }
       if (!db.objectStoreNames.contains('stories')) {
         db.createObjectStore('stories', { keyPath: 'storyId' });
+      }
+
+      // World Lore Store: { id: string, franchise: string, type: string, name: string, content: Object, source: string, verified: boolean, status: string }
+      if (!db.objectStoreNames.contains('world_lore')) {
+        const loreStore = db.createObjectStore('world_lore', { keyPath: 'id' });
+        loreStore.createIndex('franchise', 'franchise', { unique: false });
+        loreStore.createIndex('name', 'name', { unique: false });
       }
     };
 
@@ -315,3 +322,69 @@ export async function deleteStory(storyId) {
     throw err;
   }
 }
+
+// ==========================================
+// World Lore API
+// ==========================================
+
+export async function getWorldLores() {
+  try {
+    return await getAll('world_lore');
+  } catch (err) {
+    console.error('Error getting all world lore:', err);
+    return [];
+  }
+}
+
+export async function getLore(loreId) {
+  try {
+    return await get('world_lore', loreId);
+  } catch (err) {
+    console.error(`Error getting lore ${loreId}:`, err);
+    return null;
+  }
+}
+
+export async function saveLore(lore) {
+  if (!lore.id) {
+    lore.id = 'lore_' + crypto.randomUUID();
+  }
+  try {
+    await put('world_lore', lore);
+    return lore.id;
+  } catch (err) {
+    console.error('Error saving world lore:', err);
+    throw err;
+  }
+}
+
+export async function deleteLore(loreId) {
+  try {
+    await deleteKey('world_lore', loreId);
+  } catch (err) {
+    console.error(`Error deleting world lore ${loreId}:`, err);
+    throw err;
+  }
+}
+
+export async function getLoreByNameAndFranchise(name, franchise) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('world_lore', 'readonly');
+    const store = transaction.objectStore('world_lore');
+    const nameIndex = store.index('name');
+    const request = nameIndex.getAll(name);
+
+    request.onsuccess = () => {
+      const results = request.result || [];
+      if (!franchise) {
+        resolve(results[0] || null);
+        return;
+      }
+      const match = results.find(item => item.franchise === franchise);
+      resolve(match || results[0] || null);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
