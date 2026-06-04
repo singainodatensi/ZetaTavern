@@ -555,7 +555,8 @@ export async function generateStoryResponse(story) {
           toolConfig: {
             functionCallingConfig: {
               mode: 'AUTO'
-            }
+            },
+            includeServerSideToolInvocations: true
           }
         }),
         signal: attemptController.signal
