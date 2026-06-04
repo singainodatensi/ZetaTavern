@@ -1017,6 +1017,31 @@ export async function renderSidebar() {
   }
 
   html += `</div></div>`;
+
+  // セッションロア (Session Lore) をサイドバーの最下部に表示
+  const sessionLore = currentStory.session_lore || { summary: '', key_events: [] };
+  const eventListHTML = (sessionLore.key_events || []).map(ev => `<li>${escapeHTML(ev)}</li>`).join('');
+  html += `
+    <div class="sidebar-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--border-color, #eee);">
+      <h4 style="display: flex; align-items: center; gap: 4px;">
+        <span class="material-symbols-outlined" style="font-size: 18px;">history_edu</span>
+        セッション記録・記憶
+      </h4>
+      <div class="scene-state-form">
+        <div class="form-group" style="margin-bottom: 8px;">
+          <label style="font-size: 11px;">ストーリーあらすじ / 関係性要約</label>
+          <textarea id="session-lore-summary-input" rows="3" style="width: 100%; font-size: 12px; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; background: var(--bg-card, #fff); color: inherit; resize: vertical;" placeholder="AIの状況整理やあらすじがここに記録されます...">${escapeHTML(sessionLore.summary || '')}</textarea>
+        </div>
+        <div class="form-group">
+          <label style="font-size: 11px;">獲得した主要フラグ / キーイベント</label>
+          <ul id="session-lore-events" style="margin: 4px 0 0 0; padding-left: 18px; font-size: 12px; line-height: 1.5; color: var(--text-color);">
+            ${eventListHTML || '<li style="color: var(--text-sub); list-style: none; margin-left:-18px;">記録されたイベントはありません</li>'}
+          </ul>
+        </div>
+      </div>
+    </div>
+  `;
+
   sidebarEl.innerHTML = html;
   bindSidebarEvents();
 }
@@ -1040,6 +1065,7 @@ function bindSidebarEvents() {
   const timeInput = document.getElementById('scene-time-input');
   const atmosInput = document.getElementById('scene-atmosphere-input');
   const objInput = document.getElementById('scene-objective-input');
+  const sessionSummaryInput = document.getElementById('session-lore-summary-input');
 
   // ----------------------------------
 
@@ -1047,6 +1073,13 @@ function bindSidebarEvents() {
   if (timeInput) timeInput.oninput = (e) => { currentStory.sceneState.timeOfDay = e.target.value; saveStateChanges(); };
   if (atmosInput) atmosInput.oninput = (e) => { currentStory.sceneState.atmosphere = e.target.value; saveStateChanges(); };
   if (objInput) objInput.oninput = (e) => { currentStory.sceneState.currentObjective = e.target.value; saveStateChanges(); };
+  if (sessionSummaryInput) {
+    sessionSummaryInput.oninput = (e) => {
+      if (!currentStory.session_lore) currentStory.session_lore = { summary: '', key_events: [] };
+      currentStory.session_lore.summary = e.target.value;
+      saveStateChanges();
+    };
+  }
 
   document.querySelectorAll('.char-attendance-select').forEach(select => {
     select.onchange = (e) => {
@@ -2015,3 +2048,235 @@ styleInject.textContent = `
   }
 `;
 document.head.appendChild(styleInject);
+
+// =========================================================================
+// ロアブック画面のレンダリングと編集モーダル
+// =========================================================================
+
+export async function renderLorebook() {
+  const container = document.getElementById('lorebook-viewport');
+  if (!container) return;
+
+  const searchInput = document.getElementById('lore-search-input');
+  const filterSelect = document.getElementById('lore-filter-select');
+
+  const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+  const filter = filterSelect ? filterSelect.value : 'all';
+
+  const allLore = await db.getWorldLores();
+
+  // フィルタリング
+  const filtered = allLore.filter(lore => {
+    // 検索語句
+    const nameMatch = lore.name && lore.name.toLowerCase().includes(query);
+    const contentSummary = lore.content?.summary && lore.content.summary.toLowerCase().includes(query);
+    const franchiseMatch = lore.franchise && lore.franchise.toLowerCase().includes(query);
+    const searchMatch = !query || nameMatch || contentSummary || franchiseMatch;
+
+    // 確認状況
+    let statusMatch = true;
+    if (filter === 'verified') {
+      statusMatch = lore.verified === true;
+    } else if (filter === 'unverified') {
+      statusMatch = lore.verified !== true;
+    }
+
+    return searchMatch && statusMatch;
+  });
+
+  // レンダリング
+  if (filtered.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="material-symbols-outlined">auto_stories</span>
+        <p>該当するロア設定が見つかりません</p>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = '';
+  for (const lore of filtered) {
+    const card = document.createElement('div');
+    card.className = 'character-card';
+    card.style = "position: relative; overflow: visible;";
+
+    const isVerified = lore.verified === true;
+    const badgeHTML = isVerified 
+      ? `<span class="badge" style="background-color: var(--primary-color, #7c4dff); color: white; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px;"><span class="material-symbols-outlined" style="font-size: 14px;">verified</span>確認済み</span>`
+      : `<span class="badge" style="background-color: #ff9800; color: white; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px;"><span class="material-symbols-outlined" style="font-size: 14px;">warning</span>AI自動収集（未確認）</span>`;
+
+    const summaryText = lore.content?.summary || '設定要約がありません。';
+
+    card.innerHTML = `
+      <div class="char-card-body" style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <h3 style="margin: 0; font-size: 1.1em; display: flex; align-items: center; gap: 6px;">
+            <span class="material-symbols-outlined" style="color: var(--primary-color);">auto_stories</span>
+            ${escapeHTML(lore.name)}
+          </h3>
+          <div style="font-size: 12px; opacity: 0.7;">[${escapeHTML(lore.franchise || '共通')}]</div>
+        </div>
+        
+        <div style="margin-top: 4px;">
+          ${badgeHTML}
+          <span style="font-size: 11px; color: var(--text-sub); margin-left: 8px; text-transform: uppercase;">Type: ${escapeHTML(lore.type || 'term')}</span>
+        </div>
+
+        <p style="font-size: 13px; line-height: 1.5; color: var(--text-color); margin: 6px 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis;">
+          ${escapeHTML(summaryText)}
+        </p>
+
+        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.1));">
+          <button class="secondary-btn edit-lore-btn" style="padding: 4px 8px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px;">
+            <span class="material-symbols-outlined" style="font-size: 16px;">edit</span> 編集
+          </button>
+          <button class="danger-btn delete-lore-btn" style="padding: 4px 8px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px;">
+            <span class="material-symbols-outlined" style="font-size: 16px;">delete</span> 削除
+          </button>
+        </div>
+      </div>
+    `;
+
+    card.querySelector('.edit-lore-btn').onclick = () => showLoreEditModal(lore);
+    card.querySelector('.delete-lore-btn').onclick = async () => {
+      if (confirm(`ロア「${lore.name}」を削除しますか？`)) {
+        await db.deleteLore(lore.id);
+        renderLorebook();
+      }
+    };
+
+    container.appendChild(card);
+  }
+}
+
+export function showLoreEditModal(lore = null) {
+  let modal = document.getElementById('lore-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'lore-modal';
+  modal.className = 'modal-wrapper';
+  modal.style.zIndex = '5000';
+
+  const isEdit = !!lore;
+  const title = isEdit ? 'ロア設定の編集' : '新規ロアの作成';
+  
+  const loreName = isEdit ? lore.name : '';
+  const loreFranchise = isEdit ? lore.franchise : '';
+  const loreType = isEdit ? lore.type : 'term';
+  const loreVerified = isEdit ? lore.verified : true;
+
+  const contentSummary = isEdit ? (lore.content?.summary || '') : '';
+  const contentProfile = isEdit ? (lore.content?.profile || '') : '';
+  const contentSpeech = isEdit ? (lore.content?.speech || '') : '';
+  const contentRelationships = isEdit ? (lore.content?.relationships || '') : '';
+
+  modal.innerHTML = `
+    <div class="modal-overlay"></div>
+    <div class="modal-content" style="max-width: 600px; width: 90%;">
+      <div class="modal-header">
+        <h3>${escapeHTML(title)}</h3>
+        <button onclick="document.getElementById('lore-modal').remove()" class="icon-btn-circle">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group">
+            <label for="lore-name-input">名前/固有名詞 (必須)</label>
+            <input type="text" id="lore-name-input" placeholder="例: エミリア" value="${escapeHTML(loreName)}">
+          </div>
+          <div class="form-group">
+            <label for="lore-franchise-input">作品カテゴリ/Franchise</label>
+            <input type="text" id="lore-franchise-input" placeholder="例: Re:ゼロ" value="${escapeHTML(loreFranchise)}">
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: center;">
+          <div class="form-group">
+            <label for="lore-type-select">ロアの種類</label>
+            <select id="lore-type-select" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color, #ccc); background: var(--bg-card, #fff); color: inherit;">
+              <option value="character" ${loreType === 'character' ? 'selected' : ''}>登場人物 (character)</option>
+              <option value="location" ${loreType === 'location' ? 'selected' : ''}>場所・地域 (location)</option>
+              <option value="organization" ${loreType === 'organization' ? 'selected' : ''}>組織・勢力 (organization)</option>
+              <option value="term" ${loreType === 'term' ? 'selected' : ''}>用語・世界観 (term)</option>
+              <option value="event" ${loreType === 'event' ? 'selected' : ''}>歴史・事件 (event)</option>
+              <option value="item" ${loreType === 'item' ? 'selected' : ''}>アイテム・道具 (item)</option>
+            </select>
+          </div>
+          <div class="form-group-checkbox" style="margin-top: 16px;">
+            <input type="checkbox" id="lore-verified-checkbox" ${loreVerified ? 'checked' : ''}>
+            <label for="lore-verified-checkbox" style="cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+              <strong>確認済みにする</strong>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-summary-textarea">概要・設定要約 (summary)</label>
+          <textarea id="lore-summary-textarea" rows="3" placeholder="簡単な紹介文...">${escapeHTML(contentSummary)}</textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-profile-textarea">プロフィール詳細 (profile)</label>
+          <textarea id="lore-profile-textarea" rows="2" placeholder="容姿、性格、背景、能力など...">${escapeHTML(contentProfile)}</textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-speech-textarea">口調や話し方の特徴 (speech)</label>
+          <textarea id="lore-speech-textarea" rows="2" placeholder="口調サンプル、一人称/二人称など...">${escapeHTML(contentSpeech)}</textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-relationships-textarea">人間関係・他者とのつながり (relationships)</label>
+          <textarea id="lore-relationships-textarea" rows="2" placeholder="パック、スバル等の他キャラとの関係...">${escapeHTML(contentRelationships)}</textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button onclick="document.getElementById('lore-modal').remove()" class="secondary-btn">キャンセル</button>
+        <button id="lore-save-submit-btn" class="primary-btn">保存する</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const saveBtn = modal.querySelector('#lore-save-submit-btn');
+  saveBtn.onclick = async () => {
+    const name = modal.querySelector('#lore-name-input').value.trim();
+    const franchise = modal.querySelector('#lore-franchise-input').value.trim();
+    const type = modal.querySelector('#lore-type-select').value;
+    const verified = modal.querySelector('#lore-verified-checkbox').checked;
+    
+    const summary = modal.querySelector('#lore-summary-textarea').value.trim();
+    const profile = modal.querySelector('#lore-profile-textarea').value.trim();
+    const speech = modal.querySelector('#lore-speech-textarea').value.trim();
+    const relationships = modal.querySelector('#lore-relationships-textarea').value.trim();
+
+    if (!name) {
+      alert('名前・固有名詞を入力してください。');
+      return;
+    }
+
+    const itemToSave = {
+      id: lore ? lore.id : undefined,
+      franchise: franchise || '共通',
+      type,
+      name,
+      content: {
+        summary,
+        profile,
+        speech,
+        relationships
+      },
+      source: lore ? lore.source : 'manual',
+      verified,
+      status: 'completed'
+    };
+
+    await db.saveLore(itemToSave);
+    modal.remove();
+    renderLorebook();
+  };
+}
+
