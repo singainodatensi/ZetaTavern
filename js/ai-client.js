@@ -551,7 +551,12 @@ export async function generateStoryResponse(story) {
             parts: [{ text: systemInstruction }]
           },
           generationConfig,
-          tools
+          tools,
+          toolConfig: {
+            functionCallingConfig: {
+              mode: 'AUTO'
+            }
+          }
         }),
         signal: attemptController.signal
       });
