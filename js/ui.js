@@ -2053,13 +2053,55 @@ document.head.appendChild(styleInject);
 // ロアブック画面のレンダリングと編集モーダル
 // =========================================================================
 
-export async function renderLorebook() {
+// タイプ定義（ラベルとアイコン）
+const LORE_TYPE_META = {
+  character:    { label: '登場人物',       icon: 'person'        },
+  location:     { label: '場所・地域',     icon: 'location_on'   },
+  organization: { label: '組織・勢力',     icon: 'groups'        },
+  term:         { label: '用語・世界観',   icon: 'book_2'        },
+  event:        { label: '歴史・事件',     icon: 'event'         },
+  item:         { label: 'アイテム・道具', icon: 'inventory_2'   },
+};
+
+// 現在のロアブックタブモード
+let currentLorebookMode = 'world';
+
+/**
+ * ロアブック画面のメインレンダラー。
+ * @param {string|null} mode - 'world' | 'session' | null（現在のモードを維持）
+ */
+export async function renderLorebook(mode = null) {
+  if (mode !== null) currentLorebookMode = mode;
   const container = document.getElementById('lorebook-viewport');
   if (!container) return;
 
+  // タブUIのactive状態を更新
+  const tabWorld = document.getElementById('lorebook-tab-world');
+  const tabSession = document.getElementById('lorebook-tab-session');
+  if (tabWorld) tabWorld.classList.toggle('active', currentLorebookMode === 'world');
+  if (tabSession) tabSession.classList.toggle('active', currentLorebookMode === 'session');
+
+  // 追加ボタン・フィルターバーの表示制御
+  const addBtn = document.getElementById('lore-add-btn');
+  const filtersRow = document.getElementById('lorebook-filters-row');
+  if (currentLorebookMode === 'session') {
+    if (addBtn) addBtn.style.display = 'none';
+    if (filtersRow) filtersRow.style.display = 'none';
+    await _renderSessionLore(container);
+  } else {
+    if (addBtn) addBtn.style.display = '';
+    if (filtersRow) filtersRow.style.display = '';
+    await _renderWorldLore(container);
+  }
+}
+
+/**
+ * 作品ロア（World Lore）を階層アコーディオンでレンダリングする。
+ * フランチャイズ → ロアタイプ → 個別エントリーの階層構造。
+ */
+async function _renderWorldLore(container) {
   const searchInput = document.getElementById('lore-search-input');
   const filterSelect = document.getElementById('lore-filter-select');
-
   const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
   const filter = filterSelect ? filterSelect.value : 'all';
 
@@ -2067,87 +2109,238 @@ export async function renderLorebook() {
 
   // フィルタリング
   const filtered = allLore.filter(lore => {
-    // 検索語句
     const nameMatch = lore.name && lore.name.toLowerCase().includes(query);
-    const contentSummary = lore.content?.summary && lore.content.summary.toLowerCase().includes(query);
+    const summaryMatch = lore.content?.summary && lore.content.summary.toLowerCase().includes(query);
     const franchiseMatch = lore.franchise && lore.franchise.toLowerCase().includes(query);
-    const searchMatch = !query || nameMatch || contentSummary || franchiseMatch;
+    const searchMatch = !query || nameMatch || summaryMatch || franchiseMatch;
 
-    // 確認状況
     let statusMatch = true;
-    if (filter === 'verified') {
-      statusMatch = lore.verified === true;
-    } else if (filter === 'unverified') {
-      statusMatch = lore.verified !== true;
-    }
+    if (filter === 'verified') statusMatch = lore.verified === true;
+    else if (filter === 'unverified') statusMatch = lore.verified !== true;
 
     return searchMatch && statusMatch;
   });
 
-  // レンダリング
+  container.innerHTML = '';
+
   if (filtered.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
         <span class="material-symbols-outlined">auto_stories</span>
         <p>該当するロア設定が見つかりません</p>
-      </div>
-    `;
+        <p style="font-size:12px;opacity:0.6;">「新規ロア追加」ボタンから登録してください。</p>
+      </div>`;
     return;
   }
 
-  container.innerHTML = '';
+  // フランチャイズでグループ化（登録順を保ちながら出現順でソート）
+  const franchiseMap = new Map();
   for (const lore of filtered) {
-    const card = document.createElement('div');
-    card.className = 'character-card';
-    card.style = "position: relative; overflow: visible;";
+    const key = lore.franchise || '共通';
+    if (!franchiseMap.has(key)) franchiseMap.set(key, []);
+    franchiseMap.get(key).push(lore);
+  }
 
-    const isVerified = lore.verified === true;
-    const badgeHTML = isVerified 
-      ? `<span class="badge" style="background-color: var(--primary-color, #7c4dff); color: white; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px;"><span class="material-symbols-outlined" style="font-size: 14px;">verified</span>確認済み</span>`
-      : `<span class="badge" style="background-color: #ff9800; color: white; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px;"><span class="material-symbols-outlined" style="font-size: 14px;">warning</span>AI自動収集（未確認）</span>`;
+  // 各フランチャイズのアコーディオンセクションを生成
+  for (const [franchise, items] of franchiseMap) {
+    const section = _createFranchiseSection(franchise, items);
+    container.appendChild(section);
+  }
+}
 
-    const summaryText = lore.content?.summary || '設定要約がありません。';
+/**
+ * フランチャイズ単位のアコーディオンセクションDOMを生成する。
+ * @param {string} franchise - フランチャイズ名
+ * @param {Array} items - このフランチャイズのロアエントリー
+ */
+function _createFranchiseSection(franchise, items) {
+  // タイプ別にグループ化
+  const typeMap = new Map();
+  for (const lore of items) {
+    const t = lore.type || 'term';
+    if (!typeMap.has(t)) typeMap.set(t, []);
+    typeMap.get(t).push(lore);
+  }
 
-    card.innerHTML = `
-      <div class="char-card-body" style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <h3 style="margin: 0; font-size: 1.1em; display: flex; align-items: center; gap: 6px;">
-            <span class="material-symbols-outlined" style="color: var(--primary-color);">auto_stories</span>
-            ${escapeHTML(lore.name)}
-          </h3>
-          <div style="font-size: 12px; opacity: 0.7;">[${escapeHTML(lore.franchise || '共通')}]</div>
+  // タイプグループのHTML生成
+  const typeGroupsHTML = [...typeMap.entries()].map(([type, typeItems]) => {
+    const meta = LORE_TYPE_META[type] || { label: type, icon: 'auto_stories' };
+    const rowsHTML = typeItems.map(lore => {
+      const isVerified = lore.verified === true;
+      const verifiedIcon = isVerified
+        ? `<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary-color)" title="確認済み">verified</span>`
+        : `<span class="material-symbols-outlined" style="font-size:14px;color:#ff9800" title="AI自動収集・未確認">warning</span>`;
+      const summaryText = lore.content?.summary ? escapeHTML(lore.content.summary).substring(0, 80) + (lore.content.summary.length > 80 ? '…' : '') : '—';
+      return `
+        <div class="lore-item-row" data-lore-id="${escapeHTML(lore.id)}">
+          <div class="lore-item-main">
+            ${verifiedIcon}
+            <span class="lore-item-name">${escapeHTML(lore.name)}</span>
+            <span class="lore-item-summary">${summaryText}</span>
+          </div>
+          <div class="lore-item-actions">
+            <button class="icon-btn-circle lore-edit-btn" title="編集" data-id="${escapeHTML(lore.id)}">
+              <span class="material-symbols-outlined" style="font-size:18px">edit</span>
+            </button>
+            <button class="icon-btn-circle lore-delete-btn" title="削除" data-id="${escapeHTML(lore.id)}" data-name="${escapeHTML(lore.name)}">
+              <span class="material-symbols-outlined" style="font-size:18px">delete</span>
+            </button>
+          </div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="lore-type-group">
+        <div class="lore-type-header">
+          <span class="material-symbols-outlined">${meta.icon}</span>
+          <span>${escapeHTML(meta.label)}</span>
+          <span class="lore-type-count">${typeItems.length}</span>
         </div>
-        
-        <div style="margin-top: 4px;">
-          ${badgeHTML}
-          <span style="font-size: 11px; color: var(--text-sub); margin-left: 8px; text-transform: uppercase;">Type: ${escapeHTML(lore.type || 'term')}</span>
-        </div>
+        <div class="lore-type-items">${rowsHTML}</div>
+      </div>`;
+  }).join('');
 
-        <p style="font-size: 13px; line-height: 1.5; color: var(--text-color); margin: 6px 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis;">
-          ${escapeHTML(summaryText)}
-        </p>
+  const section = document.createElement('div');
+  section.className = 'lore-franchise-section';
+  section.innerHTML = `
+    <div class="lore-franchise-header">
+      <span class="material-symbols-outlined lore-folder-icon">folder_open</span>
+      <h3 class="lore-franchise-title">${escapeHTML(franchise)}</h3>
+      <span class="lore-franchise-count">${items.length}件</span>
+      <span class="material-symbols-outlined lore-chevron">expand_more</span>
+    </div>
+    <div class="lore-franchise-body">
+      ${typeGroupsHTML}
+    </div>`;
 
-        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.1));">
-          <button class="secondary-btn edit-lore-btn" style="padding: 4px 8px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px;">
-            <span class="material-symbols-outlined" style="font-size: 16px;">edit</span> 編集
-          </button>
-          <button class="danger-btn delete-lore-btn" style="padding: 4px 8px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px;">
-            <span class="material-symbols-outlined" style="font-size: 16px;">delete</span> 削除
-          </button>
-        </div>
-      </div>
-    `;
+  // アコーディオン開閉
+  section.querySelector('.lore-franchise-header').addEventListener('click', () => {
+    const isCollapsed = section.classList.toggle('collapsed');
+    const folderIcon = section.querySelector('.lore-folder-icon');
+    if (folderIcon) folderIcon.textContent = isCollapsed ? 'folder' : 'folder_open';
+  });
 
-    card.querySelector('.edit-lore-btn').onclick = () => showLoreEditModal(lore);
-    card.querySelector('.delete-lore-btn').onclick = async () => {
-      if (confirm(`ロア「${lore.name}」を削除しますか？`)) {
-        await db.deleteLore(lore.id);
+  // 編集・削除ボタンをイベント委譲でバインド
+  section.addEventListener('click', async e => {
+    const editBtn = e.target.closest('.lore-edit-btn');
+    const deleteBtn = e.target.closest('.lore-delete-btn');
+    if (editBtn) {
+      const loreId = editBtn.dataset.id;
+      const lore = await db.getLore(loreId);
+      if (lore) showLoreEditModal(lore);
+    } else if (deleteBtn) {
+      const loreName = deleteBtn.dataset.name;
+      const loreId = deleteBtn.dataset.id;
+      if (confirm(`ロア「${loreName}」を削除しますか？`)) {
+        await db.deleteLore(loreId);
         renderLorebook();
       }
-    };
+    }
+  });
 
-    container.appendChild(card);
+  return section;
+}
+
+/**
+ * セッションロア（現在のストーリー固有の進行状態）をレンダリングする。
+ */
+async function _renderSessionLore(container) {
+  const { getState } = await import('./state.js');
+  const state = getState();
+  const activeStory = state.activeStory;
+
+  if (!activeStory) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="material-symbols-outlined">play_circle</span>
+        <p>アクティブなストーリーがありません</p>
+        <p style="font-size:12px;opacity:0.6;">ストーリー画面でセッションを開始してください。</p>
+      </div>`;
+    return;
   }
+
+  const sessionLore = activeStory.session_lore || {};
+  const relationshipMemory = activeStory.relationshipMemory || {};
+
+  // キャラクター名を取得するためにDBを参照
+  const { getCharacters } = await import('./db.js');
+  const allChars = await getCharacters();
+  const charMap = Object.fromEntries(allChars.map(c => [c.characterId, c.name]));
+
+  let html = `<div class="session-lore-panel">`;
+
+  // ストーリータイトル
+  html += `
+    <div class="session-lore-story-badge">
+      <span class="material-symbols-outlined">menu_book</span>
+      <span>${escapeHTML(activeStory.title || '無題のストーリー')}</span>
+    </div>`;
+
+  // あらすじ・サマリー
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">summarize</span>
+        <h4>ストーリーの進行状況</h4>
+      </div>
+      <div class="session-lore-block-body">
+        ${sessionLore.summary
+          ? `<p style="line-height:1.7;">${escapeHTML(sessionLore.summary)}</p>`
+          : `<p style="opacity:0.5;">まだAIによる要約が生成されていません。ストーリーを進めると自動更新されます。</p>`
+        }
+      </div>
+    </div>`;
+
+  // 重要イベント
+  const keyEvents = sessionLore.key_events || [];
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">event_note</span>
+        <h4>重要フラグ・出来事 (${keyEvents.length}件)</h4>
+      </div>
+      <div class="session-lore-block-body">`;
+  if (keyEvents.length > 0) {
+    html += `<ul class="session-event-list">${keyEvents.map(e => `<li>${escapeHTML(e)}</li>`).join('')}</ul>`;
+  } else {
+    html += `<p style="opacity:0.5;">まだ記録された出来事はありません。</p>`;
+  }
+  html += `</div></div>`;
+
+  // キャラクター関係性
+  const relEntries = Object.entries(relationshipMemory);
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">favorite</span>
+        <h4>キャラクター関係・好感度 (${relEntries.length}件)</h4>
+      </div>
+      <div class="session-lore-block-body">`;
+  if (relEntries.length > 0) {
+    html += relEntries.map(([charId, rel]) => {
+      const name = charMap[charId] || charId;
+      const affinity = rel.affinity ?? 50;
+      const affinityColor = affinity >= 70 ? '#7c4dff' : affinity >= 40 ? '#2196f3' : '#f44336';
+      const notes = rel.notes || '';
+      return `
+        <div class="session-rel-row">
+          <div class="session-rel-header">
+            <span class="material-symbols-outlined" style="font-size:16px;">person</span>
+            <strong>${escapeHTML(name)}</strong>
+            <div class="session-affinity-bar-wrap">
+              <div class="session-affinity-bar" style="width:${affinity}%;background:${affinityColor};"></div>
+            </div>
+            <span class="session-affinity-value" style="color:${affinityColor};">${affinity}</span>
+          </div>
+          ${notes ? `<p class="session-rel-notes">${escapeHTML(notes)}</p>` : ''}
+        </div>`;
+    }).join('');
+  } else {
+    html += `<p style="opacity:0.5;">まだ関係性情報は記録されていません。</p>`;
+  }
+  html += `</div></div></div>`;
+
+  container.innerHTML = html;
 }
 
 export function showLoreEditModal(lore = null) {
