@@ -4,7 +4,15 @@
  */
 
 import { getState, updateState } from './state.js'; // ★ updateState のインポートを追加
-import { getCharacter } from './db.js';
+import { getCharacter, getLoreByNameAndFranchise, saveLore, getCharacters } from './db.js';
+
+async function getCharactersList() {
+  try {
+    return await getCharacters();
+  } catch (e) {
+    return [];
+  }
+}
 
 /**
  * Builds the comprehensive System Instruction for the Gemini API.
@@ -27,7 +35,7 @@ export async function buildSystemInstruction(story) {
   instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。メタな思考過程や英語は一切出力しない。\n`;
   instruction += `- 執筆ルールの文字数目安に従い、本文を十分な長さで書く。\n\n`;
 
- instruction += `【重要：チャットUI表示のための記述フォーマット】\n`;
+  instruction += `【重要：チャットUI表示のための記述フォーマット】\n`;
   instruction += `UI側で発言者と描写を分離して吹き出し描画を行うため、物語本文は以下の「台本形式」の記法ルールを**絶対に厳守**してください。\n`;
   instruction += `1. **キャラクターの行動・発言**:\n`;
   instruction += `   必ず \`キャラクター名（動作や表情など）:「セリフ内容」\` の形式で1行ずつ記述してください。主人公（${protagonist?.name || '主人公'}）の場合も同様です。\n`;
@@ -37,13 +45,13 @@ export async function buildSystemInstruction(story) {
   instruction += `2. **環境描写・状況説明**: 必ず \`【】\` で囲んで記述してください。例: \`【放課後の図書室。夕日が窓から差し込んでいる。】\`\n`;
   instruction += `3. **心理描写・地の文**: 必ず \`**\` で囲んで記述してください。例: \`**彼の平穏な放課後は、今日も遠い。**\`\n\n`;
 
-// === 新設：GM哲学（コア思想・固定） ===
+  // === 新設：GM哲学（コア思想・固定） ===
   instruction += `【GMとしての基本哲学（絶対ルール）】\n`;
   instruction += `1. **行動の尊重と世界の抵抗**: ユーザーの行動（試み）は肯定し見せ場を作るが、成功や結果は安易に保証しない。世界や敵は自らの法則で抵抗する。\n`;
   instruction += `2. **NPCの生気と群像劇**: 世界は停止しない。NPCは自律し、主人公の指示待ち人形にならず、自らの感情と行動原理で動く。NPC同士の会話や対立も描くこと。\n`;
   instruction += `3. **誘導（ナッジ）によるテンポ管理**: 会話や場面の区切りでは、強制的なシーン切り替えではなく「窓の外は夕闇に染まっていた――」のように情景や空気感の変化を描写し、次へ進むべきタイミングをユーザーに誘導（提案）すること。\n`;
   instruction += `4. **判断の余白**: 一度の出力で事態を勝手に解決・完結させず、主人公が次のターンで介入・選択できる明確な「余白」を残した時点で出力を止める（ターンの制御）。\n\n`;
-    // ★ ここに追加
+  // ★ ここに追加
   instruction += `5. **主人公の不可侵性（アンタッチャブル）**: 主人公の「セリフ」「行動」「思考」「感情」はすべてユーザーが決定する。AIが主人公の言動や判断を勝手に捏造・代行することは絶対に禁止する。\n`;
   instruction += `6. **ナレーターの視点制限（カメラ視点）**: 地の文は、外から観測可能な事実（情景、NPCの表情や行動など）のみを描写するカメラに徹すること。主人公の内心（何を考え、何を感じ、何を理解したか）を勝手に代弁・描写してはならない。「主人公は〇〇と理解した」「不快感はなかった」等の心理解釈は固く禁ずる。\n\n`;
   // ★ 追加：検索ツールの強制使用ルール
@@ -54,7 +62,7 @@ export async function buildSystemInstruction(story) {
   const curSettings = story.directorSettings || { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 };
 
   instruction += `【演出モジュール（現在のセッション設定）】\n`;
-  
+
   // 1. Momentum (展開の推進力)
   instruction += `■ 展開の推進力: `;
   if (curSettings.momentum >= 70) {
@@ -213,7 +221,122 @@ export async function buildSystemInstruction(story) {
     instruction += `【主人公と各人物の関係性記憶】\n${relationStr}\n`;
   }
 
+  // 6.5 Session Lore (長期あらすじとフラグ記録)
+  if (story.session_lore) {
+    instruction += `【これまでのストーリー進行・獲得フラグ（長期記憶）】\n`;
+    if (story.session_lore.summary) {
+      instruction += `・全体状況/あらすじ: ${story.session_lore.summary}\n`;
+    }
+    if (story.session_lore.key_events && story.session_lore.key_events.length > 0) {
+      instruction += `・主要イベント・獲得フラグ:\n`;
+      story.session_lore.key_events.forEach(ev => {
+        instruction += `  - ${ev}\n`;
+      });
+    }
+    instruction += `\n`;
+  }
+
+  // ==========================================
+  // RAG: 固有名詞の抽出とロアブックの注入
+  // ==========================================
+  const detectedKeywords = extractKeywordsForLore(story);
+  if (detectedKeywords.length > 0) {
+    const matchedLores = [];
+    const franchise = story.franchise || '';
+
+    // DBから完全/部分一致するロアを取得
+    for (const keyword of detectedKeywords) {
+      try {
+        const lore = await getLoreByNameAndFranchise(keyword, franchise);
+        if (lore && lore.status === 'completed' && !matchedLores.some(l => l.id === lore.id)) {
+          matchedLores.push(lore);
+        }
+      } catch (e) {
+        console.warn(`Error querying lore for ${keyword}:`, e);
+      }
+    }
+
+    if (matchedLores.length > 0) {
+      // 関連度スコアリング (簡易的にキーワード一致数または順序で評価)
+      // 制限：最大5件、かつ合計最大4000文字
+      const MAX_LORE_ITEMS = 5;
+      const MAX_LORE_CHARS = 4000;
+
+      let injectedCount = 0;
+      let totalChars = 0;
+      let loreInstruction = `【関連設定・ロア情報 (Reference Lore)】\n`;
+
+      for (const lore of matchedLores) {
+        if (injectedCount >= MAX_LORE_ITEMS) break;
+
+        let loreBlock = `■ ${lore.name} (${lore.type || '設定'})\n`;
+        if (lore.content?.summary) loreBlock += `・概要: ${lore.content.summary}\n`;
+        if (lore.content?.profile) loreBlock += `・詳細プロフィール: ${lore.content.profile}\n`;
+        if (lore.content?.speech) loreBlock += `・口調・特徴: ${lore.content.speech}\n`;
+        if (lore.content?.relationships) loreBlock += `・関係性: ${lore.content.relationships}\n`;
+        loreBlock += `\n`;
+
+        if (totalChars + loreBlock.length > MAX_LORE_CHARS) {
+          // 残りの枠に入る分だけ部分的に入れるか、安全のため足切りする
+          const remainingSpace = MAX_LORE_CHARS - totalChars;
+          if (remainingSpace > 100) {
+            loreInstruction += loreBlock.substring(0, remainingSpace) + `... [以下文字数制限のため省略]\n\n`;
+            totalChars = MAX_LORE_CHARS;
+          }
+          break;
+        }
+
+        loreInstruction += loreBlock;
+        totalChars += loreBlock.length;
+        injectedCount++;
+      }
+
+      if (injectedCount > 0) {
+        instruction += `\n${loreInstruction}`;
+      }
+    }
+  }
+
   return instruction;
+}
+
+/**
+ * 簡易固有名詞抽出ロジック
+ * ユーザー入力や直近メッセージ、シーン情報から漢字、カタカナ、英数字単語をキーワードとして切り出す
+ */
+function extractKeywordsForLore(story) {
+  const wordsSet = new Set();
+  const textSource = [];
+
+  // 直近2メッセージのテキストを追加
+  const msgs = story.messages || [];
+  const startIdx = Math.max(0, msgs.length - 2);
+  for (let i = startIdx; i < msgs.length; i++) {
+    textSource.push(msgs[i].content);
+  }
+
+  // シーン情報も追加
+  if (story.sceneState) {
+    textSource.push(story.sceneState.location || '');
+    textSource.push(story.sceneState.currentObjective || '');
+  }
+
+  const combinedText = textSource.join('\n');
+
+  // カタカナ・漢字（2文字以上）、および大文字英単語などを抽出する簡易的な正規表現
+  const matchesKatakana = combinedText.match(/[\u30a0-\u30ffー]{2,15}/g) || [];
+  const matchesKanji = combinedText.match(/[\u4e00-\u9faf]{2,10}/g) || [];
+  const matchesEnglish = combinedText.match(/[A-Z][a-zA-Z]{2,15}/g) || [];
+
+  [...matchesKatakana, ...matchesKanji, ...matchesEnglish].forEach(word => {
+    // 一般名詞や助詞、不要な言葉のフィルタリング（文字長などの簡易フィルタ）
+    const w = word.trim();
+    if (w && w.length >= 2) {
+      wordsSet.add(w);
+    }
+  });
+
+  return Array.from(wordsSet);
 }
 
 /** 行に十分な日本語が含まれるか */
@@ -300,7 +423,7 @@ export function extractStoryTextAndThoughtFromApiResponse(result) {
 /** UIの思考レベル設定から、API送信用の Thinking Budget 数値を決定する */
 function buildThinkingConfig(thinkingLevel, modelName) {
   const m = (modelName || '').toLowerCase();
-  
+
   // ★ 安全装置：Gemmaシリーズや、Thinkingに非対応な古いモデルの場合は強制的にオフにする
   if (m.includes('gemma') || m.includes('1.5') || (m.includes('2.0') && !m.includes('thinking'))) {
     return null;
@@ -326,7 +449,7 @@ function buildThinkingConfig(thinkingLevel, modelName) {
 export async function generateStoryResponse(story) {
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
-  
+
   if (!apiKey) {
     throw new Error('APIキーが設定されていません。設定画面で登録してください。');
   }
@@ -342,7 +465,7 @@ export async function generateStoryResponse(story) {
   // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
   const contents = story.messages.map(msg => ({
     role: msg.role === 'user' ? 'user' : 'model',
-parts: [{ text: msg.aiContent || msg.content }]
+    parts: [{ text: msg.aiContent || msg.content }]
   }));
 
   const modelName = appState.modelName || 'gemini-2.5-flash';
@@ -354,7 +477,7 @@ parts: [{ text: msg.aiContent || msg.content }]
     maxOutputTokens: 8192
   };
 
-// ★ モデル名も一緒に渡して、非対応モデルならエラーを回避する
+  // ★ モデル名も一緒に渡して、非対応モデルならエラーを回避する
   const thinkingLevel = appState.thinkingLevel || 'standard';
   const thinkingConfig = buildThinkingConfig(thinkingLevel, modelName);
   if (thinkingConfig) {
@@ -368,10 +491,10 @@ parts: [{ text: msg.aiContent || msg.content }]
   let attempt = 0;
   while (attempt < maxRetries) {
     attempt++;
-    
+
     // このアテンプト専用の AbortController
     const attemptController = new AbortController();
-    
+
     const onMainAbort = () => attemptController.abort();
     mainController.signal.addEventListener('abort', onMainAbort);
 
@@ -379,8 +502,45 @@ parts: [{ text: msg.aiContent || msg.content }]
       attemptController.abort();
     }, timeoutSeconds * 1000);
 
-try {
-     const response = await fetch(url, {
+    try {
+      const tools = [{ googleSearch: {} }];
+
+      // update_session_lore ツールを追加定義 (AIがセッション情報を更新するためのツール)
+      tools.push({
+        functionDeclarations: [{
+          name: 'update_session_lore',
+          description: 'ストーリーの進行や現在の状況に応じて、登場人物の関係性や重要な出来事・記憶（セッションロア）を追記・更新します。',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              summary: {
+                type: 'STRING',
+                description: '今までのストーリーのあらすじ、進行状況、または重要なマイルストーンの更新。'
+              },
+              affinity_updates: {
+                type: 'ARRAY',
+                description: '登場人物と主人公の関係性の変更・好感度の更新リスト。',
+                items: {
+                  type: 'OBJECT',
+                  properties: {
+                    characterName: { type: 'STRING', description: '登場人物の名前（例: エミリア）' },
+                    affinity: { type: 'INTEGER', description: '新しい好感度スコア (0-100)' },
+                    notes: { type: 'STRING', description: '関係性の特徴や特記事項。' }
+                  },
+                  required: ['characterName', 'affinity']
+                }
+              },
+              key_events: {
+                type: 'ARRAY',
+                description: '発生した重要な事件や獲得したフラグ、オリジナルアイテム。',
+                items: { type: 'STRING' }
+              }
+            }
+          }
+        }]
+      });
+
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -391,10 +551,7 @@ try {
             parts: [{ text: systemInstruction }]
           },
           generationConfig,
-          // ↓この tools ブロックを追加するだけ！
-          tools: [
-            { googleSearch: {} }
-          ]
+          tools
         }),
         signal: attemptController.signal
       });
@@ -409,6 +566,57 @@ try {
       }
 
       const result = await response.json();
+
+      // Function Calling (update_session_lore) の呼び出し判定・実行
+      const call = result?.candidates?.[0]?.content?.parts?.find(p => p.functionCall);
+      if (call && call.functionCall.name === 'update_session_lore') {
+        try {
+          const args = call.functionCall.args || {};
+          console.log('[Function Call: update_session_lore]', args);
+
+          if (!story.session_lore) {
+            story.session_lore = { summary: '', key_events: [] };
+          }
+          if (args.summary) {
+            story.session_lore.summary = args.summary;
+          }
+          if (args.key_events) {
+            story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), ...args.key_events]));
+          }
+          if (args.affinity_updates) {
+            if (!story.relationshipMemory) story.relationshipMemory = {};
+            // キャラクター一覧を取得してIDにマッピング
+            const characters = await getCharactersList();
+            for (const update of args.affinity_updates) {
+              const charMatch = characters.find(c => c.name === update.characterName);
+              if (charMatch) {
+                story.relationshipMemory[charMatch.characterId] = {
+                  affinity: update.affinity,
+                  notes: update.notes || ''
+                };
+              }
+            }
+          }
+
+          // バックグラウンドでセーブを実行
+          import('./db.js').then(async db => {
+            await db.saveStory(story);
+            // サイドバーを更新
+            if (typeof window !== 'undefined' && window.dispatchEvent) {
+              // 画面更新イベントを適宜通知
+              setTimeout(() => {
+                const sidebarTab = document.getElementById('story-sidebar');
+                if (sidebarTab) {
+                  import('./ui.js').then(ui => ui.renderSidebar());
+                }
+              }, 100);
+            }
+          });
+        } catch (fcErr) {
+          console.warn('[Function Call] Failed to execute update_session_lore:', fcErr);
+        }
+      }
+
       const extracted = extractStoryTextAndThoughtFromApiResponse(result);
 
       if (!extracted.text) {
@@ -428,12 +636,12 @@ try {
       }
 
       console.warn(`API call attempt ${attempt} failed:`, err);
-      
+
       if (attempt >= maxRetries) {
         updateState({ activeAbortController: null });
         throw err;
       }
-      
+
       const delay = Math.pow(2, attempt) * 1000;
       await new Promise(r => setTimeout(r, delay));
     }
@@ -455,7 +663,7 @@ async function getApiKeyFromStorage() {
 export async function generateCharacterProfile(name, category) {
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
-  
+
   if (!apiKey) {
     throw new Error('APIキーが設定されていません。設定画面で登録してください。');
   }
@@ -548,11 +756,11 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
   // ```json の中身だけを正規表現でくり抜く
   const jsonMatch = text.match(/\`\`\`json\s*(\{[\s\S]*?\})\s*\`\`\`/);
   let parsed = null;
-  
+
   if (jsonMatch) {
-    try { parsed = JSON.parse(jsonMatch[1]); } catch (e) {}
+    try { parsed = JSON.parse(jsonMatch[1]); } catch (e) { }
   } else {
-    try { parsed = JSON.parse(text); } catch (e) {}
+    try { parsed = JSON.parse(text); } catch (e) { }
   }
 
   if (!parsed) {
@@ -562,3 +770,78 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
 
   return parsed;
 }
+
+/**
+ * 原作知識・固有名詞をGoogle検索経由で要約収集し、構造化JSONで返す関数
+ */
+export async function generateLoreProfileFromSearch(name, franchise) {
+  const appState = getState();
+  const apiKey = appState.apiKey || await getApiKeyFromStorage();
+
+  if (!apiKey) {
+    throw new Error('APIキーが設定されていません。設定画面で登録してください。');
+  }
+
+  const prompt = `
+# 世界観設定 / 固有名詞ロアデータ生成 指示書
+
+対象ワード: ${name}
+対象作品・コンテキスト: ${franchise}
+
+このワードについてGoogle検索を用いて原作の正確な設定情報を収集し、ZetaTavernロアブック用の構造化データを作成してください。
+安易な捏造や無関係な作品の別単語との混同を避け、正確な原作知識を要約してください。
+
+出力は以下のJSONフォーマット（Markdownの \`\`\`json ... \`\`\` コードブロックで囲む）で返してください。
+
+\`\`\`json
+{
+  "type": "character", // character, location, organization, term, event, item のいずれか一つ
+  "summary": "【概要・設定要約】100文字〜200文字程度の簡単な紹介・定義文。",
+  "profile": "【プロフィール詳細】外見、性格、戦闘能力、役割などの詳細な設定テキスト。",
+  "speech": "【口調や特徴】セリフや話し方の傾向、一人称/二人称、特徴的な口癖など（もしあれば記載、なければ空欄）。",
+  "relationships": "【人間関係・他者とのつながり】原作における他の主要キャラクターたちとのつながりや関係性（もしあれば記載、なければ空欄）。"
+}
+\`\`\`
+`;
+
+  const modelName = appState.modelName || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  const generationConfig = { temperature: 0.5, topP: 0.9, maxOutputTokens: 4096 };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig,
+      tools: [{ googleSearch: {} }]
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error?.message || `HTTP status ${response.status}`);
+  }
+
+  const result = await response.json();
+  const parts = result?.candidates?.[0]?.content?.parts;
+  if (!parts?.length) throw new Error('APIから有効なテキストが返されませんでした。');
+
+  const text = parts.filter(p => !p.thought).map(p => p.text).join('\n').trim();
+  const jsonMatch = text.match(/\`\`\`json\s*(\{[\s\S]*?\})\s*\`\`\`/);
+  let parsed = null;
+
+  if (jsonMatch) {
+    try { parsed = JSON.parse(jsonMatch[1]); } catch (e) { }
+  } else {
+    try { parsed = JSON.parse(text); } catch (e) { }
+  }
+
+  if (!parsed) {
+    console.error('AI Raw Response:', text);
+    throw new Error('AIが正しいJSON形式で出力しませんでした。');
+  }
+
+  return parsed;
+}
+
