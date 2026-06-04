@@ -62,6 +62,10 @@
             <span class="material-symbols-outlined">group</span>
             <span>キャラクター</span>
           </button>
+          <button class="nav-btn" data-screen="lorebook" title="ロアブック">
+            <span class="material-symbols-outlined">auto_stories</span>
+            <span>ロアブック</span>
+          </button>
           <button class="nav-btn" data-screen="settings" title="設定">
             <span class="material-symbols-outlined">settings</span>
             <span>設定</span>
@@ -138,6 +142,11 @@
               <div id="sidebar-tab-config" class="sidebar-tab-content">
                 <div class="sidebar-config-form">
                   <div class="form-group">
+                    <label for="story-franchise-input">作品名タグ (Franchise)</label>
+                    <input type="text" id="story-franchise-input" placeholder="例: Re:ゼロ から始める異世界生活 (原作検索用)">
+                  </div>
+
+                  <div class="form-group">
                     <label for="story-rule-prompt">ストーリーテラー執筆ルール (指示書)</label>
                     <textarea id="story-rule-prompt" rows="8" placeholder="三人称視点、心理描写のコツなどを設定..."></textarea>
                   </div>
@@ -196,6 +205,35 @@
             </div>
             <div id="library-viewport" class="library-viewport">
               <!-- Rendered character cards dynamically -->
+            </div>
+          </div>
+        </section>
+
+        <!-- 2.5 Lorebook Screen -->
+        <section id="lorebook-screen" class="app-screen">
+          <div class="library-container">
+            <div class="library-header">
+              <h2>ロアブック（世界観ナレッジ）</h2>
+              <div class="library-actions">
+                <button id="lore-add-btn" class="primary-btn">
+                  <span class="material-symbols-outlined">add</span>
+                  <span>新規ロア追加</span>
+                </button>
+              </div>
+            </div>
+            <div class="library-filter-bar">
+              <div class="library-search-wrapper">
+                <span class="material-symbols-outlined">search</span>
+                <input type="text" id="lore-search-input" placeholder="名前や説明で検索...">
+              </div>
+              <select id="lore-filter-select" class="library-filter-select">
+                <option value="all">すべてのロア</option>
+                <option value="verified">確認済み (Verified)</option>
+                <option value="unverified">未確認 (AI自動生成)</option>
+              </select>
+            </div>
+            <div id="lorebook-viewport" class="library-viewport">
+              <!-- Rendered lore cards dynamically -->
             </div>
           </div>
         </section>
