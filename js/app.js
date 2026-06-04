@@ -348,6 +348,8 @@ async function bindEvents() {
   const loreAddBtn = document.getElementById('lore-add-btn');
   const loreSearchInput = document.getElementById('lore-search-input');
   const loreFilterSelect = document.getElementById('lore-filter-select');
+  const tabWorld = document.getElementById('lorebook-tab-world');
+  const tabSession = document.getElementById('lorebook-tab-session');
 
   if (loreAddBtn) {
     loreAddBtn.onclick = () => ui.showLoreEditModal(null);
@@ -357,6 +359,14 @@ async function bindEvents() {
   }
   if (loreFilterSelect) {
     loreFilterSelect.onchange = () => ui.renderLorebook();
+  }
+
+  // ロアブックの作品/セッションタブ切り替えバインド（active クラスは renderLorebook が管理）
+  if (tabWorld) {
+    tabWorld.onclick = () => ui.renderLorebook('world');
+  }
+  if (tabSession) {
+    tabSession.onclick = () => ui.renderLorebook('session');
   }
 
   // Mobile drawer trigger (left — story list)
