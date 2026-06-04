@@ -221,7 +221,14 @@
                 </button>
               </div>
             </div>
-            <div class="library-filter-bar">
+
+            <!-- World / Session tab selector -->
+            <div class="lore-tabs-header">
+              <button class="lore-tab-btn active" id="lorebook-tab-world">作品ロア (World Lore)</button>
+              <button class="lore-tab-btn" id="lorebook-tab-session">セッションロア (Session Lore)</button>
+            </div>
+
+            <div class="library-filter-bar" id="lorebook-filters-row">
               <div class="library-search-wrapper">
                 <span class="material-symbols-outlined">search</span>
                 <input type="text" id="lore-search-input" placeholder="名前や説明で検索...">
@@ -232,7 +239,7 @@
                 <option value="unverified">未確認 (AI自動生成)</option>
               </select>
             </div>
-            <div id="lorebook-viewport" class="library-viewport">
+            <div id="lorebook-viewport" class="library-viewport" style="display: flex; flex-direction: column; gap: 16px;">
               <!-- Rendered lore cards dynamically -->
             </div>
           </div>
