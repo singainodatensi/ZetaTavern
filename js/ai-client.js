@@ -540,97 +540,109 @@ export async function generateStoryResponse(story) {
         }]
       });
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          contents: contents,
-          systemInstruction: {
-            parts: [{ text: systemInstruction }]
-          },
-          generationConfig,
-          tools,
-          toolConfig: {
-            functionCallingConfig: {
-              mode: 'AUTO'
-            },
-            includeServerSideToolInvocations: true
+      let currentContents = [...contents];
+      let extracted = { text: null, thought: null };
+
+      // ★ 追加：Function Calling 往復用のループ（AIがメモを更新して本文を書くまで最大3回まで往復する）
+      for (let fcTurn = 0; fcTurn < 3; fcTurn++) {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: currentContents,
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+            generationConfig,
+            tools,
+            toolConfig: { functionCallingConfig: { mode: 'AUTO' } }
+          }),
+          signal: attemptController.signal
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
+          throw new Error(`Gemini API Error: ${errMsg}`);
+        }
+
+        const result = await response.json();
+
+        // Function Calling (update_session_lore) の呼び出し判定・実行
+        const call = result?.candidates?.[0]?.content?.parts?.find(p => p.functionCall);
+        if (call && call.functionCall.name === 'update_session_lore') {
+          try {
+            const args = call.functionCall.args || {};
+            console.log('[Function Call: update_session_lore]', args);
+
+            if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
+            if (args.summary) story.session_lore.summary = args.summary;
+            if (args.key_events) {
+              story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), ...args.key_events]));
+            }
+            if (args.affinity_updates) {
+              if (!story.relationshipMemory) story.relationshipMemory = {};
+              const characters = await getCharactersList();
+              for (const update of args.affinity_updates) {
+                const charMatch = characters.find(c => c.name === update.characterName);
+                if (charMatch) {
+                  story.relationshipMemory[charMatch.characterId] = {
+                    affinity: update.affinity,
+                    notes: update.notes || ''
+                  };
+                }
+              }
+            }
+
+            // バックグラウンドでセーブを実行
+            import('./db.js').then(async db => {
+              await db.saveStory(story);
+              if (typeof window !== 'undefined' && window.dispatchEvent) {
+                setTimeout(() => {
+                  const sidebarTab = document.getElementById('story-sidebar');
+                  if (sidebarTab) {
+                    import('./ui.js').then(ui => ui.renderSidebar());
+                  }
+                }, 100);
+              }
+            });
+          } catch (fcErr) {
+            console.warn('[Function Call] Failed to execute update_session_lore:', fcErr);
           }
-        }),
-        signal: attemptController.signal
-      });
+
+          // ★重要：テキストも一緒に返してきたか確認
+          const tmpExtracted = extractStoryTextAndThoughtFromApiResponse(result);
+          if (tmpExtracted.text) {
+             extracted = tmpExtracted;
+             break; // テキストがあればループ終了
+          } else {
+             // テキストがない（関数実行要求のみ）場合、結果を積んで再リクエスト
+             currentContents.push(result.candidates[0].content); // AIの関数呼び出し履歴を追加
+             currentContents.push({
+               role: 'user',
+               parts: [{
+                 functionResponse: {
+                   name: call.functionCall.name,
+                   response: { result: "success" } // AIに「保存成功したから本文書いて」と伝える
+                 }
+               }]
+             });
+             continue; // ループしてもう一度APIを叩く
+          }
+        }
+
+        // 関数呼び出しがない場合は通常通り本文を抽出して終了
+        extracted = extractStoryTextAndThoughtFromApiResponse(result);
+        break; 
+      } // for loop end
 
       clearTimeout(timeoutId);
       mainController.signal.removeEventListener('abort', onMainAbort);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
-        throw new Error(`Gemini API Error: ${errMsg}`);
-      }
-
-      const result = await response.json();
-
-      // Function Calling (update_session_lore) の呼び出し判定・実行
-      const call = result?.candidates?.[0]?.content?.parts?.find(p => p.functionCall);
-      if (call && call.functionCall.name === 'update_session_lore') {
-        try {
-          const args = call.functionCall.args || {};
-          console.log('[Function Call: update_session_lore]', args);
-
-          if (!story.session_lore) {
-            story.session_lore = { summary: '', key_events: [] };
-          }
-          if (args.summary) {
-            story.session_lore.summary = args.summary;
-          }
-          if (args.key_events) {
-            story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), ...args.key_events]));
-          }
-          if (args.affinity_updates) {
-            if (!story.relationshipMemory) story.relationshipMemory = {};
-            // キャラクター一覧を取得してIDにマッピング
-            const characters = await getCharactersList();
-            for (const update of args.affinity_updates) {
-              const charMatch = characters.find(c => c.name === update.characterName);
-              if (charMatch) {
-                story.relationshipMemory[charMatch.characterId] = {
-                  affinity: update.affinity,
-                  notes: update.notes || ''
-                };
-              }
-            }
-          }
-
-          // バックグラウンドでセーブを実行
-          import('./db.js').then(async db => {
-            await db.saveStory(story);
-            // サイドバーを更新
-            if (typeof window !== 'undefined' && window.dispatchEvent) {
-              // 画面更新イベントを適宜通知
-              setTimeout(() => {
-                const sidebarTab = document.getElementById('story-sidebar');
-                if (sidebarTab) {
-                  import('./ui.js').then(ui => ui.renderSidebar());
-                }
-              }, 100);
-            }
-          });
-        } catch (fcErr) {
-          console.warn('[Function Call] Failed to execute update_session_lore:', fcErr);
-        }
-      }
-
-      const extracted = extractStoryTextAndThoughtFromApiResponse(result);
 
       if (!extracted.text) {
         throw new Error('有効なテキストが得られませんでした。');
       }
 
       updateState({ activeAbortController: null });
-      return extracted; // ★ テキストと思考のオブジェクトを返す
+      return extracted;
 
     } catch (err) {
       clearTimeout(timeoutId);
@@ -850,4 +862,3 @@ export async function generateLoreProfileFromSearch(name, franchise) {
 
   return parsed;
 }
-
