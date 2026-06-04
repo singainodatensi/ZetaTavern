@@ -502,8 +502,9 @@ export async function generateStoryResponse(story) {
       attemptController.abort();
     }, timeoutSeconds * 1000);
 
-    try {
-      const tools = [{ googleSearch: {} }];
+  try {
+      // ★ 変更：Google検索ツールを外し、Function Calling専用にする
+      const tools = [];
 
       // update_session_lore ツールを追加定義 (AIがセッション情報を更新するためのツール)
       tools.push({
