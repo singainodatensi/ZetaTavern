@@ -1,0 +1,2475 @@
+/**
+ * ui.js - ZetaTavern UI Rendering & DOM Events
+ * Controls screen views, renders stories (novel / chat mode with per-character bubbles),
+ * handles settings/character libraries, and parses AI-generated A/B/C options.
+ */
+
+import { getState, updateState, setActiveStory, updateCharacterAttendance } from './state.js';
+import * as db from './db.js';
+import { sanitizeHTML, escapeHTML } from './sanitizer.js';
+import { generateCharacterProfile } from './ai-client.js';
+
+// ====== AIディレクタープリセットデータ ======
+export const DIRECTOR_PRESETS = {
+  romcom_subtle: {
+    label: "🌸 微炭酸ラブコメ",
+    description: "感情の秘匿と繊細な距離感の変動を楽しむ日常系",
+    params: { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 }
+  },
+  dark_suspense: {
+    label: "💀 ダークサスペンス",
+    description: "常に死や裏切りの気配が漂う、不穏な群像劇",
+    params: { momentum: 70, autonomy: 90, worldTone: 90, backgroundTension: 90, romanticVisibility: 10, relationshipDrift: 80, intrusionRate: 60 }
+  },
+  battle_shounen: {
+    label: "🔥 異能バトル",
+    description: "日常と非日常が交錯し、劇的な事件が連続する展開",
+    params: { momentum: 85, autonomy: 60, worldTone: 50, backgroundTension: 50, romanticVisibility: 40, relationshipDrift: 40, intrusionRate: 90 }
+  },
+  cozy_slice_of_life: {
+    label: "🍵 ほのぼの日常",
+    description: "大きな事件は起きない、徹底的に平和で優しい世界",
+    params: { momentum: 20, autonomy: 60, worldTone: 0, backgroundTension: 0, romanticVisibility: 30, relationshipDrift: 20, intrusionRate: 0 }
+  }
+};
+
+const DIRECTOR_PARAMS = [
+  { id: 'momentum', label: '展開の推進力', minLabel: '受動的・日常', maxLabel: '能動的・劇的' },
+  { id: 'autonomy', label: 'NPCの自律性', minLabel: '主人公フォーカス', maxLabel: '独立した群像劇' },
+  { id: 'worldTone', label: '世界の温度', minLabel: '優しい・甘め', maxLabel: 'シビア・残酷' },
+  { id: 'backgroundTension', label: '不穏さ・緊張感', minLabel: '平和・安心', maxLabel: '常に張り詰める' },
+  { id: 'romanticVisibility', label: '恋愛・好意の露出', minLabel: '秘匿・行間', maxLabel: '直接的・露骨' },
+  { id: 'relationshipDrift', label: '関係性の変動幅', minLabel: '固定的・安定', maxLabel: '疑心暗鬼・急接近' },
+  { id: 'intrusionRate', label: '非日常の侵入頻度', minLabel: '平穏な連続', maxLabel: '唐突な事件・異変' }
+];
+// ===========================================
+
+const blobUrlCache = new Map();
+
+export async function getAvatarUrl(assetId) {
+  if (!assetId) return 'assets/default-silhouette.png';
+  if (blobUrlCache.has(assetId)) return blobUrlCache.get(assetId);
+  try {
+    const blob = await db.getAssetBlob(assetId);
+    if (blob) {
+      const url = URL.createObjectURL(blob);
+      blobUrlCache.set(assetId, url);
+      return url;
+    }
+  } catch (err) {
+    console.error('Error fetching asset blob for avatar:', err);
+  }
+  return 'assets/default-silhouette.png';
+}
+
+export function clearBlobUrlCache() {
+  for (const url of blobUrlCache.values()) URL.revokeObjectURL(url);
+  blobUrlCache.clear();
+}
+
+export function parseChoices(text) {
+  if (!text) return { bodyText: '', choices: [] };
+  const choices = [];
+  const choiceLineRegex = /^\s*(?:[-*・►▶▷>]\s*)?([A-CＡ-Ｃ])\s*[\.\):：）．、]\s*(.+?)\s*$/gm;
+  const matches = [...text.matchAll(choiceLineRegex)];
+  if (matches.length >= 2) {
+    for (const match of matches) {
+      const label = match[1].replace('Ａ', 'A').replace('Ｂ', 'B').replace('Ｃ', 'C');
+      choices.push({ label, text: match[2].trim() });
+    }
+    const bodyText = text
+      .replace(choiceLineRegex, '')
+      .replace(/^\s*(?:#{1,6}\s*)?(?:[-=_─━]{3,}|選択肢|Choices?)\s*$/gmi, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    return { bodyText, choices };
+  }
+  return { bodyText: text, choices: [] };
+}
+
+export function parseModelOutputToSegments(text) {
+  if (!text) return [{ type: 'narration', text: '' }];
+  const lines = text.split('\n');
+  const segments = [];
+  let currentDialogue = null;
+  let narrationBuffer = [];
+
+  const flushNarration = () => {
+    const joined = narrationBuffer.join('\n').trim();
+    if (joined) segments.push({ type: 'narration', text: joined });
+    narrationBuffer = [];
+  };
+
+  const flushDialogue = () => {
+    if (currentDialogue && currentDialogue.lines.length > 0) {
+      segments.push(currentDialogue);
+    }
+    currentDialogue = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // 【環境描写】の抽出
+    const envMatch = trimmed.match(/^【(.+)】$/);
+    if (envMatch) {
+      flushNarration();
+      flushDialogue();
+      segments.push({ type: 'narration', text: `【${envMatch[1]}】` });
+      continue;
+    }
+
+    // **地の文** の抽出
+    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+    if (boldMatch) {
+      flushNarration();
+      flushDialogue();
+      segments.push({ type: 'narration', text: boldMatch[1] });
+      continue;
+    }
+
+    // 既存の *アクション* (過去ログ互換用)
+    const isAction = /^\*(.+)\*$/.test(trimmed) || /^＊(.+)＊$/.test(trimmed);
+    if (isAction && !boldMatch) {
+      const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '').trim();
+      if (currentDialogue) {
+        currentDialogue.lines.push({ kind: 'action', text: actionText });
+      } else {
+        flushNarration();
+        segments.push({ type: 'narration', text: `*${actionText}*` });
+      }
+      continue;
+    }
+
+    // ★ 新・キャラクター行の検出 (台本形式 ＆ 過去ログ互換)
+    let speaker = null;
+    let action = null;
+    let speech = null;
+
+    const oldMatch = trimmed.match(/^\[([^\]]+)\]\s*(?:「([^」]+)」|(.+))$/);
+    const newMatch = trimmed.match(/^([^「（\(\[:：\n]{1,30}?)(?:[（\(]([^）\)]+)[）\)])?[\s:：]*(?:「([^」]*)」)?$/);
+    const fbMatch = trimmed.match(/^([^「]{1,30}?)「([^」]*)」?$/);
+
+    if (oldMatch) {
+      speaker = oldMatch[1].trim();
+      speech = (oldMatch[2] || oldMatch[3] || '').trim();
+    } else if (newMatch && (newMatch[2] || newMatch[3] !== undefined || /[:：]/.test(trimmed))) {
+      speaker = newMatch[1].trim();
+      action = newMatch[2] ? newMatch[2].trim() : null;
+      speech = newMatch[3] !== undefined ? newMatch[3].trim() : null;
+    } else if (fbMatch) {
+      speaker = fbMatch[1].trim();
+      speech = fbMatch[2].trim();
+    }
+
+    if (speaker && !['ナレーター', 'システム', '背景', 'ナレーション', '環境描写', '地の文'].includes(speaker)) {
+      flushNarration();
+      flushDialogue();
+      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [] };
+      if (action) {
+        currentDialogue.lines.push({ kind: 'action', text: action });
+      }
+      if (speech) {
+        currentDialogue.lines.push({ kind: 'speech', text: `「${speech}」` });
+      }
+      flushDialogue();
+      continue;
+    }
+
+    // 継続のセリフ行
+    if (currentDialogue) {
+      if (trimmed.startsWith('「') || trimmed.includes('「') || trimmed.endsWith('」')) {
+        const cleaned = trimmed.replace(/^「|」$/g, '');
+        currentDialogue.lines.push({ kind: 'speech', text: `「${cleaned}」` });
+        continue;
+      }
+      flushDialogue();
+    }
+
+    // いずれにも当てはまらない場合はナレーションバッファへ
+    narrationBuffer.push(line);
+  }
+
+  flushNarration();
+  flushDialogue();
+  return segments.length > 0 ? segments : [{ type: 'narration', text: text }];
+}
+
+function matchCharacterByName(speakerName, characters) {
+  if (!speakerName || !characters || characters.length === 0) return null;
+  const normalised = speakerName.trim();
+  let match = characters.find(c => c.name === normalised);
+  if (match) return match;
+  match = characters.find(c => c.name.includes(normalised) || normalised.includes(c.name));
+  if (match) return match;
+  return null;
+}
+
+export function isCharacterMatchingStory(char, story) {
+  if (!story) return false;
+  const storyTags = story.tags || [];
+  if (storyTags.length === 0) return true;
+  const charCategory = char.category || '';
+  const charTags = char.tags || [];
+  return storyTags.includes(charCategory) || charTags.some(tag => storyTags.includes(tag));
+}
+
+function getMentionQuery(textarea) {
+  const caret = textarea.selectionStart ?? 0;
+  const before = textarea.value.slice(0, caret);
+  const lineStart = Math.max(before.lastIndexOf('\n') + 1, 0);
+  const line = before.slice(lineStart);
+  const match = line.match(/(?:^|\s)(@:?\s*([^\s「」:：]*)?)$/);
+  if (!match) return null;
+  const token = match[1] || '@';
+  return {
+    query: (match[2] || '').trim(),
+    start: caret - token.length,
+    end: caret
+  };
+}
+
+async function getMentionCandidates(query) {
+  const { currentStory } = getState();
+  const characters = await db.getCharacters();
+  const storyIds = new Set((currentStory?.characters || [])
+    .filter(ref => ref.attendance !== 'absent')
+    .map(ref => ref.characterId));
+  const protagonist = currentStory?.protagonist?.name
+    ? [{ name: currentStory.protagonist.name, avatarAssetId: currentStory.protagonist.avatarAssetId, isProtagonist: true }]
+    : [];
+
+  const sorted = [
+    ...protagonist,
+    ...characters
+      .map(char => ({ ...char, inStory: storyIds.has(char.characterId) }))
+      .sort((a, b) => Number(b.inStory) - Number(a.inStory) || (a.name || '').localeCompare(b.name || '', 'ja'))
+  ];
+
+  const normalizedQuery = query.toLowerCase();
+  return sorted
+    .filter(char => {
+      const haystack = `${char.name || ''} ${char.category || ''} ${(char.tags || []).join(' ')}`.toLowerCase();
+      return !normalizedQuery || haystack.includes(normalizedQuery);
+    })
+    .slice(0, 8);
+}
+
+export function bindMentionAutocomplete(textarea) {
+  if (!textarea || textarea.dataset.mentionBound === 'true') return;
+  textarea.dataset.mentionBound = 'true';
+
+  const popup = document.createElement('div');
+  popup.id = 'mention-autocomplete';
+  popup.className = 'mention-autocomplete hidden';
+  textarea.closest('.input-panel-wrapper')?.appendChild(popup);
+
+  let activeQuery = null;
+
+  const hide = () => {
+    popup.classList.add('hidden');
+    popup.innerHTML = '';
+    activeQuery = null;
+  };
+
+  const insertMention = (name) => {
+    if (!activeQuery) return;
+    const before = textarea.value.slice(0, activeQuery.start);
+    const after = textarea.value.slice(activeQuery.end);
+    const insertion = `@:${name}`;
+    textarea.value = `${before}${insertion}${after}`;
+    const caret = before.length + insertion.length;
+    textarea.focus();
+    textarea.setSelectionRange(caret, caret);
+    hide();
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const refresh = async () => {
+    const query = getMentionQuery(textarea);
+    if (!query) {
+      hide();
+      return;
+    }
+    activeQuery = query;
+    const candidates = await getMentionCandidates(query.query);
+    if (candidates.length === 0) {
+      hide();
+      return;
+    }
+
+    popup.innerHTML = '';
+    for (const candidate of candidates) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mention-candidate';
+      const avatarUrl = await getAvatarUrl(candidate.avatarAssetId);
+      btn.innerHTML = `
+        <img src="${avatarUrl}" alt="">
+        <span>${escapeHTML(candidate.name || '名前なし')}</span>
+        ${candidate.inStory || candidate.isProtagonist ? '<small>登場中</small>' : ''}
+      `;
+      btn.onclick = () => insertMention(candidate.name || '');
+      popup.appendChild(btn);
+    }
+    popup.classList.remove('hidden');
+  };
+
+  textarea.addEventListener('input', refresh);
+  textarea.addEventListener('keyup', refresh);
+  textarea.addEventListener('click', refresh);
+  textarea.addEventListener('blur', () => setTimeout(hide, 160));
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hide();
+    if (e.key === 'Tab' && !popup.classList.contains('hidden')) {
+      const first = popup.querySelector('.mention-candidate');
+      if (first) {
+        e.preventDefault();
+        first.click();
+      }
+    }
+  });
+}
+
+export async function renderStory() {
+  const container = document.getElementById('story-viewport');
+  if (!container) return;
+
+  const appState = getState();
+  const { currentStory, uiMode, isGenerating, autoscrollEnabled } = appState;
+
+  if (!currentStory) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="material-symbols-outlined">menu_book</span>
+        <p>ストーリーを作成または選択してください</p>
+        <button id="quick-create-story-btn" class="primary-btn">新規ストーリー作成</button>
+      </div>
+    `;
+    return;
+  }
+
+  // ★ 追加：裏側でDOMを構築するための「仮想の箱（フラグメント）」を用意
+  const fragment = document.createDocumentFragment();
+
+  const messages = currentStory.messages || [];
+  const lastMsg = messages[messages.length - 1];
+  const lastIsModel = lastMsg && lastMsg.role === 'model';
+  
+  let parsedLast = { bodyText: '', choices: [] };
+  if (lastIsModel) {
+    parsedLast = parseChoices(lastMsg.content);
+  }
+
+  const characters = uiMode === 'chat' ? await db.getCharacters() : [];
+
+for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const isLast = i === messages.length - 1;
+    const isModel = msg.role === 'model';
+    const textToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
+
+    // ★ msgWrapperの宣言は1回だけ！
+    const msgWrapper = document.createElement('div');
+    msgWrapper.className = 'message-wrapper';
+
+    // ★ 思考（Thought）データが存在する場合は折りたたみUIを表示
+    if (isModel && msg.thought) {
+      const thoughtEl = document.createElement('div');
+      thoughtEl.className = 'ai-thought-container';
+      thoughtEl.style = "margin-bottom: 8px; font-size: 12px;";
+      thoughtEl.innerHTML = `
+        <details style="background: var(--bg-card, rgba(0,0,0,0.05)); border: 1px solid var(--border-color, rgba(0,0,0,0.1)); border-radius: 6px; padding: 4px 8px;">
+          <summary style="cursor: pointer; font-weight: bold; color: var(--text-sub); display: flex; align-items: center; justify-content: space-between;">
+            <div style="display: flex; align-items: center; gap: 4px;">
+              <span class="material-symbols-outlined" style="font-size: 16px;">psychology</span> 
+              AIの思考プロセス (Thinking)
+            </div>
+          </summary>
+          <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-color, #ccc); color: var(--text-color, #666); white-space: pre-wrap; font-family: monospace;">
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 4px;">
+              <button onclick="window.translateAiThought(this, ${i})" style="background: none; border: 1px solid var(--border-color, #ccc); border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; color: inherit;">
+                <span class="material-symbols-outlined" style="font-size: 14px;">translate</span> 翻訳する
+              </button>
+            </div>
+            <div class="ai-thought-content" data-original-text="${escapeHTML(msg.thought)}" data-translated="false">${escapeHTML(msg.thought)}</div>
+          </div>
+        </details>
+      `;
+      msgWrapper.appendChild(thoughtEl);
+    }
+
+    // ★ その次にcontentContainerを作る
+    const contentContainer = document.createElement('div');
+    contentContainer.className = 'message-content-container';
+
+    if (uiMode === 'chat') {
+      if (isModel) {
+        const segments = parseModelOutputToSegments(textToRender);
+        for (const seg of segments) {
+          if (seg.type === 'narration') {
+            const narEl = document.createElement('div');
+            narEl.className = 'chat-message narration-role'; 
+            let html = window.marked && typeof window.marked.parse === 'function' 
+              ? sanitizeHTML(window.marked.parse(seg.text)) 
+              : sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
+            narEl.innerHTML = `
+              <div class="chat-avatar" style="visibility: hidden; flex-shrink: 0;"></div>
+              <div class="chat-content-wrapper">
+                <div class="narration-content">${html}</div>
+              </div>
+            `;
+            contentContainer.appendChild(narEl);
+          } else if (seg.type === 'dialogue') {
+            const protagonistName = currentStory.protagonist?.name || '主人公';
+            const isProtagonist = (seg.speaker === protagonistName || seg.speaker === '主人公');
+            let avatarUrl = 'assets/default-silhouette.png';
+            let roleClass = 'bot-role';
+
+            if (isProtagonist) {
+              roleClass = 'user-role';
+              avatarUrl = await getAvatarUrl(currentStory.protagonist?.avatarAssetId);
+            } else {
+              const charMatch = matchCharacterByName(seg.speaker, characters);
+              if (charMatch) {
+                avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
+              }
+            }
+
+            const msgEl = document.createElement('div');
+            msgEl.className = `chat-message ${roleClass}`;
+            let linesHTML = '';
+            for (const line of seg.lines) {
+              if (line.kind === 'speech') {
+                linesHTML += `<p class="chat-speech">${escapeHTML(line.text)}</p>`;
+              } else if (line.kind === 'action') {
+                linesHTML += `<p class="chat-action"><em>*${escapeHTML(line.text)}*</em></p>`;
+              }
+            }
+            msgEl.innerHTML = `
+              <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
+              <div class="chat-content-wrapper" style="position: relative;">
+                <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
+                <div class="chat-bubble" style="position: relative;">
+                  ${linesHTML}
+                  <button class="segment-edit-btn" title="この台詞を編集" style="position: absolute; right: -28px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; opacity: 0; transition: opacity 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-sub);"><span class="material-symbols-outlined" style="font-size:16px;">edit</span></button>
+                </div>
+              </div>
+            `;
+            const bubbleEl = msgEl.querySelector('.chat-bubble');
+            const editBtn = msgEl.querySelector('.segment-edit-btn');
+            if (bubbleEl && editBtn) {
+              bubbleEl.addEventListener('mouseenter', () => editBtn.style.opacity = '1');
+              bubbleEl.addEventListener('mouseleave', () => editBtn.style.opacity = '0');
+              editBtn.onclick = () => showEditSegmentModal(i, seg);
+            }
+            contentContainer.appendChild(msgEl);
+          }
+        }
+      } else {
+        // ★ 前回追加したユーザー入力の「@:キャラクター名」の分離処理
+        const lines = textToRender.split('\n');
+        const userSegments = [];
+        let currentUserBuffer = [];
+
+        const flushUser = () => {
+          if (currentUserBuffer.length > 0) {
+            const joined = currentUserBuffer.join('\n').trim();
+            if (joined) userSegments.push({ type: 'user', text: joined });
+            currentUserBuffer = [];
+          }
+        };
+
+ // 新形式の入力（動作の括弧を含む）に対応した正規表現
+        const directiveRegex = /^@:\s*([^「（\(\[:：\n]+?)(?:[（\(]([^）\)]+)[）\)])?[\s:：]*(?:「([^」]*)」|(.+))?\s*$/;
+
+        for (const line of lines) {
+          const match = line.match(directiveRegex);
+          if (match) {
+            flushUser();
+            const speaker = match[1].trim();
+            const action = match[2] ? match[2].trim() : null;
+            const speech = (match[3] ?? match[4] ?? '').trim();
+            userSegments.push({ type: 'character', speaker, action, text: speech });
+          } else {
+            currentUserBuffer.push(line);
+          }
+        }
+        flushUser();
+
+        for (const seg of userSegments) {
+          if (seg.type === 'character') {
+            const charMatch = matchCharacterByName(seg.speaker, characters);
+            let avatarUrl = 'assets/default-silhouette.png';
+            if (charMatch) {
+              avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
+            }
+          const msgEl = document.createElement('div');
+            msgEl.className = 'chat-message bot-role';
+            
+            let linesHTML = '';
+            if (seg.action) {
+              linesHTML += `<p class="chat-action"><em>*${escapeHTML(seg.action)}*</em></p>`;
+            }
+            if (seg.text) {
+              const displaySpeech = seg.text.startsWith('「') ? seg.text : `「${seg.text}」`;
+              linesHTML += `<p class="chat-speech">${escapeHTML(displaySpeech)}</p>`;
+            }
+
+            msgEl.innerHTML = `
+              <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
+              <div class="chat-content-wrapper">
+                <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
+                <div class="chat-bubble">
+                  ${linesHTML}
+                </div>
+              </div>
+            `;
+            contentContainer.appendChild(msgEl);
+          } else {
+            let avatarUrl = 'assets/default-silhouette.png';
+            let senderName = currentStory.protagonist?.name || 'You';
+            if (currentStory.protagonist) {
+              avatarUrl = await getAvatarUrl(currentStory.protagonist.avatarAssetId);
+            }
+            let contentHTML = window.marked && typeof window.marked.parse === 'function'
+              ? sanitizeHTML(window.marked.parse(seg.text))
+              : sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
+            
+            const msgEl = document.createElement('div');
+            msgEl.className = 'chat-message user-role';
+            msgEl.innerHTML = `
+              <div class="chat-avatar"><img src="${avatarUrl}" alt="${senderName}"></div>
+              <div class="chat-content-wrapper">
+                <span class="chat-sender-name">${senderName}</span>
+                <div class="chat-bubble">${contentHTML}</div>
+              </div>
+            `;
+            contentContainer.appendChild(msgEl);
+          }
+        }
+      }
+    } else {
+      let contentHTML = window.marked && typeof window.marked.parse === 'function'
+        ? sanitizeHTML(window.marked.parse(textToRender))
+        : sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
+      const blockEl = document.createElement('div');
+      blockEl.className = `novel-block ${isModel ? 'story-paragraph' : 'action-paragraph'}`;
+      if (!isModel) {
+        const pName = currentStory.protagonist?.name || '主人公';
+        blockEl.innerHTML = `<span class="novel-action-badge">${pName}の行動</span>${contentHTML}`;
+      } else {
+        blockEl.innerHTML = contentHTML;
+      }
+      contentContainer.appendChild(blockEl);
+    }
+
+    msgWrapper.appendChild(contentContainer);
+
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'chat-message-actions';
+    let actionHtml = `
+      <button class="action-icon-btn edit-msg-btn" title="メッセージ全体を編集">
+        <span class="material-symbols-outlined" style="font-size:18px;">edit_note</span>
+      </button>
+      <button class="action-icon-btn delete-msg-btn" title="メッセージを削除">
+        <span class="material-symbols-outlined" style="font-size:18px;">delete</span>
+      </button>
+    `;
+    if (isModel && isLast) {
+      actionHtml += `
+        <button class="action-icon-btn regen-msg-btn" title="AIの応答を再生成">
+          <span class="material-symbols-outlined" style="font-size:18px;">refresh</span>
+        </button>
+      `;
+    }
+    actionsEl.innerHTML = actionHtml;
+
+    actionsEl.querySelector('.edit-msg-btn').onclick = () => showEditMessageModal(i);
+    actionsEl.querySelector('.delete-msg-btn').onclick = async () => {
+      if (confirm('このメッセージを削除しますか？')) {
+        currentStory.messages.splice(i, 1);
+        await db.saveStory(currentStory);
+        const stories = await db.getStories();
+        updateState({ stories });
+        renderStory();
+      }
+    };
+    if (isModel && isLast) {
+      actionsEl.querySelector('.regen-msg-btn').onclick = () => {
+        if (confirm('現在のAIの返答を破棄して、もう一度新しく生成し直しますか？')) {
+          window.dispatchEvent(new CustomEvent('requestRegenerate', { detail: { retryOnly: false } }));
+        }
+      };
+    }
+    msgWrapper.appendChild(actionsEl);
+
+    // ★ 画面（container）ではなく、裏側の箱（fragment）に要素を追加する
+    fragment.appendChild(msgWrapper);
+  }
+
+  if (isGenerating) {
+    const loader = document.createElement('div');
+    loader.className = 'story-loader';
+    loader.style = "display: flex; flex-direction: column; align-items: center; gap: 8px;";
+    loader.innerHTML = `
+      <div class="typing-indicator">
+        <span></span><span></span><span></span>
+      </div>
+      <p class="loader-text">ストーリーを紡いでいます...</p>
+      <button id="cancel-generation-btn" class="secondary-btn" style="padding: 4px 12px; font-size: 12px; cursor: pointer; border-radius: 4px; margin-top: 4px;">
+        生成を停止する
+      </button>
+    `;
+    const cancelBtn = loader.querySelector('#cancel-generation-btn');
+    if (cancelBtn) {
+      cancelBtn.onclick = () => {
+        const { activeAbortController } = getState();
+        if (activeAbortController) activeAbortController.abort();
+      };
+    }
+    fragment.appendChild(loader);
+  }
+
+  if (!isGenerating && lastMsg && lastMsg.role === 'user') {
+    const retryContainer = document.createElement('div');
+    retryContainer.style = "text-align: center; margin: 16px 0;";
+    retryContainer.innerHTML = `
+      <button id="retry-generation-btn" class="primary-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 20px; border-radius: 20px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.15); cursor: pointer;">
+        <span class="material-symbols-outlined" style="font-size:20px;">refresh</span> AIの応答を生成する (リトライ)
+      </button>
+    `;
+    retryContainer.querySelector('#retry-generation-btn').onclick = () => {
+      window.dispatchEvent(new CustomEvent('requestRegenerate', { detail: { retryOnly: true } }));
+    };
+    fragment.appendChild(retryContainer);
+  }
+
+  // =========================================================================
+  // ★ ここですべての非同期処理が完了！
+  // この瞬間の「ユーザーが実際に見ているスクロール位置」を正確に記憶する
+  const previousScrollTop = container.scrollTop;
+
+  // 画面をクリアし、裏側で作っておいた全要素を一瞬で流し込む
+  container.innerHTML = '';
+  container.appendChild(fragment);
+
+  // 選択肢ボタンの描画
+  renderChoiceButtons(parsedLast.choices);
+
+  // ★ 最後にスクロール位置の調整
+  if (autoscrollEnabled !== false) {
+    container.scrollTop = container.scrollHeight;
+  } else {
+    // オフの場合は、画面が空になる直前に記憶した位置へ完璧に復元
+    container.scrollTop = previousScrollTop;
+  }
+}
+
+/**
+ * チャット最上段・最下段へのジャンプボタンのイベント登録及び表示制御
+ */
+export function bindScrollJumpControls() {
+  const container = document.getElementById('story-viewport');
+  const jumpControls = document.getElementById('scroll-jump-controls');
+  const topBtn = document.getElementById('scroll-top-btn');
+  const bottomBtn = document.getElementById('scroll-bottom-btn');
+  if (!container || !jumpControls) return;
+
+  // スクロール状態を監視して、ある程度スクロールされたらジャンプボタンを表示
+  container.addEventListener('scroll', () => {
+    // 1画面分以上スクロールされているか、最下部から一定距離離れている場合に表示
+    const threshold = 150;
+    const isScrollable = container.scrollHeight > container.clientHeight;
+    const isOffset = container.scrollTop > threshold || (container.scrollHeight - container.scrollTop - container.clientHeight) > threshold;
+    
+    if (isScrollable && isOffset) {
+      jumpControls.classList.add('visible');
+      jumpControls.classList.remove('hidden');
+    } else {
+      jumpControls.classList.remove('visible');
+      jumpControls.classList.add('hidden');
+    }
+  });
+
+  if (topBtn) {
+    topBtn.onclick = () => {
+      container.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  }
+  if (bottomBtn) {
+    bottomBtn.onclick = () => {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    };
+  }
+}
+
+/**
+ * キャラクターの吹き出し（セグメント）ごとの編集モーダルを表示する関数
+ */
+export async function showEditSegmentModal(msgIndex, seg) {
+  const { currentStory } = getState();
+  if (!currentStory || !currentStory.messages[msgIndex]) return;
+  const msg = currentStory.messages[msgIndex];
+
+  // 編集用のテキストを構築（スピーチとアクションを結合）
+  let originalText = '';
+  if (seg.type === 'dialogue') {
+    originalText = seg.lines.map(l => {
+      if (l.kind === 'speech') return l.text;
+      if (l.kind === 'action') return `*${l.text}*`;
+      return l.text;
+    }).join('\n');
+  } else {
+    originalText = seg.text;
+  }
+
+  let modal = document.getElementById('segment-edit-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'segment-edit-modal';
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.6)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '5000';
+
+  modal.innerHTML = `
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #fff); width: 90%; max-width: 500px; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
+      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">${escapeHTML(seg.speaker || 'ナレーション')} の台詞を編集</h3>
+      <textarea id="seg-edit-textarea" style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; font-family: inherit; font-size: 14px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit; line-height: 1.6;">${escapeHTML(originalText)}</textarea>
+      
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+        <button id="seg-edit-full-btn" style="background: none; border: none; font-size: 12px; text-decoration: underline; color: var(--primary-color, #4a90e2); cursor: pointer; padding: 0;">メッセージ全体を編集する</button>
+        <div style="display: flex; gap: 10px;">
+          <button id="seg-edit-cancel-btn" class="secondary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">キャンセル</button>
+          <button id="seg-edit-save-btn" class="primary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">変更を保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const textarea = modal.querySelector('#seg-edit-textarea');
+  const autoResize = () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  };
+  textarea.addEventListener('input', autoResize);
+  setTimeout(autoResize, 0);
+
+  // キャンセル処理
+  modal.querySelector('#seg-edit-cancel-btn').onclick = () => modal.remove();
+  
+  // 部分的な置換が難しい場合のための「全体編集への切り替え」
+  modal.querySelector('#seg-edit-full-btn').onclick = () => {
+    modal.remove();
+    showEditMessageModal(msgIndex);
+  };
+
+  // 保存処理（テキストの一部置換を行う）
+  modal.querySelector('#seg-edit-save-btn').onclick = async () => {
+    const newText = textarea.value.trim();
+    if (!newText) {
+      alert('台詞を空にはできません。削除したい場合は「メッセージ全体を編集する」から行ってください。');
+      return;
+    }
+
+    let updatedContent = msg.content;
+    let replaceSuccess = false;
+
+    // 元のテキスト内で該当箇所を探して置換する
+    const firstLine = seg.type === 'dialogue' && seg.lines.length > 0 
+      ? (seg.lines[0].kind === 'action' ? `*${seg.lines[0].text}*` : seg.lines[0].text) 
+      : originalText;
+
+    // パターン1: そのままの文字列でマッチする場合
+    if (updatedContent.includes(firstLine)) {
+      updatedContent = updatedContent.replace(firstLine, newText);
+      // 複数行あった場合は、残りの古い行を削除して整合性をとる
+      if (seg.type === 'dialogue' && seg.lines.length > 1) {
+        for (let i = 1; i < seg.lines.length; i++) {
+          const l = seg.lines[i];
+          const target = l.kind === 'action' ? `*${l.text}*` : l.text;
+          updatedContent = updatedContent.replace(target, '');
+        }
+      }
+      replaceSuccess = true;
+    } 
+    // パターン2: [キャラクター名] 「セリフ」 の形式で生データが保存されている場合
+    else {
+      const formattedFallback = `[${seg.speaker}] ${firstLine}`;
+      if (updatedContent.includes(formattedFallback)) {
+        updatedContent = updatedContent.replace(formattedFallback, `[${seg.speaker}] ${newText}`);
+        replaceSuccess = true;
+      }
+    }
+
+    if (replaceSuccess) {
+      // 連続する改行をきれいにする
+      updatedContent = updatedContent.replace(/\n{3,}/g, '\n\n');
+      
+      currentStory.messages[msgIndex].content = updatedContent;
+      await db.saveStory(currentStory);
+      modal.remove();
+      renderStory();
+    } else {
+      alert('テキストの置換箇所を特定できませんでした。AIの出力フォーマットが複雑なため、左下の「メッセージ全体を編集する」から修正を行ってください。');
+    }
+  };
+}
+
+/**
+ * 過去のメッセージ内容を編集する専用モーダルダイアログ (自動拡張機能付き)
+ */
+export async function showEditMessageModal(msgIndex) {
+  const { currentStory } = getState();
+  if (!currentStory || !currentStory.messages[msgIndex]) return;
+  const msg = currentStory.messages[msgIndex];
+
+  let modal = document.getElementById('msg-edit-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'msg-edit-modal';
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.6)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '5000';
+
+  modal.innerHTML = `
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #fff); width: 90%; max-width: 600px; max-height: 90vh; border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 12px; box-sizing: border-box;">
+      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">メッセージの編集</h3>
+      <div style="flex: 1; overflow-y: auto; padding-right: 4px;">
+        <textarea id="msg-edit-textarea" style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; font-family: inherit; font-size: 14px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit; line-height: 1.6; overflow-y: hidden;">${escapeHTML(msg.content)}</textarea>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px;">
+        <button id="msg-edit-cancel-btn" class="secondary-btn" style="padding: 8px 16px; border-radius: 4px; cursor: pointer;">キャンセル</button>
+        <button id="msg-edit-save-btn" class="primary-btn" style="padding: 8px 16px; border-radius: 4px; cursor: pointer;">変更を保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const textarea = modal.querySelector('#msg-edit-textarea');
+  // Auto-resizeロジック
+  const autoResize = () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  };
+  textarea.addEventListener('input', autoResize);
+  setTimeout(autoResize, 0); // 初期表示時に高さを合わせる
+
+  modal.querySelector('#msg-edit-cancel-btn').onclick = () => modal.remove();
+  modal.querySelector('#msg-edit-save-btn').onclick = async () => {
+    const newContent = textarea.value.trim();
+    if (newContent) {
+      currentStory.messages[msgIndex].content = newContent;
+      await db.saveStory(currentStory);
+      modal.remove();
+      renderStory();
+    } else {
+      alert('メッセージを空にはできません。削除したい場合はゴミ箱アイコンを使用してください。');
+    }
+  };
+}
+
+function renderChoiceButtons(choices) {
+  const choicesContainer = document.getElementById('choices-container');
+  if (!choicesContainer) return;
+
+  choicesContainer.innerHTML = '';
+  const { showChoices, isGenerating } = getState();
+  
+  if (!showChoices || choices.length === 0 || isGenerating) {
+    choicesContainer.classList.add('hidden');
+    return;
+  }
+
+  choicesContainer.classList.remove('hidden');
+  choices.forEach(choice => {
+    const btn = document.createElement('button');
+    btn.className = 'choice-btn';
+    btn.innerHTML = `
+      <span class="choice-label">${choice.label}</span>
+      <span class="choice-text">${choice.text}</span>
+    `;
+    btn.onclick = () => {
+      const textToSend = `${choice.label}. ${choice.text}`;
+      window.dispatchEvent(new CustomEvent('submitUserAction', { detail: textToSend }));
+    };
+    choicesContainer.appendChild(btn);
+  });
+}
+
+export async function renderSidebar() {
+  const { currentStory } = getState();
+  const sidebarEl = document.getElementById('story-sidebar');
+  if (!sidebarEl) return;
+
+  if (!currentStory) {
+    sidebarEl.innerHTML = `<div class="sidebar-empty">ストーリーを選択するとステータスが表示されます</div>`;
+    return;
+  }
+
+  const { protagonist, sceneState, characterMemory, relationshipMemory } = currentStory;
+  const pAvatarUrl = await getAvatarUrl(protagonist?.avatarAssetId);
+  const allCharacters = await db.getCharacters();
+  const characters = allCharacters.filter(char => isCharacterMatchingStory(char, currentStory));
+
+  let html = `
+    <div class="sidebar-section">
+      <h4>主人公プロファイル</h4>
+      <div class="sidebar-protagonist-card" style="cursor: pointer; transition: opacity 0.2s;" title="設定を編集" onmouseover="this.style.opacity=0.8" onmouseout="this.style.opacity=1">
+        <img src="${pAvatarUrl}" class="sidebar-p-avatar" alt="Protagonist">
+        <div class="sidebar-p-details">
+          <strong id="sidebar-p-name">${escapeHTML(protagonist?.name || '主人公名なし')}</strong>
+          <span class="sidebar-p-desc" title="${escapeHTML(protagonist?.description || '設定なし')}">
+            ${escapeHTML(protagonist?.description || '詳細設定がありません。')}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <h4>現在のシーン状況</h4>
+      <div class="scene-state-form">
+        <div class="form-row">
+          <label>現在地</label>
+          <input type="text" id="scene-location-input" value="${escapeHTML(sceneState?.location || '')}" placeholder="例: 教室、放課後">
+        </div>
+        <div class="form-row">
+          <label>時間帯</label>
+          <input type="text" id="scene-time-input" value="${escapeHTML(sceneState?.timeOfDay || '')}" placeholder="例: 夕方">
+        </div>
+        <div class="form-row">
+          <label>雰囲気</label>
+          <input type="text" id="scene-atmosphere-input" value="${escapeHTML(sceneState?.atmosphere || '')}" placeholder="例: 気まずい、賑やか">
+        </div>
+        <div class="form-row">
+          <label>直近の目的</label>
+          <input type="text" id="scene-objective-input" value="${escapeHTML(sceneState?.currentObjective || '')}" placeholder="例: 告白する、脱出する">
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <h4>登場キャラクター・関係性</h4>
+      <div class="sidebar-characters-list">
+  `;
+
+  if (characters.length === 0) {
+    html += `<p class="note">タグの一致するキャラクター、または登録されているキャラクターはいません。</p>`;
+  } else {
+    for (const char of characters) {
+      const charRef = currentStory.characters?.find(c => c.characterId === char.characterId);
+      const role = charRef ? charRef.attendance : 'absent';
+      const avatarUrl = await getAvatarUrl(char.avatarAssetId);
+      const charMem = characterMemory?.[char.characterId] || {};
+      const relMem = relationshipMemory?.[char.characterId] || { affinity: 50, notes: '' };
+
+      html += `
+        <div class="sidebar-char-row" data-char-id="${char.characterId}">
+          <div class="char-role-header">
+            <img src="${avatarUrl}" class="sidebar-c-avatar" alt="${char.name}">
+            <div class="char-role-name">
+              <strong>${escapeHTML(char.name)}</strong>
+            </div>
+            <select class="char-attendance-select" data-char-id="${char.characterId}">
+              <option value="main" ${role === 'main' ? 'selected' : ''}>主要 (Main)</option>
+              <option value="support" ${role === 'support' ? 'selected' : ''}>補助 (Support)</option>
+              <option value="background" ${role === 'background' ? 'selected' : ''}>背景 (Bg)</option>
+              <option value="absent" ${role === 'absent' ? 'selected' : ''}>不在 (Absent)</option>
+            </select>
+          </div>
+          
+          <div class="char-role-body ${role === 'absent' ? 'hidden' : ''}">
+            <div class="form-row-compact">
+              <label>好感度 (${relMem.affinity ?? 50})</label>
+              <input type="range" class="char-affinity-range" data-char-id="${char.characterId}" min="0" max="100" value="${relMem.affinity ?? 50}">
+            </div>
+            <div class="form-row-compact">
+              <label>キャラ状態</label>
+              <input type="text" class="char-status-input" data-char-id="${char.characterId}" value="${escapeHTML(charMem.status || '')}" placeholder="例: 照れている、警戒中">
+            </div>
+            <div class="form-row-compact">
+              <label>関係メモ</label>
+              <input type="text" class="char-relation-notes-input" data-char-id="${char.characterId}" value="${escapeHTML(relMem.notes || '')}" placeholder="例: 秘密を共有している">
+            </div>
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  html += `</div></div>`;
+
+  // セッションロア (Session Lore) をサイドバーの最下部に表示
+  const sessionLore = currentStory.session_lore || { summary: '', key_events: [] };
+  const eventListHTML = (sessionLore.key_events || []).map(ev => `<li>${escapeHTML(ev)}</li>`).join('');
+  html += `
+    <div class="sidebar-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--border-color, #eee);">
+      <h4 style="display: flex; align-items: center; gap: 4px;">
+        <span class="material-symbols-outlined" style="font-size: 18px;">history_edu</span>
+        セッション記録・記憶
+      </h4>
+      <div class="scene-state-form">
+        <div class="form-group" style="margin-bottom: 8px;">
+          <label style="font-size: 11px;">ストーリーあらすじ / 関係性要約</label>
+          <textarea id="session-lore-summary-input" rows="3" style="width: 100%; font-size: 12px; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; background: var(--bg-card, #fff); color: inherit; resize: vertical;" placeholder="AIの状況整理やあらすじがここに記録されます...">${escapeHTML(sessionLore.summary || '')}</textarea>
+        </div>
+        <div class="form-group">
+          <label style="font-size: 11px;">獲得した主要フラグ / キーイベント</label>
+          <ul id="session-lore-events" style="margin: 4px 0 0 0; padding-left: 18px; font-size: 12px; line-height: 1.5; color: var(--text-color);">
+            ${eventListHTML || '<li style="color: var(--text-sub); list-style: none; margin-left:-18px;">記録されたイベントはありません</li>'}
+          </ul>
+        </div>
+      </div>
+    </div>
+  `;
+
+  sidebarEl.innerHTML = html;
+  bindSidebarEvents();
+}
+
+function bindSidebarEvents() {
+  const { currentStory } = getState();
+  if (!currentStory) return;
+
+  const saveStateChanges = () => {
+    db.saveStory(currentStory).then(async () => {
+      const stories = await db.getStories();
+      updateState({ stories });
+      window.dispatchEvent(new CustomEvent('storyDataUpdated'));
+    });
+  };
+
+  const pCard = document.querySelector('.sidebar-protagonist-card');
+  if (pCard) pCard.onclick = () => showStorySettingsModal();
+
+  const locInput = document.getElementById('scene-location-input');
+  const timeInput = document.getElementById('scene-time-input');
+  const atmosInput = document.getElementById('scene-atmosphere-input');
+  const objInput = document.getElementById('scene-objective-input');
+  const sessionSummaryInput = document.getElementById('session-lore-summary-input');
+
+  // ----------------------------------
+
+  if (locInput) locInput.oninput = (e) => { currentStory.sceneState.location = e.target.value; saveStateChanges(); };
+  if (timeInput) timeInput.oninput = (e) => { currentStory.sceneState.timeOfDay = e.target.value; saveStateChanges(); };
+  if (atmosInput) atmosInput.oninput = (e) => { currentStory.sceneState.atmosphere = e.target.value; saveStateChanges(); };
+  if (objInput) objInput.oninput = (e) => { currentStory.sceneState.currentObjective = e.target.value; saveStateChanges(); };
+  if (sessionSummaryInput) {
+    sessionSummaryInput.oninput = (e) => {
+      if (!currentStory.session_lore) currentStory.session_lore = { summary: '', key_events: [] };
+      currentStory.session_lore.summary = e.target.value;
+      saveStateChanges();
+    };
+  }
+
+  document.querySelectorAll('.char-attendance-select').forEach(select => {
+    select.onchange = (e) => {
+      const charId = e.target.dataset.charId;
+      const role = e.target.value;
+      const row = e.target.closest('.sidebar-char-row');
+      const body = row.querySelector('.char-role-body');
+      if (role === 'absent') body.classList.add('hidden');
+      else body.classList.remove('hidden');
+      updateCharacterAttendance(charId, role);
+      saveStateChanges();
+    };
+  });
+
+  document.querySelectorAll('.char-affinity-range').forEach(range => {
+    range.oninput = (e) => {
+      const charId = e.target.dataset.charId;
+      const val = parseInt(e.target.value);
+      e.target.previousElementSibling.textContent = `好感度 (${val})`;
+      if (!currentStory.relationshipMemory) currentStory.relationshipMemory = {};
+      if (!currentStory.relationshipMemory[charId]) currentStory.relationshipMemory[charId] = { affinity: 50, notes: '' };
+      currentStory.relationshipMemory[charId].affinity = val;
+      saveStateChanges();
+    };
+  });
+
+  document.querySelectorAll('.char-status-input').forEach(input => {
+    input.oninput = (e) => {
+      const charId = e.target.dataset.charId;
+      if (!currentStory.characterMemory) currentStory.characterMemory = {};
+      if (!currentStory.characterMemory[charId]) currentStory.characterMemory[charId] = { status: '', shortTermGoal: '', location: '' };
+      currentStory.characterMemory[charId].status = e.target.value;
+      saveStateChanges();
+    };
+  });
+
+  document.querySelectorAll('.char-relation-notes-input').forEach(input => {
+    input.oninput = (e) => {
+      const charId = e.target.dataset.charId;
+      if (!currentStory.relationshipMemory) currentStory.relationshipMemory = {};
+      if (!currentStory.relationshipMemory[charId]) currentStory.relationshipMemory[charId] = { affinity: 50, notes: '' };
+      currentStory.relationshipMemory[charId].notes = e.target.value;
+      saveStateChanges();
+    };
+  });
+}
+
+export async function renderStoryList() {
+  const container = document.getElementById('stories-list-container');
+  if (!container) return;
+
+  container.innerHTML = '';
+  const stories = await db.getStories();
+  const current = getState().currentStory;
+  stories.sort((a, b) => b.timestamp - a.timestamp);
+
+  if (current) {
+    const settingsBtn = document.createElement('button');
+    settingsBtn.className = 'primary-btn';
+    settingsBtn.style = "width: 100%; padding: 8px; margin-bottom: 12px; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; box-sizing: border-box; border-radius: 6px;";
+    settingsBtn.innerHTML = `<span class="material-symbols-outlined" style="font-size: 18px;">settings</span>⚙️ 現在のストーリーを設定`;
+    settingsBtn.onclick = () => {
+      showStorySettingsModal();
+      document.getElementById('mobile-drawer')?.classList.remove('open');
+    };
+    container.appendChild(settingsBtn);
+  }
+
+  stories.forEach(story => {
+    const el = document.createElement('div');
+    el.className = `story-list-item ${current && current.storyId === story.storyId ? 'active' : ''}`;
+    el.innerHTML = `
+      <div class="story-item-text" style="flex: 1; min-width: 0;">
+        <span class="story-item-title">${escapeHTML(story.title || '無題のストーリー')}</span>
+        <span class="story-item-meta">${story.messages?.length || 0} メッセージ</span>
+      </div>
+      <div class="story-item-actions" style="display: flex; gap: 4px; align-items: center; margin-left: 8px;">
+        <button class="rename-story-btn" title="名前を変更" style="background: none; border: none; color: inherit; opacity: 0.6; cursor: pointer; padding: 4px; display: inline-flex; align-items: center;">
+          <span class="material-symbols-outlined" style="font-size: 20px;">edit</span>
+        </button>
+        <button class="delete-story-btn" title="削除">
+          <span class="material-symbols-outlined">delete</span>
+        </button>
+      </div>
+    `;
+    
+    el.onclick = (e) => {
+      if (e.target.closest('.rename-story-btn')) {
+        e.stopPropagation();
+        const oldTitle = story.title || '新しいストーリー';
+        const newTitle = prompt('ストーリーの名前を変更:', oldTitle);
+        if (newTitle !== null && newTitle.trim() !== '') {
+          story.title = newTitle.trim();
+          db.saveStory(story).then(() => {
+            if (current && current.storyId === story.storyId) setActiveStory(story);
+            renderStoryList();
+          });
+        }
+        return;
+      }
+
+      if (e.target.closest('.delete-story-btn')) {
+        e.stopPropagation();
+        if (confirm(`ストーリー「${story.title}」を削除しますか？`)) {
+          db.deleteStory(story.storyId).then(() => {
+            if (current && current.storyId === story.storyId) setActiveStory(null);
+            renderStoryList();
+          });
+        }
+        return;
+      }
+      
+      setActiveStory(story);
+      renderStoryList();
+      document.getElementById('mobile-drawer')?.classList.remove('open');
+    };
+    container.appendChild(el);
+  });
+}
+
+export async function renderCharacterLibrary() {
+  const container = document.getElementById('library-viewport');
+  if (!container) return;
+
+  container.innerHTML = '';
+  const characters = await db.getCharacters();
+  const searchInput = document.getElementById('library-search-input');
+  const filterSelect = document.getElementById('library-filter-select');
+  const searchQuery = searchInput ? searchInput.value.trim().toLowerCase() : '';
+  const filterMode = filterSelect ? filterSelect.value : 'all';
+  const categories = new Set();
+  characters.forEach(c => { if (c.category) categories.add(c.category); });
+
+  if (filterSelect) {
+    const currentVal = filterSelect.value;
+    filterSelect.innerHTML = '';
+    const optAll = document.createElement('option');
+    optAll.value = 'all';
+    optAll.textContent = 'すべて';
+    filterSelect.appendChild(optAll);
+
+    const optInStory = document.createElement('option');
+    optInStory.value = 'in-story';
+    optInStory.textContent = '使用中のストーリーのみ';
+    filterSelect.appendChild(optInStory);
+
+    const { currentStory } = getState();
+    if (currentStory && currentStory.tags && currentStory.tags.length > 0) {
+      const optMatchingTags = document.createElement('option');
+      optMatchingTags.value = 'matching-tags';
+      optMatchingTags.textContent = `タグ一致 (${currentStory.tags.join(', ')})`;
+      filterSelect.appendChild(optMatchingTags);
+    }
+
+    for (const cat of [...categories].sort()) {
+      const opt = document.createElement('option');
+      opt.value = `cat:${cat}`;
+      opt.textContent = cat;
+      filterSelect.appendChild(opt);
+    }
+    filterSelect.value = currentVal;
+  }
+
+  const { currentStory } = getState();
+  const inStoryCharIds = new Set();
+  if (currentStory && currentStory.characters) {
+    currentStory.characters.forEach(c => {
+      if (c.attendance && c.attendance !== 'absent') inStoryCharIds.add(c.characterId);
+    });
+  }
+
+  let filtered = characters;
+  if (searchQuery) {
+    filtered = filtered.filter(c =>
+      c.name.toLowerCase().includes(searchQuery) ||
+      (c.category || '').toLowerCase().includes(searchQuery) ||
+      (c.personality || '').toLowerCase().includes(searchQuery) ||
+      (c.tags || []).some(t => t.toLowerCase().includes(searchQuery))
+    );
+  }
+  if (filterMode === 'in-story') {
+    filtered = filtered.filter(c => inStoryCharIds.has(c.characterId));
+  } else if (filterMode === 'matching-tags') {
+    filtered = filtered.filter(c => isCharacterMatchingStory(c, currentStory));
+  } else if (filterMode.startsWith('cat:')) {
+    const catName = filterMode.slice(4);
+    filtered = filtered.filter(c => c.category === catName);
+  }
+
+  const addCard = document.createElement('div');
+  addCard.className = 'char-card add-card';
+  addCard.innerHTML = `<span class="material-symbols-outlined add-icon">person_add</span><strong>新しいキャラクター</strong>`;
+  addCard.onclick = () => showCharacterModal();
+  container.appendChild(addCard);
+
+  for (const char of filtered) {
+    const card = document.createElement('div');
+    card.className = 'char-card';
+    const avatarUrl = await getAvatarUrl(char.avatarAssetId);
+    
+    let tagBadges = '';
+    if (char.category) tagBadges += `<span class="char-card-tag">${escapeHTML(char.category)}</span>`;
+    if (char.tags && char.tags.length > 0) {
+      char.tags.forEach(t => {
+        if (t !== char.category) tagBadges += `<span class="char-card-tag" style="background-color: var(--primary-light, #e1f5fe); color: var(--primary-dark, #0288d1);">${escapeHTML(t)}</span>`;
+      });
+    }
+
+    card.innerHTML = `
+      <div class="char-card-avatar-wrapper"><img src="${avatarUrl}" alt="${char.name}"></div>
+      <div class="char-card-details">
+        <strong>${escapeHTML(char.name)}</strong>
+        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">${tagBadges}</div>
+        <p class="char-card-personality" style="margin-top: 8px;">${escapeHTML(char.personality || '個性未設定')}</p>
+      </div>
+      <div class="char-card-actions">
+        <button class="edit-char-btn" title="編集"><span class="material-symbols-outlined">edit</span></button>
+        <button class="export-char-btn" title="エクスポート"><span class="material-symbols-outlined">upload</span></button>
+        <button class="delete-char-btn" title="削除"><span class="material-symbols-outlined">delete</span></button>
+      </div>
+    `;
+
+    card.querySelector('.edit-char-btn').onclick = (e) => { e.stopPropagation(); showCharacterModal(char); };
+    card.querySelector('.export-char-btn').onclick = (e) => { e.stopPropagation(); exportCharacterJSON(char); };
+    card.querySelector('.delete-char-btn').onclick = (e) => {
+      e.stopPropagation();
+      if (confirm(`キャラクター「${char.name}」を削除しますか？\n(紐付いているアバター画像も削除されます)`)) {
+        db.deleteCharacter(char.characterId).then(async () => {
+          const updatedChars = await db.getCharacters();
+          updateState({ characters: updatedChars });
+          renderCharacterLibrary();
+          renderSidebar();
+        });
+      }
+    };
+    container.appendChild(card);
+  }
+}
+
+export function cropImageToSquareBlob(file, zoomPercent, shiftX, shiftY) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 300; 
+      canvas.height = 300;
+      const ctx = canvas.getContext('2d');
+      const r = 300 / 200; 
+      const scale = zoomPercent / 100;
+      const aspect = img.width / img.height;
+      let baseWidth, baseHeight;
+      if (aspect > 1) { baseHeight = 200; baseWidth = 200 * aspect; }
+      else { baseWidth = 200; baseHeight = 200 / aspect; }
+      const drawWidth = baseWidth * scale * r;
+      const drawHeight = baseHeight * scale * r;
+      const drawX = (300 - drawWidth) / 2 + (shiftX * r);
+      const drawY = (300 - drawHeight) / 2 + (shiftY * r);
+      ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
+      canvas.toBlob((blob) => { resolve(blob); }, 'image/jpeg', 0.9);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = (err) => reject(err);
+  });
+}
+
+export function showAvatarCropModal(file, onCropComplete) {
+  let modal = document.getElementById('avatar-crop-modal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'avatar-crop-modal';
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.6)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '4000';
+
+  modal.innerHTML = `
+    <div style="background: var(--bg-card, #fff); color: var(--text-color, #fff); width: 90%; max-width: 380px; border-radius: 8px; padding: 20px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); box-sizing: border-box;">
+      <h3 style="margin: 0; font-size: 16px; font-weight: bold;">アバターの位置調整</h3>
+      <div style="position: relative; width: 200px; height: 200px; margin: 0 auto; background: #eee; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; display: flex; justify-content: center; align-items: center;">
+        <img id="crop-modal-preview-img" style="position: absolute; transform-origin: center; max-width: none; max-height: none;" alt="Crop Preview">
+        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; box-shadow: inset 0 0 0 100px rgba(0,0,0,0.55); border-radius: 50%;"></div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+          <span style="font-size: 11px; min-width: 50px; font-weight: bold;">ズーム</span>
+          <input type="range" id="crop-modal-zoom" min="100" max="300" value="100" style="flex: 1; cursor: pointer;">
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+          <span style="font-size: 11px; min-width: 50px; font-weight: bold;">左右位置</span>
+          <input type="range" id="crop-modal-shift-x" min="-100" max="100" value="0" style="flex: 1; cursor: pointer;">
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+          <span style="font-size: 11px; min-width: 50px; font-weight: bold;">上下位置</span>
+          <input type="range" id="crop-modal-shift-y" min="-100" max="100" value="0" style="flex: 1; cursor: pointer;">
+        </div>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
+        <button id="crop-modal-cancel-btn" style="background: none; border: 1px solid var(--border-color, #ccc); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; color: inherit;">キャンセル</button>
+        <button id="crop-modal-apply-btn" style="background: var(--primary-color, #4a90e2); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 12px;">決定</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const previewImg = modal.querySelector('#crop-modal-preview-img');
+  const zoomSlider = modal.querySelector('#crop-modal-zoom');
+  const shiftXSlider = modal.querySelector('#crop-modal-shift-x');
+  const shiftYSlider = modal.querySelector('#crop-modal-shift-y');
+  const cancelBtn = modal.querySelector('#crop-modal-cancel-btn');
+  const applyBtn = modal.querySelector('#crop-modal-apply-btn');
+
+  const imgUrl = URL.createObjectURL(file);
+  previewImg.src = imgUrl;
+
+  const updatePreview = () => {
+    const z = zoomSlider.value;
+    const x = shiftXSlider.value;
+    const y = shiftYSlider.value;
+    previewImg.style.transform = `scale(${z / 100}) translate(${x}px, ${y}px)`;
+  };
+
+  previewImg.onload = () => {
+    const aspect = previewImg.naturalWidth / previewImg.naturalHeight;
+    if (aspect > 1) { previewImg.style.height = '200px'; previewImg.style.width = `${200 * aspect}px`; }
+    else { previewImg.style.width = '200px'; previewImg.style.height = `${200 / aspect}px`; }
+    updatePreview();
+  };
+
+  zoomSlider.oninput = updatePreview;
+  shiftXSlider.oninput = updatePreview;
+  shiftYSlider.oninput = updatePreview;
+
+  cancelBtn.onclick = () => { modal.remove(); URL.revokeObjectURL(imgUrl); };
+  applyBtn.onclick = async () => {
+    const z = parseFloat(zoomSlider.value);
+    const x = parseFloat(shiftXSlider.value);
+    const y = parseFloat(shiftYSlider.value);
+    try {
+      const croppedBlob = await cropImageToSquareBlob(file, z, x, y);
+      onCropComplete(croppedBlob);
+      modal.remove();
+    } catch (e) {
+      alert('画像の切り出しに失敗しました。');
+    } finally {
+      URL.revokeObjectURL(imgUrl);
+    }
+  };
+}
+
+export async function showCharacterModal(char = null) {
+  const modal = document.getElementById('char-modal');
+  if (!modal) return;
+
+  const titleEl = document.getElementById('char-modal-title');
+  const nameInput = document.getElementById('char-name-input');
+  const categoryInput = document.getElementById('char-category-input');
+  const descInput = document.getElementById('char-desc-input');
+  const persInput = document.getElementById('char-pers-input');
+  const exInput = document.getElementById('char-ex-input');
+  const imgInput = document.getElementById('char-img-input');
+  const previewImg = document.getElementById('char-img-preview');
+  const saveBtn = document.getElementById('char-save-btn');
+
+  let tagsInput = document.getElementById('char-tags-input');
+  if (!tagsInput && categoryInput) {
+    const parent = categoryInput.parentElement;
+    const tagsRow = document.createElement('div');
+    tagsRow.className = 'form-row';
+    tagsRow.innerHTML = `<label>タグ (カンマ区切り)</label><input type="text" id="char-tags-input" placeholder="例: 五等分の花嫁, アニメ">`;
+    parent.after(tagsRow);
+    tagsInput = document.getElementById('char-tags-input');
+  }
+  // --- 追加開始：AI自動生成ボタンの設置と処理 ---
+  let aiGenBtn = document.getElementById('char-ai-gen-btn');
+  if (!aiGenBtn && tagsInput) {
+    const btn = document.createElement('button');
+    btn.id = 'char-ai-gen-btn';
+    btn.type = 'button';
+    btn.className = 'primary-btn';
+    // 魔法っぽいグラデーションのボタンデザイン
+    btn.style = "margin-top: 16px; margin-bottom: 8px; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #4a90e2, #9013fe); border: none;";
+    btn.innerHTML = '<span class="material-symbols-outlined">travel_explore</span> ネット検索でプロフィールを自動生成';
+    tagsInput.parentElement.after(btn);
+    aiGenBtn = btn;
+  }
+
+  if (aiGenBtn) {
+    aiGenBtn.onclick = async () => {
+      const name = nameInput.value.trim();
+      const cat = categoryInput ? categoryInput.value.trim() : '';
+      if (!name) {
+        alert('先に「キャラクター名」を入力してください。\n（カテゴリーも入力すると検索精度が上がります）');
+        return;
+      }
+      if (!confirm(`「${name}」のプロフィールをネット検索で自動生成しますか？\n（現在入力されている内容は上書きされます。完了まで数十秒かかります）`)) return;
+
+      const originalHtml = aiGenBtn.innerHTML;
+      aiGenBtn.innerHTML = '<span class="material-symbols-outlined" style="animation: spin 1s linear infinite;">sync</span> 生成中 (数十秒かかります)...';
+      aiGenBtn.disabled = true;
+
+      try {
+        const generated = await generateCharacterProfile(name, cat);
+        if (generated) {
+          // AIが返してきたJSONを各テキストエリアに流し込む
+          if (generated.description) descInput.value = generated.description;
+          if (generated.personality) persInput.value = generated.personality;
+          if (generated.mes_example) exInput.value = generated.mes_example;
+          if (generated.tags && Array.isArray(generated.tags)) {
+            tagsInput.value = generated.tags.join(', ');
+          }
+          
+          // 流し込んだ文字数に合わせて、テキストエリアの高さを自動で広げる
+          [descInput, persInput, exInput].forEach(ta => {
+            ta.style.height = 'auto';
+            if (ta.scrollHeight > 0) ta.style.height = ta.scrollHeight + 'px';
+          });
+          
+          alert('プロフィールの自動生成が完了しました！\n内容を確認・手直しし、問題なければ一番下の「保存」を押してください。');
+        }
+      } catch (err) {
+        alert('生成に失敗しました: ' + err.message);
+      } finally {
+        // ボタンを元の状態に戻す
+        aiGenBtn.innerHTML = originalHtml;
+        aiGenBtn.disabled = false;
+      }
+    };
+  }
+  // --- 追加終了 ---
+  let adjustBtn = document.getElementById('char-adjust-crop-btn');
+  if (!adjustBtn && imgInput) {
+    const parent = imgInput.parentElement;
+    const btn = document.createElement('button');
+    btn.id = 'char-adjust-crop-btn';
+    btn.className = 'secondary-btn';
+    btn.type = 'button';
+    btn.style = "display: none; margin-top: 8px; font-size: 11px; padding: 4px 8px; width: 100%; box-sizing: border-box;";
+    btn.textContent = '位置を再調整';
+    parent.after(btn);
+    adjustBtn = btn;
+  }
+
+  nameInput.value = char ? char.name : '';
+  if (categoryInput) categoryInput.value = char ? char.category || '' : '';
+  if (tagsInput) tagsInput.value = char && char.tags ? char.tags.join(', ') : '';
+  descInput.value = char ? char.description || '' : '';
+  persInput.value = char ? char.personality || '' : '';
+  exInput.value = char ? char.mes_example || '' : '';
+  imgInput.value = '';
+  previewImg.style.transform = 'none'; 
+  if (adjustBtn) adjustBtn.style.display = 'none'; 
+  
+  let currentAvatarAssetId = char ? char.avatarAssetId : '';
+  previewImg.src = await getAvatarUrl(currentAvatarAssetId);
+  titleEl.textContent = char ? 'キャラクター設定編集' : '新規キャラクター登録';
+
+  let currentOriginalFile = null;
+  let newFileBlob = null;
+
+  imgInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      currentOriginalFile = file; 
+      showAvatarCropModal(file, (croppedBlob) => {
+        newFileBlob = croppedBlob;
+        previewImg.src = URL.createObjectURL(croppedBlob); 
+        if (adjustBtn) adjustBtn.style.display = 'inline-flex'; 
+      });
+    }
+  };
+
+  if (adjustBtn) {
+    adjustBtn.onclick = () => {
+      if (currentOriginalFile) {
+        showAvatarCropModal(currentOriginalFile, (croppedBlob) => {
+          newFileBlob = croppedBlob;
+          previewImg.src = URL.createObjectURL(croppedBlob);
+        });
+      }
+    };
+  }
+
+  saveBtn.onclick = async () => {
+    if (!nameInput.value.trim()) { alert('キャラクター名を入力してください。'); return; }
+    try {
+      if (newFileBlob) {
+        if (currentAvatarAssetId) await db.deleteAsset(currentAvatarAssetId);
+        currentAvatarAssetId = await db.saveAsset(newFileBlob, 'image/jpeg');
+      }
+      const characterData = {
+        characterId: char ? char.characterId : undefined,
+        name: nameInput.value.trim(),
+        category: categoryInput ? categoryInput.value.trim() : '',
+        tags: tagsInput ? tagsInput.value.split(',').map(t => t.trim()).filter(t => t.length > 0) : [],
+        avatarAssetId: currentAvatarAssetId,
+        description: descInput.value.trim(),
+        personality: persInput.value.trim(),
+        mes_example: exInput.value.trim()
+      };
+      await db.saveCharacter(characterData);
+      const updatedChars = await db.getCharacters();
+      updateState({ characters: updatedChars });
+      modal.classList.add('hidden');
+      renderCharacterLibrary();
+      renderSidebar();
+    } catch (err) {
+      alert(`保存に失敗しました: ${err.message}`);
+    }
+  };
+
+  modal.classList.remove('hidden');
+}
+
+async function exportCharacterJSON(char) {
+  try {
+    const exportObj = {
+      spec: 'zetatavern-character', version: 1, name: char.name, category: char.category || '',
+      tags: char.tags || [], description: char.description || '', personality: char.personality || '',
+      mes_example: char.mes_example || '', avatarBase64: ''
+    };
+    if (char.avatarAssetId) {
+      const blob = await db.getAssetBlob(char.avatarAssetId);
+      if (blob) exportObj.avatarBase64 = await db.blobToBase64(blob);
+    }
+    const jsonStr = JSON.stringify(exportObj, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${char.name}_card.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) { alert(`エクスポートに失敗しました: ${err.message}`); }
+}
+
+export async function importCharacterJSON(file) {
+  try {
+    const text = await file.text();
+    const importObj = JSON.parse(text);
+    
+    // ZetaTavernに取り込むための基本データ構造
+    let charData = {
+      name: '名称未設定', category: '', tags: [],
+      description: '', personality: '',
+      mes_example: '', avatarAssetId: ''
+    };
+    
+    let avatarBase64 = '';
+
+    // パターン1: ZetaTavern専用フォーマット
+    if (importObj.spec === 'zetatavern-character') {
+      charData.name = importObj.name || charData.name;
+      charData.category = importObj.category || '';
+      charData.tags = importObj.tags || [];
+      charData.description = importObj.description || '';
+      charData.personality = importObj.personality || '';
+      charData.mes_example = importObj.mes_example || '';
+      avatarBase64 = importObj.avatarBase64 || '';
+    } 
+    // パターン2: Character Card V2 / V3 フォーマット (SillyTavern, Chub等)
+    else if (importObj.spec === 'chara_card_v2' || importObj.spec === 'chara_card_v3') {
+      const data = importObj.data || {};
+      charData.name = data.name || charData.name;
+      charData.description = data.description || '';
+      
+      // V2カードの各種設定（クリエイターノートやシステムプロンプトなど）をpersonalityにまとめる
+      let combinedPersonality = data.personality || '';
+      if (data.system_prompt) combinedPersonality += `\n\n【システム設定】\n${data.system_prompt}`;
+      if (data.creator_notes) combinedPersonality += `\n\n【クリエイターノート】\n${data.creator_notes}`;
+      
+      charData.personality = combinedPersonality.trim();
+      charData.mes_example = data.mes_example || '';
+      charData.tags = data.tags || [];
+    } 
+    // パターン3: 古い V1 フォーマット (元祖 TavernAI)
+    else if (importObj.name && importObj.description !== undefined) {
+      charData.name = importObj.name;
+      charData.description = importObj.description || '';
+      charData.personality = importObj.personality || '';
+      charData.mes_example = importObj.mes_example || '';
+    } 
+    else {
+      throw new Error('キャラクターデータが見つかりませんでした。\n対応フォーマット: ZetaTavern, V2, V3, V1 JSON');
+    }
+
+    // アバター画像の復元 (ZetaTavernからのエクスポート時のみ画像がBase64で同梱されている)
+    if (avatarBase64) {
+      // db.js の base64ToBlob が必要になります
+      const blob = db.base64ToBlob(avatarBase64);
+      charData.avatarAssetId = await db.saveAsset(blob, blob.type);
+    }
+
+    // データベースに保存し、UIを更新
+    await db.saveCharacter(charData);
+    const updatedChars = await db.getCharacters();
+    updateState({ characters: updatedChars });
+    renderCharacterLibrary();
+    renderSidebar();
+    
+    alert(`キャラクター「${charData.name}」を取り込みました。\n（※画像は含まれていないため、編集画面からアバター画像を手動で設定してください）`);
+  } catch (err) { 
+    alert(`取り込みに失敗しました:\n${err.message}\n\n※正しいキャラクターカードのJSONファイルを選択してください。`); 
+  }
+}
+
+export async function showStorySettingsModal() {
+  const { currentStory } = getState();
+  if (!currentStory) return;
+
+  let modal = document.getElementById('story-settings-modal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'story-settings-modal';
+  
+  const pAvatarUrl = await getAvatarUrl(currentStory.protagonist?.avatarAssetId);
+
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0,0,0,0.5)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '3000';
+
+  modal.innerHTML = `
+    <div class="modal-content" style="background: var(--bg-card, #fff); color: var(--text-color, #fff); width: 90%; max-width: 550px; max-height: 85vh; border-radius: 8px; padding: 20px; display: flex; flex-direction: column; box-shadow: 0 4px 20px rgba(0,0,0,0.15); overflow: hidden;">
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color, #eee); padding-bottom: 10px; margin-bottom: 16px;">
+        <h3 style="margin: 0;">ストーリー設定</h3>
+        <button id="story-settings-close-btn" style="background: none; border: none; font-size: 24px; cursor: pointer; color: inherit;">&times;</button>
+      </div>
+      <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 4px;">
+        <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px;">
+          <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">主人公設定</legend>
+          <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
+            <div style="text-align: center;">
+              <div style="width: 70px; height: 70px; border-radius: 50%; overflow: hidden; border: 2px solid var(--primary-color, #4a90e2); display: flex; justify-content: center; align-items: center; background: #eee;">
+                <img id="story-p-avatar-preview" src="${pAvatarUrl}" style="display: block; width: 100%; height: 100%; object-fit: cover;" alt="Avatar">
+              </div>
+              <label for="story-p-avatar-input" style="font-size: 11px; cursor: pointer; color: var(--primary-color, #4a90e2); text-decoration: underline; display: block; margin-top: 4px;">画像を変更</label>
+              <input type="file" id="story-p-avatar-input" accept="image/*" style="display: none;">
+            </div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+              <label style="font-size: 11px; font-weight: bold;">名前</label>
+              <input type="text" id="story-p-name-input" value="${escapeHTML(currentStory.protagonist?.name || '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
+            </div>
+          </div>
+          <div id="story-p-adjust-btn-container" style="text-align: left; margin-bottom: 8px;"></div>
+          <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 8px;">
+            <label style="font-size: 11px; font-weight: bold;">詳細・性格・容姿</label>
+            <textarea id="story-p-desc-input" rows="2" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.protagonist?.description || '')}</textarea>
+          </div>
+        </fieldset>
+
+        <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px; margin-top: 12px; margin-bottom: 12px;">
+          <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">🎬 AIディレクター設定（演出傾向）</legend>
+          
+          <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;">
+            <label style="font-size: 12px; font-weight: bold;">プリセット (Preset)</label>
+            <select id="director-preset-select" style="padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; background: var(--bg-input, transparent); color: inherit;">
+              <option value="custom">⚙️ カスタム (手動調整)</option>
+              ${Object.entries(DIRECTOR_PRESETS).map(([key, p]) => `<option value="${key}">${p.label}</option>`).join('')}
+            </select>
+            <div id="director-preset-desc" style="font-size: 11px; color: var(--text-sub); min-height: 14px;"></div>
+          </div>
+
+          <div id="director-sliders-container" style="display: flex; flex-direction: column; gap: 12px;">
+            ${DIRECTOR_PARAMS.map(p => `
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold;">
+                  <span>${p.label}</span>
+                  <span id="val-${p.id}">50</span>
+                </div>
+                <input type="range" id="slider-${p.id}" class="director-slider" data-id="${p.id}" min="0" max="100" value="50">
+                <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-sub);">
+                  <span>${p.minLabel}</span><span>${p.maxLabel}</span>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </fieldset>
+
+
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
+          <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">ストーリーのタグ (カンマ区切り)</label>
+          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
+          <textarea id="story-prompt-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.storytellerPrompt || '')}</textarea>
+        </div>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; border-top: 1px solid var(--border-color, #eee); padding-top: 12px;">
+        <button id="story-settings-cancel-btn" class="secondary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">キャンセル</button>
+        <button id="story-settings-save-btn" class="primary-btn" style="padding: 6px 12px; border-radius: 4px; cursor: pointer;">設定を保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  // Auto-resize logic for settings textareas
+  const textareas = modal.querySelectorAll('textarea');
+  textareas.forEach(ta => {
+    const autoResize = () => {
+      ta.style.height = 'auto';
+      if (ta.scrollHeight > 0) ta.style.height = ta.scrollHeight + 'px';
+    };
+    ta.addEventListener('input', autoResize);
+    setTimeout(autoResize, 0);
+  });
+
+  const closeBtn = modal.querySelector('#story-settings-close-btn');
+  const cancelBtn = modal.querySelector('#story-settings-cancel-btn');
+  const saveBtn = modal.querySelector('#story-settings-save-btn');
+  const avatarInput = modal.querySelector('#story-p-avatar-input');
+  const avatarPreview = modal.querySelector('#story-p-avatar-preview');
+  const adjustBtnContainer = modal.querySelector('#story-p-adjust-btn-container');
+
+  // --- ★ AIディレクターUIの連動処理 ---
+  const presetSelect = modal.querySelector('#director-preset-select');
+  const presetDesc = modal.querySelector('#director-preset-desc');
+  const sliders = modal.querySelectorAll('.director-slider');
+  
+  // 現在の設定値を読み込む（なければデフォルトのラブコメ設定）
+  const currentSettings = currentStory.directorSettings || DIRECTOR_PRESETS.romcom_subtle.params;
+  
+  // スライダーに初期値をセット
+  sliders.forEach(slider => {
+    const id = slider.dataset.id;
+    slider.value = currentSettings[id] !== undefined ? currentSettings[id] : 50;
+    modal.querySelector(`#val-${id}`).textContent = slider.value;
+  });
+
+  // プリセットが手動でいじられているか判定してセレクトボックスを合わせる
+  const isMatchingPreset = Object.entries(DIRECTOR_PRESETS).find(([_, p]) => 
+    Object.entries(p.params).every(([key, val]) => currentSettings[key] == val)
+  );
+  if (isMatchingPreset) {
+    presetSelect.value = isMatchingPreset[0];
+    presetDesc.textContent = isMatchingPreset[1].description;
+  } else {
+    presetSelect.value = 'custom';
+    presetDesc.textContent = 'スライダーを手動で調整中...';
+  }
+
+  // スライダーを動かしたら「カスタム」に変更し、数値をリアルタイム更新
+  sliders.forEach(slider => {
+    slider.addEventListener('input', (e) => {
+      modal.querySelector(`#val-${e.target.dataset.id}`).textContent = e.target.value;
+      presetSelect.value = 'custom';
+      presetDesc.textContent = 'スライダーを手動で調整中...';
+    });
+  });
+
+  // プリセットを選んだら、スライダーの値を一斉に自動変更（スナップ）する
+  presetSelect.addEventListener('change', (e) => {
+    const presetKey = e.target.value;
+    if (presetKey === 'custom') return;
+    const pData = DIRECTOR_PRESETS[presetKey];
+    presetDesc.textContent = pData.description;
+    sliders.forEach(slider => {
+      const id = slider.dataset.id;
+      slider.value = pData.params[id];
+      modal.querySelector(`#val-${id}`).textContent = slider.value;
+    });
+  });
+
+  const closeModal = () => modal.remove();
+  closeBtn.onclick = closeModal;
+  cancelBtn.onclick = closeModal;
+
+  let newAvatarBlob = null;
+  let currentOriginalFile = null;
+
+  const adjustBtn = document.createElement('button');
+  adjustBtn.id = 'story-p-adjust-crop-btn';
+  adjustBtn.className = 'secondary-btn';
+  adjustBtn.type = 'button';
+  adjustBtn.style = "display: none; font-size: 11px; padding: 4px 8px; width: 100%; box-sizing: border-box;";
+  adjustBtn.textContent = '位置を再調整';
+  adjustBtnContainer.appendChild(adjustBtn);
+
+  avatarInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      currentOriginalFile = file; 
+      showAvatarCropModal(file, (croppedBlob) => {
+        newAvatarBlob = croppedBlob;
+        avatarPreview.src = URL.createObjectURL(croppedBlob);
+        adjustBtn.style.display = 'inline-flex'; 
+      });
+    }
+  };
+
+  adjustBtn.onclick = () => {
+    if (currentOriginalFile) {
+      showAvatarCropModal(currentOriginalFile, (croppedBlob) => {
+        newAvatarBlob = croppedBlob;
+        avatarPreview.src = URL.createObjectURL(croppedBlob);
+      });
+    }
+  };
+
+saveBtn.onclick = async () => {
+    const name = modal.querySelector('#story-p-name-input').value.trim();
+    const desc = modal.querySelector('#story-p-desc-input').value.trim();
+    const world = modal.querySelector('#story-world-input').value.trim();
+    const promptText = modal.querySelector('#story-prompt-input').value.trim();
+    const tagsText = modal.querySelector('#story-tags-input').value.trim();
+    
+    // ★ スライダーの値をごっそり取得してJSON化
+    const directorSettings = {};
+    modal.querySelectorAll('.director-slider').forEach(slider => {
+      directorSettings[slider.dataset.id] = parseInt(slider.value, 10);
+    });
+
+    try {
+      let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
+      if (newAvatarBlob) {
+        if (avatarAssetId) await db.deleteAsset(avatarAssetId);
+        avatarAssetId = await db.saveAsset(newAvatarBlob, 'image/jpeg');
+      }
+
+      currentStory.protagonist = { name: name || '主人公', description: desc, avatarAssetId: avatarAssetId };
+      currentStory.worldPrompt = world;
+      currentStory.storytellerPrompt = promptText;
+      currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
+      
+      // ★ 保存（前回のmomentumやworldToneは廃止し、これに統合）
+      currentStory.directorSettings = directorSettings;
+
+      await db.saveStory(currentStory);
+      const updatedStories = await db.getStories();
+      updateState({ stories: updatedStories });
+      closeModal();
+      renderStoryList();
+      renderSidebar();
+      renderStory();
+    } catch (err) {
+      alert(`保存に失敗しました: ${err.message}`);
+    }
+  };
+}
+
+export function applyFontSize(size) {
+  const numSize = parseFloat(size) || 15;
+  const root = document.documentElement;
+  root.style.setProperty('--chat-font-size', `${numSize}px`);
+  root.style.setProperty('--narration-font-size', `${Math.max(10, numSize - 0.5)}px`);
+  root.style.setProperty('--ui-font-size', `${Math.max(10, numSize - 2)}px`);
+}
+
+export function applyNarrationStyles(bgColor, textColor, opacityPercent) {
+  const root = document.documentElement;
+  let finalBg = bgColor || '#f3f5f8';
+  if (opacityPercent !== undefined && finalBg.startsWith('#') && finalBg.length === 7) {
+    const r = parseInt(finalBg.slice(1, 3), 16) || 243;
+    const g = parseInt(finalBg.slice(3, 5), 16) || 245;
+    const b = parseInt(finalBg.slice(5, 7), 16) || 248;
+    finalBg = `rgba(${r}, ${g}, ${b}, ${opacityPercent / 100})`;
+  }
+  root.style.setProperty('--narration-bg', finalBg);
+  root.style.setProperty('--narration-text', textColor || '#323232');
+}
+
+// ★ 追加：Google無料翻訳APIを利用した簡易翻訳機能
+window.translateAiThought = async (btnEl, msgIndex) => {
+  const container = btnEl.closest('.ai-thought-container');
+  const textEl = container.querySelector('.ai-thought-content');
+  const originalText = textEl.dataset.originalText;
+  
+  if (textEl.dataset.translated === 'true') {
+    // 既に翻訳済みの場合は元に戻す
+    textEl.textContent = originalText;
+    textEl.dataset.translated = 'false';
+    btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px;">translate</span> 翻訳する';
+    return;
+  }
+
+  btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px; animation: spin 1s linear infinite;">sync</span> 翻訳中...';
+  btnEl.disabled = true;
+
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ja&dt=t&q=${encodeURIComponent(originalText)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const translatedText = data[0].map(item => item[0]).join('');
+    
+    textEl.textContent = translatedText;
+    textEl.dataset.translated = 'true';
+    btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px;">history</span> 原文に戻す';
+  } catch (e) {
+    alert('翻訳に失敗しました。');
+    btnEl.innerHTML = '<span class="material-symbols-outlined" style="font-size: 14px;">translate</span> 翻訳する';
+  } finally {
+    btnEl.disabled = false;
+  }
+};
+
+const styleInject = document.createElement('style');
+styleInject.textContent = `
+  :root {
+    --chat-font-size: 15px;
+    --narration-font-size: 14.5px;
+    --ui-font-size: 13px;
+    --narration-bg: rgba(243, 245, 248, 0.8);
+    --narration-text: #323232;
+  }
+  .chat-speech, .novel-block, .chat-bubble p { font-size: var(--chat-font-size) !important; }
+  .narration-content, .chat-narration { font-size: var(--narration-font-size) !important; }
+  .chat-sender-name, .novel-action-badge { font-size: var(--ui-font-size) !important; }
+  .chat-narration { display: flex; justify-content: flex-start; width: 100%; box-sizing: border-box; margin: 14px 0 !important; }
+  .narration-content { padding-left: 62px !important; padding-right: 16px !important; padding-top: 8px !important; padding-bottom: 8px !important; width: 100%; max-width: 82% !important; box-sizing: border-box !important; line-height: 1.75 !important; letter-spacing: 0.03em !important; color: var(--narration-text) !important; background-color: var(--narration-bg) !important; border-left: 4px solid var(--primary-color, #4a90e2) !important; border-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.01); }
+  .narration-content p { margin: 0 !important; }
+  .chat-bubble p { line-height: 1.65 !important; margin-bottom: 8px !important; }
+  .chat-bubble p:last-child { margin-bottom: 0 !important; }
+  
+  /* メッセージアクションとラッパーのCSS設定 */
+  .message-wrapper { position: relative; width: 100%; display: flex; flex-direction: column; }
+  .message-content-container { width: 100%; }
+  .chat-message-actions { position: absolute; top: 0px; right: 8px; display: none; gap: 4px; background: var(--bg-card, #fff); padding: 4px 6px; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); border: 1px solid var(--border-color, #eee); z-index: 10; }
+  .message-wrapper:hover .chat-message-actions { display: flex; }
+  .action-icon-btn { background: none; border: none; cursor: pointer; color: var(--text-color, #333); opacity: 0.5; padding: 2px 4px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+  .action-icon-btn:hover { opacity: 1; color: var(--primary-color, #4a90e2); }
+
+  @media (min-width: 1024px) {
+    .timeline-container { max-width: 800px !important; margin: 0 auto !important; width: 100% !important; display: flex !important; flex-direction: column !important; box-sizing: border-box !important; }
+    #story-viewport { border-left: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important; border-right: 1px solid var(--border-color, rgba(128, 128, 128, 0.15)) !important; }
+  }
+  @media (max-width: 1023px) {
+    #story-viewport { padding: 12px 8px !important; }
+    .chat-message { margin-bottom: 14px !important; gap: 8px !important; }
+    .chat-avatar { width: 60px !important; height: 60px !important; }
+    .chat-bubble { padding: 10px 12px !important; max-width: 82% !important; }
+    .narration-content { padding-left: 48px !important; max-width: 95% !important; font-size: 0.95em !important; }
+    
+    /* モバイル向けアクションボタンの常時薄表示対応 */
+    .chat-message-actions { display: flex; opacity: 0.2; top: -8px; right: 0px; }
+    .message-wrapper:active .chat-message-actions, .chat-message-actions:active { opacity: 1; }
+  }
+  @media (prefers-color-scheme: dark) {
+    .chat-narration { color: rgba(225, 228, 232, 0.95) !important; background-color: rgba(30, 34, 42, 0.7) !important; border-left: 4px solid var(--primary-light, #64b5f6) !important; }
+  }
+    /* ★追加: テキストの折り返しと幅の計算を正常化する */
+  .chat-content-wrapper {
+    flex: 1;
+    min-width: 0;
+  }
+  .chat-bubble p, .narration-content, .narration-content p, .chat-speech, .chat-action {
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    line-break: loose !important;
+  }
+`;
+document.head.appendChild(styleInject);
+
+// =========================================================================
+// ロアブック画面のレンダリングと編集モーダル
+// =========================================================================
+
+// タイプ定義（ラベルとアイコン）
+const LORE_TYPE_META = {
+  character:    { label: '登場人物',       icon: 'person'        },
+  location:     { label: '場所・地域',     icon: 'location_on'   },
+  organization: { label: '組織・勢力',     icon: 'groups'        },
+  term:         { label: '用語・世界観',   icon: 'book_2'        },
+  event:        { label: '歴史・事件',     icon: 'event'         },
+  item:         { label: 'アイテム・道具', icon: 'inventory_2'   },
+};
+
+// 現在のロアブックタブモード
+let currentLorebookMode = 'world';
+
+/**
+ * ロアブック画面のメインレンダラー。
+ * @param {string|null} mode - 'world' | 'session' | null（現在のモードを維持）
+ */
+export async function renderLorebook(mode = null) {
+  if (mode !== null) currentLorebookMode = mode;
+  const container = document.getElementById('lorebook-viewport');
+  if (!container) return;
+
+  // タブUIのactive状態を更新
+  const tabWorld = document.getElementById('lorebook-tab-world');
+  const tabSession = document.getElementById('lorebook-tab-session');
+  if (tabWorld) tabWorld.classList.toggle('active', currentLorebookMode === 'world');
+  if (tabSession) tabSession.classList.toggle('active', currentLorebookMode === 'session');
+
+  // 追加ボタン・フィルターバーの表示制御
+  const addBtn = document.getElementById('lore-add-btn');
+  const filtersRow = document.getElementById('lorebook-filters-row');
+  if (currentLorebookMode === 'session') {
+    if (addBtn) addBtn.style.display = 'none';
+    if (filtersRow) filtersRow.style.display = 'none';
+    await _renderSessionLore(container);
+  } else {
+    if (addBtn) addBtn.style.display = '';
+    if (filtersRow) filtersRow.style.display = '';
+    await _renderWorldLore(container);
+  }
+}
+
+/**
+ * 作品ロア（World Lore）を階層アコーディオンでレンダリングする。
+ * フランチャイズ → ロアタイプ → 個別エントリーの階層構造。
+ */
+async function _renderWorldLore(container) {
+  const searchInput = document.getElementById('lore-search-input');
+  const filterSelect = document.getElementById('lore-filter-select');
+  const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+  const filter = filterSelect ? filterSelect.value : 'all';
+
+  const allLore = await db.getWorldLores();
+
+  // フィルタリング
+  const filtered = allLore.filter(lore => {
+    const nameMatch = lore.name && lore.name.toLowerCase().includes(query);
+    const summaryMatch = lore.content?.summary && lore.content.summary.toLowerCase().includes(query);
+    const franchiseMatch = lore.franchise && lore.franchise.toLowerCase().includes(query);
+    const searchMatch = !query || nameMatch || summaryMatch || franchiseMatch;
+
+    let statusMatch = true;
+    if (filter === 'verified') statusMatch = lore.verified === true;
+    else if (filter === 'unverified') statusMatch = lore.verified !== true;
+
+    return searchMatch && statusMatch;
+  });
+
+  container.innerHTML = '';
+
+  if (filtered.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="material-symbols-outlined">auto_stories</span>
+        <p>該当するロア設定が見つかりません</p>
+        <p style="font-size:12px;opacity:0.6;">「新規ロア追加」ボタンから登録してください。</p>
+      </div>`;
+    return;
+  }
+
+  // フランチャイズでグループ化（登録順を保ちながら出現順でソート）
+  const franchiseMap = new Map();
+  for (const lore of filtered) {
+    const key = lore.franchise || '共通';
+    if (!franchiseMap.has(key)) franchiseMap.set(key, []);
+    franchiseMap.get(key).push(lore);
+  }
+
+  // 各フランチャイズのアコーディオンセクションを生成
+  for (const [franchise, items] of franchiseMap) {
+    const section = _createFranchiseSection(franchise, items);
+    container.appendChild(section);
+  }
+}
+
+/**
+ * フランチャイズ単位のアコーディオンセクションDOMを生成する。
+ * @param {string} franchise - フランチャイズ名
+ * @param {Array} items - このフランチャイズのロアエントリー
+ */
+function _createFranchiseSection(franchise, items) {
+  // タイプ別にグループ化
+  const typeMap = new Map();
+  for (const lore of items) {
+    const t = lore.type || 'term';
+    if (!typeMap.has(t)) typeMap.set(t, []);
+    typeMap.get(t).push(lore);
+  }
+
+  // タイプグループのHTML生成
+  const typeGroupsHTML = [...typeMap.entries()].map(([type, typeItems]) => {
+    const meta = LORE_TYPE_META[type] || { label: type, icon: 'auto_stories' };
+    const rowsHTML = typeItems.map(lore => {
+      const isVerified = lore.verified === true;
+      const verifiedIcon = isVerified
+        ? `<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary-color)" title="確認済み">verified</span>`
+        : `<span class="material-symbols-outlined" style="font-size:14px;color:#ff9800" title="AI自動収集・未確認">warning</span>`;
+      const summaryText = lore.content?.summary ? escapeHTML(lore.content.summary).substring(0, 80) + (lore.content.summary.length > 80 ? '…' : '') : '—';
+      return `
+        <div class="lore-item-row" data-lore-id="${escapeHTML(lore.id)}">
+          <div class="lore-item-main">
+            ${verifiedIcon}
+            <span class="lore-item-name">${escapeHTML(lore.name)}</span>
+            <span class="lore-item-summary">${summaryText}</span>
+          </div>
+          <div class="lore-item-actions">
+            <button class="icon-btn-circle lore-edit-btn" title="編集" data-id="${escapeHTML(lore.id)}">
+              <span class="material-symbols-outlined" style="font-size:18px">edit</span>
+            </button>
+            <button class="icon-btn-circle lore-delete-btn" title="削除" data-id="${escapeHTML(lore.id)}" data-name="${escapeHTML(lore.name)}">
+              <span class="material-symbols-outlined" style="font-size:18px">delete</span>
+            </button>
+          </div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="lore-type-group">
+        <div class="lore-type-header">
+          <span class="material-symbols-outlined">${meta.icon}</span>
+          <span>${escapeHTML(meta.label)}</span>
+          <span class="lore-type-count">${typeItems.length}</span>
+        </div>
+        <div class="lore-type-items">${rowsHTML}</div>
+      </div>`;
+  }).join('');
+
+  const section = document.createElement('div');
+  section.className = 'lore-franchise-section';
+  section.innerHTML = `
+    <div class="lore-franchise-header">
+      <span class="material-symbols-outlined lore-folder-icon">folder_open</span>
+      <h3 class="lore-franchise-title">${escapeHTML(franchise)}</h3>
+      <span class="lore-franchise-count">${items.length}件</span>
+      <span class="material-symbols-outlined lore-chevron">expand_more</span>
+    </div>
+    <div class="lore-franchise-body">
+      ${typeGroupsHTML}
+    </div>`;
+
+  // アコーディオン開閉
+  section.querySelector('.lore-franchise-header').addEventListener('click', () => {
+    const isCollapsed = section.classList.toggle('collapsed');
+    const folderIcon = section.querySelector('.lore-folder-icon');
+    if (folderIcon) folderIcon.textContent = isCollapsed ? 'folder' : 'folder_open';
+  });
+
+  // 編集・削除ボタンをイベント委譲でバインド
+  section.addEventListener('click', async e => {
+    const editBtn = e.target.closest('.lore-edit-btn');
+    const deleteBtn = e.target.closest('.lore-delete-btn');
+    if (editBtn) {
+      const loreId = editBtn.dataset.id;
+      const lore = await db.getLore(loreId);
+      if (lore) showLoreEditModal(lore);
+    } else if (deleteBtn) {
+      const loreName = deleteBtn.dataset.name;
+      const loreId = deleteBtn.dataset.id;
+      if (confirm(`ロア「${loreName}」を削除しますか？`)) {
+        await db.deleteLore(loreId);
+        renderLorebook();
+      }
+    }
+  });
+
+  return section;
+}
+
+/**
+ * セッションロア（現在のストーリー固有の進行状態）をレンダリングする。
+ */
+async function _renderSessionLore(container) {
+  const { getState } = await import('./state.js');
+  const state = getState();
+  const activeStory = state.activeStory;
+
+  if (!activeStory) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="material-symbols-outlined">play_circle</span>
+        <p>アクティブなストーリーがありません</p>
+        <p style="font-size:12px;opacity:0.6;">ストーリー画面でセッションを開始してください。</p>
+      </div>`;
+    return;
+  }
+
+  const sessionLore = activeStory.session_lore || {};
+  const relationshipMemory = activeStory.relationshipMemory || {};
+
+  // キャラクター名を取得するためにDBを参照
+  const { getCharacters } = await import('./db.js');
+  const allChars = await getCharacters();
+  const charMap = Object.fromEntries(allChars.map(c => [c.characterId, c.name]));
+
+  let html = `<div class="session-lore-panel">`;
+
+  // ストーリータイトル
+  html += `
+    <div class="session-lore-story-badge">
+      <span class="material-symbols-outlined">menu_book</span>
+      <span>${escapeHTML(activeStory.title || '無題のストーリー')}</span>
+    </div>`;
+
+  // あらすじ・サマリー
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">summarize</span>
+        <h4>ストーリーの進行状況</h4>
+      </div>
+      <div class="session-lore-block-body">
+        ${sessionLore.summary
+          ? `<p style="line-height:1.7;">${escapeHTML(sessionLore.summary)}</p>`
+          : `<p style="opacity:0.5;">まだAIによる要約が生成されていません。ストーリーを進めると自動更新されます。</p>`
+        }
+      </div>
+    </div>`;
+
+  // 重要イベント
+  const keyEvents = sessionLore.key_events || [];
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">event_note</span>
+        <h4>重要フラグ・出来事 (${keyEvents.length}件)</h4>
+      </div>
+      <div class="session-lore-block-body">`;
+  if (keyEvents.length > 0) {
+    html += `<ul class="session-event-list">${keyEvents.map(e => `<li>${escapeHTML(e)}</li>`).join('')}</ul>`;
+  } else {
+    html += `<p style="opacity:0.5;">まだ記録された出来事はありません。</p>`;
+  }
+  html += `</div></div>`;
+
+  // キャラクター関係性
+  const relEntries = Object.entries(relationshipMemory);
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">favorite</span>
+        <h4>キャラクター関係・好感度 (${relEntries.length}件)</h4>
+      </div>
+      <div class="session-lore-block-body">`;
+  if (relEntries.length > 0) {
+    html += relEntries.map(([charId, rel]) => {
+      const name = charMap[charId] || charId;
+      const affinity = rel.affinity ?? 50;
+      const affinityColor = affinity >= 70 ? '#7c4dff' : affinity >= 40 ? '#2196f3' : '#f44336';
+      const notes = rel.notes || '';
+      return `
+        <div class="session-rel-row">
+          <div class="session-rel-header">
+            <span class="material-symbols-outlined" style="font-size:16px;">person</span>
+            <strong>${escapeHTML(name)}</strong>
+            <div class="session-affinity-bar-wrap">
+              <div class="session-affinity-bar" style="width:${affinity}%;background:${affinityColor};"></div>
+            </div>
+            <span class="session-affinity-value" style="color:${affinityColor};">${affinity}</span>
+          </div>
+          ${notes ? `<p class="session-rel-notes">${escapeHTML(notes)}</p>` : ''}
+        </div>`;
+    }).join('');
+  } else {
+    html += `<p style="opacity:0.5;">まだ関係性情報は記録されていません。</p>`;
+  }
+  html += `</div></div></div>`;
+
+  container.innerHTML = html;
+}
+
+export function showLoreEditModal(lore = null) {
+  let modal = document.getElementById('lore-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'lore-modal';
+  modal.className = 'modal-wrapper';
+  modal.style.zIndex = '5000';
+
+  const isEdit = !!lore;
+  const title = isEdit ? 'ロア設定の編集' : '新規ロアの作成';
+  
+  const loreName = isEdit ? lore.name : '';
+  const loreFranchise = isEdit ? lore.franchise : '';
+  const loreType = isEdit ? lore.type : 'term';
+  const loreVerified = isEdit ? lore.verified : true;
+
+  const contentSummary = isEdit ? (lore.content?.summary || '') : '';
+  const contentProfile = isEdit ? (lore.content?.profile || '') : '';
+  const contentSpeech = isEdit ? (lore.content?.speech || '') : '';
+  const contentRelationships = isEdit ? (lore.content?.relationships || '') : '';
+
+  modal.innerHTML = `
+    <div class="modal-overlay"></div>
+    <div class="modal-content" style="max-width: 600px; width: 90%;">
+      <div class="modal-header">
+        <h3>${escapeHTML(title)}</h3>
+        <button onclick="document.getElementById('lore-modal').remove()" class="icon-btn-circle">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group">
+            <label for="lore-name-input">名前/固有名詞 (必須)</label>
+            <input type="text" id="lore-name-input" placeholder="例: エミリア" value="${escapeHTML(loreName)}">
+          </div>
+          <div class="form-group">
+            <label for="lore-franchise-input">作品カテゴリ/Franchise</label>
+            <input type="text" id="lore-franchise-input" placeholder="例: Re:ゼロ" value="${escapeHTML(loreFranchise)}">
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: center;">
+          <div class="form-group">
+            <label for="lore-type-select">ロアの種類</label>
+            <select id="lore-type-select" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color, #ccc); background: var(--bg-card, #fff); color: inherit;">
+              <option value="character" ${loreType === 'character' ? 'selected' : ''}>登場人物 (character)</option>
+              <option value="location" ${loreType === 'location' ? 'selected' : ''}>場所・地域 (location)</option>
+              <option value="organization" ${loreType === 'organization' ? 'selected' : ''}>組織・勢力 (organization)</option>
+              <option value="term" ${loreType === 'term' ? 'selected' : ''}>用語・世界観 (term)</option>
+              <option value="event" ${loreType === 'event' ? 'selected' : ''}>歴史・事件 (event)</option>
+              <option value="item" ${loreType === 'item' ? 'selected' : ''}>アイテム・道具 (item)</option>
+            </select>
+          </div>
+          <div class="form-group-checkbox" style="margin-top: 16px;">
+            <input type="checkbox" id="lore-verified-checkbox" ${loreVerified ? 'checked' : ''}>
+            <label for="lore-verified-checkbox" style="cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+              <strong>確認済みにする</strong>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-summary-textarea">概要・設定要約 (summary)</label>
+          <textarea id="lore-summary-textarea" rows="3" placeholder="簡単な紹介文...">${escapeHTML(contentSummary)}</textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-profile-textarea">プロフィール詳細 (profile)</label>
+          <textarea id="lore-profile-textarea" rows="2" placeholder="容姿、性格、背景、能力など...">${escapeHTML(contentProfile)}</textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-speech-textarea">口調や話し方の特徴 (speech)</label>
+          <textarea id="lore-speech-textarea" rows="2" placeholder="口調サンプル、一人称/二人称など...">${escapeHTML(contentSpeech)}</textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="lore-relationships-textarea">人間関係・他者とのつながり (relationships)</label>
+          <textarea id="lore-relationships-textarea" rows="2" placeholder="パック、スバル等の他キャラとの関係...">${escapeHTML(contentRelationships)}</textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button onclick="document.getElementById('lore-modal').remove()" class="secondary-btn">キャンセル</button>
+        <button id="lore-save-submit-btn" class="primary-btn">保存する</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const saveBtn = modal.querySelector('#lore-save-submit-btn');
+  saveBtn.onclick = async () => {
+    const name = modal.querySelector('#lore-name-input').value.trim();
+    const franchise = modal.querySelector('#lore-franchise-input').value.trim();
+    const type = modal.querySelector('#lore-type-select').value;
+    const verified = modal.querySelector('#lore-verified-checkbox').checked;
+    
+    const summary = modal.querySelector('#lore-summary-textarea').value.trim();
+    const profile = modal.querySelector('#lore-profile-textarea').value.trim();
+    const speech = modal.querySelector('#lore-speech-textarea').value.trim();
+    const relationships = modal.querySelector('#lore-relationships-textarea').value.trim();
+
+    if (!name) {
+      alert('名前・固有名詞を入力してください。');
+      return;
+    }
+
+    const itemToSave = {
+      id: lore ? lore.id : undefined,
+      franchise: franchise || '共通',
+      type,
+      name,
+      content: {
+        summary,
+        profile,
+        speech,
+        relationships
+      },
+      source: lore ? lore.source : 'manual',
+      verified,
+      status: 'completed'
+    };
+
+    await db.saveLore(itemToSave);
+    modal.remove();
+    renderLorebook();
+  };
+}
+
