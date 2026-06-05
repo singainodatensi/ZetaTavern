@@ -14,6 +14,34 @@ async function getCharactersList() {
   }
 }
 
+function normalizeLoreKey(value) {
+  return (value || '').trim().toLowerCase();
+}
+
+function isCharacterInFranchise(character, franchise) {
+  const normalizedFranchise = normalizeLoreKey(franchise);
+  if (!normalizedFranchise) return true;
+
+  const category = normalizeLoreKey(character?.category);
+  const tags = Array.isArray(character?.tags) ? character.tags.map(normalizeLoreKey) : [];
+  if (category || tags.length > 0) {
+    return category === normalizedFranchise || tags.includes(normalizedFranchise);
+  }
+
+  // If the character has no franchise metadata, treat an exact name hit as a conflict.
+  return true;
+}
+
+function hasCharacterLoreConflict(lore, characters, franchise) {
+  const loreName = normalizeLoreKey(lore?.name);
+  if (!loreName || !Array.isArray(characters)) return false;
+
+  return characters.some(character =>
+    normalizeLoreKey(character?.name) === loreName &&
+    isCharacterInFranchise(character, franchise)
+  );
+}
+
 /**
  * Builds the comprehensive System Instruction for the Gemini API.
  * Combines storyteller rules, world prompts, protagonist info, active character roles,
@@ -21,6 +49,7 @@ async function getCharactersList() {
  */
 export async function buildSystemInstruction(story) {
   if (!story) return '';
+  const allCharacters = await getCharactersList();
 
   // ★ momentum と worldTone を取り出すように追加
   const { storytellerPrompt, worldPrompt, protagonist, sceneState, characterMemory, relationshipMemory, momentum, worldTone } = story;
@@ -184,6 +213,10 @@ export async function buildSystemInstruction(story) {
     instruction += `登録されている登場人物はいません。\n\n`;
   }
 
+  instruction += `【情報の優先順位ルール】\n`;
+  instruction += `・キャラクターライブラリに登録された人物の口調、一人称、二人称、性格、台詞例は、同名のロアブック情報より常に優先すること。\n`;
+  instruction += `・ロアブック内の人物情報は、所属、立場、背景、関係性などの補助資料として扱い、口調や演技の上書きには使わないこと。\n\n`;
+
   // 5. Active Scene States
   if (sceneState) {
     instruction += `【現在のシーン状況 (Scene State)】\n`;
@@ -268,11 +301,16 @@ export async function buildSystemInstruction(story) {
 
       for (const lore of matchedLores) {
         if (injectedCount >= MAX_LORE_ITEMS) break;
+        const hasConflict = lore.type === 'character' && hasCharacterLoreConflict(lore, allCharacters, franchise);
 
         let loreBlock = `■ ${lore.name} (${lore.type || '設定'})\n`;
         if (lore.content?.summary) loreBlock += `・概要: ${lore.content.summary}\n`;
         if (lore.content?.profile) loreBlock += `・詳細プロフィール: ${lore.content.profile}\n`;
-        if (lore.content?.speech) loreBlock += `・口調・特徴: ${lore.content.speech}\n`;
+        if (hasConflict) {
+          loreBlock += `・注記: この人物の口調・話し方・人格表現はキャラクターライブラリ設定を優先すること。\n`;
+        } else if (lore.content?.speech) {
+          loreBlock += `・口調・特徴: ${lore.content.speech}\n`;
+        }
         if (lore.content?.relationships) loreBlock += `・関係性: ${lore.content.relationships}\n`;
         loreBlock += `\n`;
 

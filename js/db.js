@@ -4,7 +4,8 @@
  */
 
 const DB_NAME = 'ZetaTavern_PWA_Unique_v1_DB'; // 他のアプリと絶対衝突しない名前に変更
-const DB_VERSION = 2;
+// Bump when adding stores/indexes so existing users receive schema upgrades.
+const DB_VERSION = 3;
 
 let dbPromise = null;
 
@@ -387,4 +388,3 @@ export async function getLoreByNameAndFranchise(name, franchise) {
     request.onerror = () => reject(request.error);
   });
 }
-

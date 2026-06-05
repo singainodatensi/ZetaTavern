@@ -60,6 +60,34 @@ async function restoreDropboxSettings(settings) {
   await loadConfigurations();
 }
 
+function normalizeLoreKey(value) {
+  return (value || '').trim().toLowerCase();
+}
+
+function isCharacterInFranchise(character, franchise) {
+  const normalizedFranchise = normalizeLoreKey(franchise);
+  if (!normalizedFranchise) return true;
+
+  const category = normalizeLoreKey(character?.category);
+  const tags = Array.isArray(character?.tags) ? character.tags.map(normalizeLoreKey) : [];
+  if (category || tags.length > 0) {
+    return category === normalizedFranchise || tags.includes(normalizedFranchise);
+  }
+
+  return true;
+}
+
+async function hasCharacterLibraryConflict(keyword, franchise) {
+  const normalizedKeyword = normalizeLoreKey(keyword);
+  if (!normalizedKeyword) return false;
+
+  const characters = await db.getCharacters();
+  return characters.some(character =>
+    normalizeLoreKey(character?.name) === normalizedKeyword &&
+    isCharacterInFranchise(character, franchise)
+  );
+}
+
 // Boot strap execution
 async function bootApp() {
   if (hasBooted) return;
@@ -1631,6 +1659,12 @@ async function executeLoreLookup(placeholder, keyword, franchise) {
   try {
     console.log(`[Lore Automatic Lookup] Starting search for [${franchise}] ${keyword}`);
     const result = await generateLoreProfileFromSearch(keyword, franchise);
+
+    if (result.type === 'character' && await hasCharacterLibraryConflict(keyword, franchise)) {
+      console.log(`[Lore Automatic Lookup] Skipped duplicate character lore for ${keyword} because character library data takes priority.`);
+      await db.deleteLore(placeholder.id);
+      return;
+    }
     
     placeholder.content = {
       summary: result.summary || '',
