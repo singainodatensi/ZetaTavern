@@ -4,10 +4,11 @@
  * handles settings/character libraries, and parses AI-generated A/B/C options.
  */
 
-import { getState, updateState, setActiveStory, updateCharacterAttendance } from './state.js';
+import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
 import { generateCharacterProfile, generateLoreProfileFromSearch } from './ai-client.js';
+import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
 export const DIRECTOR_PRESETS = {
@@ -67,6 +68,127 @@ export function clearBlobUrlCache() {
   blobUrlCache.clear();
 }
 
+function normalizeStoryImageBaseUrl(value) {
+  return (value || '').trim().replace(/\/+$/, '');
+}
+
+function normalizeStoryImageTokenPart(value) {
+  return (value || '').trim().replace(/^['"]|['"]$/g, '');
+}
+
+function hasImageFileExtension(value) {
+  return /\.[a-z0-9]{2,5}$/i.test(value || '');
+}
+
+function parseStoryImageToken(rawValue) {
+  const payload = normalizeStoryImageTokenPart(rawValue);
+  if (!payload) return null;
+
+  if (/^https?:\/\//i.test(payload)) {
+    return { raw: payload, url: payload };
+  }
+
+  const parts = payload.split('|').map(normalizeStoryImageTokenPart).filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return { raw: payload, assetName: parts[0] };
+  if (parts.length === 2) {
+    return { raw: payload, characterName: parts[0], assetName: parts[1] };
+  }
+
+  return {
+    raw: payload,
+    characterName: parts[0],
+    outfitName: parts[1],
+    assetName: parts.slice(2).join('|')
+  };
+}
+
+function parseStoryImageInstructionLine(line) {
+  const trimmed = (line || '').trim();
+  if (!trimmed) return null;
+
+  const tokenMatch = trimmed.match(/^@img:\s*(.+)$/i);
+  if (tokenMatch) {
+    return parseStoryImageToken(tokenMatch[1]);
+  }
+
+  const htmlImgMatch = trimmed.match(/^<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>$/i);
+  if (htmlImgMatch) {
+    return parseStoryImageToken(htmlImgMatch[1]);
+  }
+
+  const markdownImgMatch = trimmed.match(/^!\[[^\]]*\]\((\S+?)(?:\s+"[^"]*")?\)$/);
+  if (markdownImgMatch) {
+    return parseStoryImageToken(markdownImgMatch[1]);
+  }
+
+  return null;
+}
+
+function resolveStoryImageSpec(token, story) {
+  if (!token) return null;
+
+  if (token.url) {
+    if (!/^https?:\/\//i.test(token.url)) return null;
+    return {
+      url: token.url,
+      alt: token.characterName || token.assetName || 'story image'
+    };
+  }
+
+  const baseUrl = normalizeStoryImageBaseUrl(story?.imageBaseUrl);
+  const assetName = normalizeStoryImageTokenPart(token.assetName);
+  if (!baseUrl || !assetName) return null;
+
+  const outfitName = normalizeStoryImageTokenPart(token.outfitName || story?.imageDefaultOutfit);
+  const fileName = hasImageFileExtension(assetName) ? assetName : `${assetName}.avif`;
+  const urlParts = [baseUrl];
+  if (token.characterName) urlParts.push(encodeURIComponent(token.characterName));
+  if (outfitName) urlParts.push(encodeURIComponent(outfitName));
+  urlParts.push(encodeURIComponent(fileName));
+
+  return {
+    url: urlParts.join('/'),
+    alt: [token.characterName, outfitName, assetName].filter(Boolean).join(' ')
+  };
+}
+
+function createStoryImageElement(token, story, className = 'story-inline-image') {
+  const resolved = resolveStoryImageSpec(token, story);
+  if (!resolved?.url) return null;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = className;
+
+  const img = document.createElement('img');
+  img.src = resolved.url;
+  img.alt = resolved.alt || 'story image';
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.referrerPolicy = 'no-referrer';
+  img.onerror = () => wrapper.remove();
+
+  wrapper.appendChild(img);
+  return wrapper;
+}
+
+function stripStoryImageTokenLines(text) {
+  const tokens = [];
+  const cleanedLines = [];
+  for (const line of (text || '').split('\n')) {
+    const token = parseStoryImageInstructionLine(line);
+    if (token) {
+      if (token) tokens.push(token);
+      continue;
+    }
+    cleanedLines.push(line);
+  }
+  return {
+    cleanedText: cleanedLines.join('\n').trim(),
+    tokens
+  };
+}
+
 export function parseChoices(text) {
   if (!text) return { bodyText: '', choices: [] };
   const choices = [];
@@ -93,15 +215,23 @@ export function parseModelOutputToSegments(text) {
   const segments = [];
   let currentDialogue = null;
   let narrationBuffer = [];
+  let pendingImage = null;
+
+  const consumePendingImage = () => {
+    const image = pendingImage;
+    pendingImage = null;
+    return image;
+  };
 
   const flushNarration = () => {
     const joined = narrationBuffer.join('\n').trim();
-    if (joined) segments.push({ type: 'narration', text: joined });
+    if (joined) segments.push({ type: 'narration', text: joined, image: consumePendingImage() });
     narrationBuffer = [];
   };
 
   const flushDialogue = () => {
     if (currentDialogue && currentDialogue.lines.length > 0) {
+      if (!currentDialogue.image) currentDialogue.image = consumePendingImage();
       segments.push(currentDialogue);
     }
     currentDialogue = null;
@@ -112,12 +242,18 @@ export function parseModelOutputToSegments(text) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
+    const token = parseStoryImageInstructionLine(trimmed);
+    if (token) {
+      if (token) pendingImage = token;
+      continue;
+    }
+
     // 【環境描写】の抽出
     const envMatch = trimmed.match(/^【(.+)】$/);
     if (envMatch) {
       flushNarration();
       flushDialogue();
-      segments.push({ type: 'narration', text: `【${envMatch[1]}】` });
+      segments.push({ type: 'narration', text: `【${envMatch[1]}】`, image: consumePendingImage() });
       continue;
     }
 
@@ -126,7 +262,7 @@ export function parseModelOutputToSegments(text) {
     if (boldMatch) {
       flushNarration();
       flushDialogue();
-      segments.push({ type: 'narration', text: boldMatch[1] });
+      segments.push({ type: 'narration', text: boldMatch[1], image: consumePendingImage() });
       continue;
     }
 
@@ -138,7 +274,7 @@ export function parseModelOutputToSegments(text) {
         currentDialogue.lines.push({ kind: 'action', text: actionText });
       } else {
         flushNarration();
-        segments.push({ type: 'narration', text: `*${actionText}*` });
+        segments.push({ type: 'narration', text: `*${actionText}*`, image: consumePendingImage() });
       }
       continue;
     }
@@ -167,7 +303,7 @@ export function parseModelOutputToSegments(text) {
     if (speaker && !['ナレーター', 'システム', '背景', 'ナレーション', '環境描写', '地の文'].includes(speaker)) {
       flushNarration();
       flushDialogue();
-      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [] };
+      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [], image: consumePendingImage() };
       if (action) {
         currentDialogue.lines.push({ kind: 'action', text: action });
       }
@@ -194,6 +330,9 @@ export function parseModelOutputToSegments(text) {
 
   flushNarration();
   flushDialogue();
+  if (pendingImage) {
+    segments.push({ type: 'narration', text: '', image: consumePendingImage() });
+  }
   return segments.length > 0 ? segments : [{ type: 'narration', text: text }];
 }
 
@@ -205,15 +344,6 @@ function matchCharacterByName(speakerName, characters) {
   match = characters.find(c => c.name.includes(normalised) || normalised.includes(c.name));
   if (match) return match;
   return null;
-}
-
-export function isCharacterMatchingStory(char, story) {
-  if (!story) return false;
-  const storyTags = story.tags || [];
-  if (storyTags.length === 0) return true;
-  const charCategory = char.category || '';
-  const charTags = char.tags || [];
-  return storyTags.includes(charCategory) || charTags.some(tag => storyTags.includes(tag));
 }
 
 function getMentionQuery(textarea) {
@@ -234,9 +364,7 @@ function getMentionQuery(textarea) {
 async function getMentionCandidates(query) {
   const { currentStory } = getState();
   const characters = await db.getCharacters();
-  const storyIds = new Set((currentStory?.characters || [])
-    .filter(ref => ref.attendance !== 'absent')
-    .map(ref => ref.characterId));
+  const storyIds = getStoryCharacterIds(currentStory, characters);
   const protagonist = currentStory?.protagonist?.name
     ? [{ name: currentStory.protagonist.name, avatarAssetId: currentStory.protagonist.avatarAssetId, isProtagonist: true }]
     : [];
@@ -348,6 +476,12 @@ export async function renderStory() {
         <button id="quick-create-story-btn" class="primary-btn">新規ストーリー作成</button>
       </div>
     `;
+    const quickCreateBtn = document.getElementById('quick-create-story-btn');
+    if (quickCreateBtn) {
+      quickCreateBtn.onclick = () => {
+        window.dispatchEvent(new CustomEvent('createNewStoryRequested'));
+      };
+    }
     return;
   }
 
@@ -421,6 +555,14 @@ for (let i = 0; i < messages.length; i++) {
                 <div class="narration-content">${html}</div>
               </div>
             `;
+            if (seg.image) {
+              const contentWrapper = narEl.querySelector('.chat-content-wrapper');
+              const narrationContent = narEl.querySelector('.narration-content');
+              const imageEl = createStoryImageElement(seg.image, currentStory, 'story-inline-image story-inline-image-narration');
+              if (contentWrapper && imageEl) {
+                contentWrapper.insertBefore(imageEl, narrationContent || null);
+              }
+            }
             contentContainer.appendChild(narEl);
           } else if (seg.type === 'dialogue') {
             const protagonistName = currentStory.protagonist?.name || '主人公';
@@ -460,6 +602,11 @@ for (let i = 0; i < messages.length; i++) {
             `;
             const bubbleEl = msgEl.querySelector('.chat-bubble');
             const editBtn = msgEl.querySelector('.segment-edit-btn');
+            const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
+            if (contentWrapper && seg.image) {
+              const imageEl = createStoryImageElement(seg.image, currentStory, 'story-inline-image story-inline-image-chat');
+              if (imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
+            }
             if (bubbleEl && editBtn) {
               bubbleEl.addEventListener('mouseenter', () => editBtn.style.opacity = '1');
               bubbleEl.addEventListener('mouseleave', () => editBtn.style.opacity = '0');
@@ -473,11 +620,18 @@ for (let i = 0; i < messages.length; i++) {
         const lines = textToRender.split('\n');
         const userSegments = [];
         let currentUserBuffer = [];
+        let pendingUserImage = null;
+
+        const consumeUserImage = () => {
+          const image = pendingUserImage;
+          pendingUserImage = null;
+          return image;
+        };
 
         const flushUser = () => {
           if (currentUserBuffer.length > 0) {
             const joined = currentUserBuffer.join('\n').trim();
-            if (joined) userSegments.push({ type: 'user', text: joined });
+            if (joined) userSegments.push({ type: 'user', text: joined, image: consumeUserImage() });
             currentUserBuffer = [];
           }
         };
@@ -486,18 +640,24 @@ for (let i = 0; i < messages.length; i++) {
         const directiveRegex = /^@:\s*([^「（\(\[:：\n]+?)(?:[（\(]([^）\)]+)[）\)])?[\s:：]*(?:「([^」]*)」|(.+))?\s*$/;
 
         for (const line of lines) {
+          const token = parseStoryImageInstructionLine(line);
+          if (token) {
+            if (token) pendingUserImage = token;
+            continue;
+          }
           const match = line.match(directiveRegex);
           if (match) {
             flushUser();
             const speaker = match[1].trim();
             const action = match[2] ? match[2].trim() : null;
             const speech = (match[3] ?? match[4] ?? '').trim();
-            userSegments.push({ type: 'character', speaker, action, text: speech });
+            userSegments.push({ type: 'character', speaker, action, text: speech, image: consumeUserImage() });
           } else {
             currentUserBuffer.push(line);
           }
         }
         flushUser();
+        if (pendingUserImage) userSegments.push({ type: 'user', text: '', image: consumeUserImage() });
 
         for (const seg of userSegments) {
           if (seg.type === 'character') {
@@ -527,6 +687,12 @@ for (let i = 0; i < messages.length; i++) {
                 </div>
               </div>
             `;
+            if (seg.image) {
+              const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
+              const bubbleEl = msgEl.querySelector('.chat-bubble');
+              const imageEl = createStoryImageElement(seg.image, currentStory, 'story-inline-image story-inline-image-chat');
+              if (contentWrapper && imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
+            }
             contentContainer.appendChild(msgEl);
           } else {
             let avatarUrl = 'assets/default-silhouette.png';
@@ -547,22 +713,40 @@ for (let i = 0; i < messages.length; i++) {
                 <div class="chat-bubble">${contentHTML}</div>
               </div>
             `;
+            if (seg.image) {
+              const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
+              const bubbleEl = msgEl.querySelector('.chat-bubble');
+              const imageEl = createStoryImageElement(seg.image, currentStory, 'story-inline-image story-inline-image-chat');
+              if (contentWrapper && imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
+            }
             contentContainer.appendChild(msgEl);
           }
         }
       }
     } else {
+      const { cleanedText, tokens } = stripStoryImageTokenLines(textToRender);
       let contentHTML = window.marked && typeof window.marked.parse === 'function'
-        ? sanitizeHTML(window.marked.parse(textToRender))
-        : sanitizeHTML(textToRender.replace(/\n/g, '<br>'));
+        ? sanitizeHTML(window.marked.parse(cleanedText))
+        : sanitizeHTML(cleanedText.replace(/\n/g, '<br>'));
       const blockEl = document.createElement('div');
       blockEl.className = `novel-block ${isModel ? 'story-paragraph' : 'action-paragraph'}`;
+      if (tokens.length > 0) {
+        const imageStack = document.createElement('div');
+        imageStack.className = 'novel-inline-image-stack';
+        for (const token of tokens) {
+          const imageEl = createStoryImageElement(token, currentStory, 'story-inline-image story-inline-image-novel');
+          if (imageEl) imageStack.appendChild(imageEl);
+        }
+        if (imageStack.childElementCount > 0) blockEl.appendChild(imageStack);
+      }
+      const contentEl = document.createElement('div');
       if (!isModel) {
         const pName = currentStory.protagonist?.name || '主人公';
-        blockEl.innerHTML = `<span class="novel-action-badge">${pName}の行動</span>${contentHTML}`;
+        contentEl.innerHTML = `<span class="novel-action-badge">${pName}の行動</span>${contentHTML}`;
       } else {
-        blockEl.innerHTML = contentHTML;
+        contentEl.innerHTML = contentHTML;
       }
+      blockEl.appendChild(contentEl);
       contentContainer.appendChild(blockEl);
     }
 
@@ -926,10 +1110,14 @@ export async function renderSidebar() {
     return;
   }
 
-  const { protagonist, sceneState, characterMemory, relationshipMemory } = currentStory;
+  const { protagonist, characterMemory, relationshipMemory } = currentStory;
   const pAvatarUrl = await getAvatarUrl(protagonist?.avatarAssetId);
   const allCharacters = await db.getCharacters();
-  const characters = allCharacters.filter(char => isCharacterMatchingStory(char, currentStory));
+  const characters = getStoryScopedCharacters(allCharacters, currentStory);
+  currentStory.characters = buildStoryCharacterRefs(currentStory, allCharacters);
+  const characterScopeNote = currentStory.tags?.length
+    ? `ストーリータグ一致: ${currentStory.tags.join(', ')}`
+    : 'タグ未設定のため、登録済みキャラクターをすべて対象にしています。';
 
   let html = `
     <div class="sidebar-section">
@@ -946,29 +1134,8 @@ export async function renderSidebar() {
     </div>
 
     <div class="sidebar-section">
-      <h4>現在のシーン状況</h4>
-      <div class="scene-state-form">
-        <div class="form-row">
-          <label>現在地</label>
-          <input type="text" id="scene-location-input" value="${escapeHTML(sceneState?.location || '')}" placeholder="例: 教室、放課後">
-        </div>
-        <div class="form-row">
-          <label>時間帯</label>
-          <input type="text" id="scene-time-input" value="${escapeHTML(sceneState?.timeOfDay || '')}" placeholder="例: 夕方">
-        </div>
-        <div class="form-row">
-          <label>雰囲気</label>
-          <input type="text" id="scene-atmosphere-input" value="${escapeHTML(sceneState?.atmosphere || '')}" placeholder="例: 気まずい、賑やか">
-        </div>
-        <div class="form-row">
-          <label>直近の目的</label>
-          <input type="text" id="scene-objective-input" value="${escapeHTML(sceneState?.currentObjective || '')}" placeholder="例: 告白する、脱出する">
-        </div>
-      </div>
-    </div>
-
-    <div class="sidebar-section">
-      <h4>登場キャラクター・関係性</h4>
+      <h4>登場キャラクター・関係メモ</h4>
+      <p class="note">${escapeHTML(characterScopeNote)}</p>
       <div class="sidebar-characters-list">
   `;
 
@@ -976,8 +1143,6 @@ export async function renderSidebar() {
     html += `<p class="note">タグの一致するキャラクター、または登録されているキャラクターはいません。</p>`;
   } else {
     for (const char of characters) {
-      const charRef = currentStory.characters?.find(c => c.characterId === char.characterId);
-      const role = charRef ? charRef.attendance : 'absent';
       const avatarUrl = await getAvatarUrl(char.avatarAssetId);
       const charMem = characterMemory?.[char.characterId] || {};
       const relMem = relationshipMemory?.[char.characterId] || { affinity: 50, notes: '' };
@@ -989,15 +1154,9 @@ export async function renderSidebar() {
             <div class="char-role-name">
               <strong>${escapeHTML(char.name)}</strong>
             </div>
-            <select class="char-attendance-select" data-char-id="${char.characterId}">
-              <option value="main" ${role === 'main' ? 'selected' : ''}>主要 (Main)</option>
-              <option value="support" ${role === 'support' ? 'selected' : ''}>補助 (Support)</option>
-              <option value="background" ${role === 'background' ? 'selected' : ''}>背景 (Bg)</option>
-              <option value="absent" ${role === 'absent' ? 'selected' : ''}>不在 (Absent)</option>
-            </select>
           </div>
           
-          <div class="char-role-body ${role === 'absent' ? 'hidden' : ''}">
+          <div class="char-role-body">
             <div class="form-row-compact">
               <label>好感度 (${relMem.affinity ?? 50})</label>
               <input type="range" class="char-affinity-range" data-char-id="${char.characterId}" min="0" max="100" value="${relMem.affinity ?? 50}">
@@ -1048,17 +1207,6 @@ function bindSidebarEvents() {
 
   const pCard = document.querySelector('.sidebar-protagonist-card');
   if (pCard) pCard.onclick = () => showStorySettingsModal();
-
-  const locInput = document.getElementById('scene-location-input');
-  const timeInput = document.getElementById('scene-time-input');
-  const atmosInput = document.getElementById('scene-atmosphere-input');
-  const objInput = document.getElementById('scene-objective-input');
-  // ----------------------------------
-
-  if (locInput) locInput.oninput = (e) => { currentStory.sceneState.location = e.target.value; saveStateChanges(); };
-  if (timeInput) timeInput.oninput = (e) => { currentStory.sceneState.timeOfDay = e.target.value; saveStateChanges(); };
-  if (atmosInput) atmosInput.oninput = (e) => { currentStory.sceneState.atmosphere = e.target.value; saveStateChanges(); };
-  if (objInput) objInput.oninput = (e) => { currentStory.sceneState.currentObjective = e.target.value; saveStateChanges(); };
   const openSessionLoreBtn = document.getElementById('open-session-lore-btn');
   if (openSessionLoreBtn) {
     openSessionLoreBtn.onclick = () => {
@@ -1066,19 +1214,6 @@ function bindSidebarEvents() {
       updateState({ activeScreen: 'lorebook' });
     };
   }
-
-  document.querySelectorAll('.char-attendance-select').forEach(select => {
-    select.onchange = (e) => {
-      const charId = e.target.dataset.charId;
-      const role = e.target.value;
-      const row = e.target.closest('.sidebar-char-row');
-      const body = row.querySelector('.char-role-body');
-      if (role === 'absent') body.classList.add('hidden');
-      else body.classList.remove('hidden');
-      updateCharacterAttendance(charId, role);
-      saveStateChanges();
-    };
-  });
 
   document.querySelectorAll('.char-affinity-range').forEach(range => {
     range.oninput = (e) => {
@@ -1230,12 +1365,7 @@ export async function renderCharacterLibrary() {
   }
 
   const { currentStory } = getState();
-  const inStoryCharIds = new Set();
-  if (currentStory && currentStory.characters) {
-    currentStory.characters.forEach(c => {
-      if (c.attendance && c.attendance !== 'absent') inStoryCharIds.add(c.characterId);
-    });
-  }
+  const inStoryCharIds = getStoryCharacterIds(currentStory, characters);
 
   let filtered = characters;
   if (searchQuery) {
@@ -1767,6 +1897,14 @@ export async function showStorySettingsModal() {
           <input type="text" id="story-franchise-context-modal-input" value="${escapeHTML(currentStory.franchiseContext || '')}" placeholder="例: リゼロ / Re:ゼロから始める異世界生活" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">画像ベースURL</label>
+          <input type="text" id="story-image-base-url-modal-input" value="${escapeHTML(currentStory.imageBaseUrl || '')}" placeholder="例: https://aquamarine-torte-953693.netlify.app" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">既定衣装名</label>
+          <input type="text" id="story-image-default-outfit-modal-input" value="${escapeHTML(currentStory.imageDefaultOutfit || '')}" placeholder="例: 初期衣装" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
           <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
         </div>
@@ -1895,6 +2033,8 @@ saveBtn.onclick = async () => {
     const desc = modal.querySelector('#story-p-desc-input').value.trim();
     const franchise = modal.querySelector('#story-franchise-modal-input').value.trim();
     const franchiseContext = modal.querySelector('#story-franchise-context-modal-input').value.trim();
+    const imageBaseUrl = modal.querySelector('#story-image-base-url-modal-input').value.trim();
+    const imageDefaultOutfit = modal.querySelector('#story-image-default-outfit-modal-input').value.trim();
     const world = modal.querySelector('#story-world-input').value.trim();
     const promptText = modal.querySelector('#story-prompt-input').value.trim();
     const tagsText = modal.querySelector('#story-tags-input').value.trim();
@@ -1915,9 +2055,12 @@ saveBtn.onclick = async () => {
       currentStory.protagonist = { name: name || '主人公', description: desc, avatarAssetId: avatarAssetId };
       currentStory.franchise = franchise;
       currentStory.franchiseContext = franchiseContext;
+      currentStory.imageBaseUrl = imageBaseUrl;
+      currentStory.imageDefaultOutfit = imageDefaultOutfit;
       currentStory.worldPrompt = world;
       currentStory.storytellerPrompt = promptText;
       currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
+      currentStory.characters = buildStoryCharacterRefs(currentStory, await db.getCharacters());
       
       // ★ 保存（前回のmomentumやworldToneは廃止し、これに統合）
       currentStory.directorSettings = directorSettings;
@@ -2214,16 +2357,30 @@ async function _createLoreCandidateSection(candidates, currentStory) {
         <h3>ロア候補</h3>
         <span class="lore-candidate-count">${candidates.length}件</span>
       </div>
-      <p class="lore-candidate-help">AIが見つけた安定設定候補です。内容を見てからワールドロアへ採用できます。</p>
+      <div class="lore-candidate-toolbar">
+        <p class="lore-candidate-help">内容を見てからワールドロアへ採用できます。会話からの自動追加は停止中です。</p>
+        <button class="secondary-btn lore-candidate-clear-btn" type="button">一括却下</button>
+      </div>
     </div>
     <div class="lore-candidate-list">${rowsHtml}</div>`;
 
   section.addEventListener('click', async e => {
+    const clearBtn = e.target.closest('.lore-candidate-clear-btn');
     const enrichBtn = e.target.closest('.lore-candidate-enrich-btn');
     const acceptBtn = e.target.closest('.lore-candidate-accept-btn');
     const rejectBtn = e.target.closest('.lore-candidate-reject-btn');
-    if (!enrichBtn && !acceptBtn && !rejectBtn) return;
+    if (!clearBtn && !enrichBtn && !acceptBtn && !rejectBtn) return;
     if (!currentStory) return;
+
+    if (clearBtn) {
+      if (!confirm('ロア候補をすべて却下しますか？')) return;
+      currentStory.lore_candidates = [];
+      await db.saveStory(currentStory);
+      const stories = await db.getStories();
+      updateState({ stories });
+      await renderLorebook('world');
+      return;
+    }
 
     const candidateId = (enrichBtn || acceptBtn || rejectBtn).dataset.id;
     const allCandidates = Array.isArray(currentStory.lore_candidates) ? currentStory.lore_candidates : [];
@@ -2534,7 +2691,7 @@ export function showLoreEditModal(lore = null, options = {}) {
   const { currentStory } = getState();
   
   const loreName = isEdit ? lore.name : '';
-  const loreFranchise = isEdit ? lore.franchise : '';
+  const loreFranchise = isEdit ? lore.franchise : (currentStory?.franchise || '');
   const loreSearchContext = isEdit
     ? (lore.searchContext || currentStory?.franchiseContext || lore.franchise || '')
     : (currentStory?.franchiseContext || currentStory?.franchise || '');
@@ -2556,6 +2713,12 @@ export function showLoreEditModal(lore = null, options = {}) {
         </button>
       </div>
       <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        ${!isEdit ? `
+          <div class="lore-search-intro">
+            <span class="material-symbols-outlined">travel_explore</span>
+            <p>ロア名と作品名を入れてから「ネット検索で詳細補完」を押すと、概要と詳細の下書きを作れます。</p>
+          </div>
+        ` : ''}
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
           <div class="form-group">
             <label for="lore-name-input">名前/固有名詞 (必須)</label>
@@ -2594,7 +2757,7 @@ export function showLoreEditModal(lore = null, options = {}) {
 
         <button id="lore-ai-gen-btn" type="button" class="primary-btn" style="display:flex; align-items:center; justify-content:center; gap:6px;">
           <span class="material-symbols-outlined">travel_explore</span>
-          ネット検索で詳細補完
+          ${isEdit ? 'ネット検索で詳細補完' : '検索して下書きを作成'}
         </button>
 
         <div class="form-group">

@@ -20,7 +20,7 @@
 
   <script>
     (function () {
-      var buildVersion = '20260606z';
+      var buildVersion = '20260606af';
       var url = new URL(window.location.href);
       if (url.searchParams.get('v') !== buildVersion) {
         url.searchParams.set('v', buildVersion);
@@ -31,7 +31,7 @@
   </script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260606z" defer></script>
+  <script type="module" src="js/app.js?v=20260606af" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -190,6 +190,16 @@
                   <div class="form-group">
                     <label for="story-franchise-context-input">検索用作品名・別名 (任意)</label>
                     <input type="text" id="story-franchise-context-input" placeholder="例: リゼロ / Re:ゼロから始める異世界生活">
+                  </div>
+
+                  <div class="form-group">
+                    <label for="story-image-base-url-input">画像ベースURL (任意)</label>
+                    <input type="text" id="story-image-base-url-input" placeholder="例: https://aquamarine-torte-953693.netlify.app">
+                  </div>
+
+                  <div class="form-group">
+                    <label for="story-image-default-outfit-input">既定衣装名 (任意)</label>
+                    <input type="text" id="story-image-default-outfit-input" placeholder="例: 初期衣装">
                   </div>
 
                   <div class="form-group">

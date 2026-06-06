@@ -8,6 +8,7 @@ import * as db from './db.js';
 import * as ui from './ui.js';
 import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js';
 import * as dropbox from './dropbox.js';
+import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
 const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
@@ -680,6 +681,8 @@ function fillStorySettingsForm(story) {
   const wPrompt = document.getElementById('story-world-prompt');
   const fInput = document.getElementById('story-franchise-input');
   const fContextInput = document.getElementById('story-franchise-context-input');
+  const imageBaseUrlInput = document.getElementById('story-image-base-url-input');
+  const imageDefaultOutfitInput = document.getElementById('story-image-default-outfit-input');
   const pName = document.getElementById('protagonist-name');
   const pDesc = document.getElementById('protagonist-desc');
   const pPreview = document.getElementById('protagonist-img-preview');
@@ -689,6 +692,8 @@ function fillStorySettingsForm(story) {
     if (wPrompt) wPrompt.value = '';
     if (fInput) fInput.value = '';
     if (fContextInput) fContextInput.value = '';
+    if (imageBaseUrlInput) imageBaseUrlInput.value = '';
+    if (imageDefaultOutfitInput) imageDefaultOutfitInput.value = '';
     if (pName) pName.value = '';
     if (pDesc) pDesc.value = '';
     if (pPreview) pPreview.src = 'assets/default-silhouette.png';
@@ -699,6 +704,8 @@ function fillStorySettingsForm(story) {
   if (wPrompt) wPrompt.value = story.worldPrompt || '';
   if (fInput) fInput.value = story.franchise || '';
   if (fContextInput) fContextInput.value = story.franchiseContext || '';
+  if (imageBaseUrlInput) imageBaseUrlInput.value = story.imageBaseUrl || '';
+  if (imageDefaultOutfitInput) imageDefaultOutfitInput.value = story.imageDefaultOutfit || '';
   if (pName) pName.value = story.protagonist?.name || '';
   if (pDesc) pDesc.value = story.protagonist?.description || '';
   
@@ -887,6 +894,9 @@ async function bindEvents() {
   if (newStoryBtn) {
     newStoryBtn.onclick = () => createNewStory();
   }
+  window.addEventListener('createNewStoryRequested', () => {
+    createNewStory();
+  });
 
   // Bind action custom event (choices button click)
   window.addEventListener('submitUserAction', (e) => {
@@ -1081,6 +1091,8 @@ async function bindEvents() {
   const wPrompt = document.getElementById('story-world-prompt');
   const fInput = document.getElementById('story-franchise-input');
   const fContextInput = document.getElementById('story-franchise-context-input');
+  const imageBaseUrlInput = document.getElementById('story-image-base-url-input');
+  const imageDefaultOutfitInput = document.getElementById('story-image-default-outfit-input');
 
   const saveCurrentStoryConfig = () => {
     const { currentStory } = getState();
@@ -1089,6 +1101,8 @@ async function bindEvents() {
     currentStory.worldPrompt = wPrompt.value.trim();
     currentStory.franchise = fInput ? fInput.value.trim() : '';
     currentStory.franchiseContext = fContextInput ? fContextInput.value.trim() : '';
+    currentStory.imageBaseUrl = imageBaseUrlInput ? imageBaseUrlInput.value.trim() : '';
+    currentStory.imageDefaultOutfit = imageDefaultOutfitInput ? imageDefaultOutfitInput.value.trim() : '';
     db.saveStory(currentStory).then(async () => {
       const stories = await db.getStories();
       updateState({ stories });
@@ -1100,6 +1114,8 @@ async function bindEvents() {
   if (wPrompt) wPrompt.oninput = () => { saveCurrentStoryConfig(); triggerAutoResize(wPrompt); };
   if (fInput) fInput.oninput = () => { saveCurrentStoryConfig(); };
   if (fContextInput) fContextInput.oninput = () => { saveCurrentStoryConfig(); };
+  if (imageBaseUrlInput) imageBaseUrlInput.oninput = () => { saveCurrentStoryConfig(); };
+  if (imageDefaultOutfitInput) imageDefaultOutfitInput.oninput = () => { saveCurrentStoryConfig(); };
 
   // Protagonist Profile updates
   const pName = document.getElementById('protagonist-name');
@@ -1223,14 +1239,78 @@ async function bindEvents() {
 /**
  * Creates a new blank story in IndexedDB and activates it.
  */
+async function promptForStoryTitle(defaultValue = '新規ストーリー') {
+  return new Promise(resolve => {
+    const existing = document.getElementById('story-title-prompt-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'story-title-prompt-modal';
+    modal.style.position = 'fixed';
+    modal.style.inset = '0';
+    modal.style.background = 'rgba(0, 0, 0, 0.55)';
+    modal.style.display = 'flex';
+    modal.style.alignItems = 'center';
+    modal.style.justifyContent = 'center';
+    modal.style.zIndex = '4000';
+
+    modal.innerHTML = `
+      <div style="width:min(92vw, 420px); background: var(--bg-card, #fff); color: var(--text-color, #222); border: 1px solid var(--border-color, #ccc); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.25); padding: 18px; display:flex; flex-direction:column; gap:12px; box-sizing:border-box;">
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <h3 style="margin:0; font-size:16px;">新規ストーリー作成</h3>
+          <p style="margin:0; font-size:12px; color: var(--text-sub, #666);">タイトルを入力してください。</p>
+        </div>
+        <input id="story-title-prompt-input" type="text" value="${defaultValue.replace(/"/g, '&quot;')}" style="width:100%; padding:10px 12px; border-radius:6px; border:1px solid var(--border-color, #ccc); background: var(--bg-input, transparent); color: inherit; box-sizing:border-box;">
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+          <button id="story-title-prompt-cancel" class="secondary-btn" type="button">キャンセル</button>
+          <button id="story-title-prompt-ok" class="primary-btn" type="button">作成</button>
+        </div>
+      </div>
+    `;
+
+    const cleanup = (value) => {
+      modal.remove();
+      resolve(value);
+    };
+
+    document.body.appendChild(modal);
+
+    const input = modal.querySelector('#story-title-prompt-input');
+    const okBtn = modal.querySelector('#story-title-prompt-ok');
+    const cancelBtn = modal.querySelector('#story-title-prompt-cancel');
+
+    okBtn.onclick = () => cleanup((input.value || '').trim() || defaultValue);
+    cancelBtn.onclick = () => cleanup(null);
+    modal.onclick = (e) => {
+      if (e.target === modal) cleanup(null);
+    };
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        okBtn.click();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        cancelBtn.click();
+      }
+    };
+
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  });
+}
+
 async function createNewStory() {
-  const storyTitle = prompt('新しいストーリーのタイトルを入力してください:', '新規ストーリー');
+  const storyTitle = await promptForStoryTitle('新規ストーリー');
   if (storyTitle === null) return;
 
   const newStory = {
     title: storyTitle || '無題のストーリー',
     franchise: '', // ★作品タグ（原作検索・ロア用）
     franchiseContext: '',
+    imageBaseUrl: '',
+    imageDefaultOutfit: '',
     storytellerPrompt: '', // ★デフォルトの長い指示はコアに移動したため空でOK
     worldPrompt: DEFAULT_WORLD_PROMPT,
     tags: [],
@@ -1250,17 +1330,10 @@ async function createNewStory() {
       },
       {
         role: 'model',
-        content: `新しい物語が始まりました。主人公の名前は「主人公」です。\n右側の設定パネルから、世界設定や主人公の詳細、登場人物の追加・役割の設定を行ってください。\n\nメッセージを入力するか、または送信してストーリーを開始してください。`,
+        content: `新しい物語が始まりました。主人公の名前は「主人公」です。\n右側の設定パネルから、世界設定や主人公の詳細、登場人物の登録を確認してください。\n\nメッセージを入力するか、または送信してストーリーを開始してください。`,
         timestamp: Date.now()
       }
     ],
-    sceneState: {
-      location: '学校',
-      timeOfDay: '昼下がり',
-      atmosphere: '穏やか',
-      summary: '新しい始まり。',
-      currentObjective: '周りの様子を伺う'
-    },
     characterMemory: {},
     relationshipMemory: {},
     lore_candidates: []
@@ -1270,12 +1343,9 @@ async function createNewStory() {
     const storyId = await db.saveStory(newStory);
     newStory.storyId = storyId;
 
-    // Load active characters list to initialize attendance as absent
+    // 現在のタグ条件に一致するキャラクターを、このストーリーの管理対象として初期化
     const charactersList = await db.getCharacters();
-    newStory.characters = charactersList.map(c => ({
-      characterId: c.characterId,
-      attendance: 'absent'
-    }));
+    newStory.characters = buildStoryCharacterRefs(newStory, charactersList);
     await db.saveStory(newStory);
 
     // Refresh stories lists
@@ -1360,7 +1430,6 @@ async function submitStoryTurn(mode = 'normal') {
       timestamp: Date.now()
     });
 
-    await queueLoreCandidatesFromRecentTurn(currentStory);
     await db.saveStory(currentStory);
 
     // バックグラウンド検索はコストが高いため、明示的に有効化された場合のみ実行する
@@ -2138,12 +2207,6 @@ function extractKeywordsForLore(story) {
     textSource.push(msgs[i].content || '');
     textSource.push(msgs[i].aiContent || '');
   }
-  if (story.sceneState) {
-    textSource.push(story.sceneState.location || '');
-    textSource.push(story.sceneState.currentObjective || '');
-    textSource.push(story.sceneState.summary || '');
-  }
-
   const combinedText = textSource.join('\n');
   const matchesKatakana = combinedText.match(/[\u30A0-\u30FF\u30FC・]{2,24}/g) || [];
   const matchesKanji = combinedText.match(/[\u4E00-\u9FAF]{2,10}/g) || [];

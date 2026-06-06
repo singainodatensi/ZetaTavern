@@ -5,6 +5,7 @@
 
 import { getState, updateState } from './state.js'; // ★ updateState のインポートを追加
 import { getCharacter, getLoreByNameAndFranchise, saveLore, getCharacters } from './db.js';
+import { getStoryScopedCharacters } from './story-characters.js';
 
 async function getCharactersList() {
   try {
@@ -359,15 +360,15 @@ async function applyWorldLoreUpdate(args, story) {
 
 /**
  * Builds the comprehensive System Instruction for the Gemini API.
- * Combines storyteller rules, world prompts, protagonist info, active character roles,
- * active scene states, short-term memories, and relationships.
+ * Combines storyteller rules, world prompts, protagonist info, scoped characters,
+ * short-term memories, and relationships.
  */
 export async function buildSystemInstruction(story) {
   if (!story) return '';
   const allCharacters = await getCharactersList();
 
   // ★ momentum と worldTone を取り出すように追加
-  const { storytellerPrompt, worldPrompt, protagonist, sceneState, characterMemory, relationshipMemory, momentum, worldTone } = story;
+  const { storytellerPrompt, worldPrompt, protagonist, characterMemory, relationshipMemory, momentum, worldTone } = story;
   const showChoices = getState().showChoices;
 
   // 1. Core Role and Instructions (固定のエンジン哲学)
@@ -378,6 +379,17 @@ export async function buildSystemInstruction(story) {
   instruction += `【出力形式（厳守・最優先）】\n`;
   instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。メタな思考過程や英語は一切出力しない。\n`;
   instruction += `- 執筆ルールの文字数目安に従い、本文を十分な長さで書く。\n\n`;
+
+  if ((story.imageBaseUrl || '').trim()) {
+    instruction += `【画像表示トークンのルール】\n`;
+    instruction += `- 画像を表示したい本文の直前に、制御行として \`@img:キャラクター名|衣装名|ファイル名\` を1行だけ出力できます。\n`;
+    instruction += `- 例: \`@img:四葉|初期衣装|表情微笑\`\n`;
+    if ((story.imageDefaultOutfit || '').trim()) {
+      instruction += `- 衣装名を省略したい場合は既定衣装「${story.imageDefaultOutfit}」が使われますが、可能な限り明示してください。\n`;
+    }
+    instruction += `- ファイル名に拡張子がない場合は .avif として扱われます。\n`;
+    instruction += `- 画像トークンは本文ではなく表示用の制御行です。許可されたキャラクター・衣装・表情だけを使い、分からない場合は出力しないでください。\n\n`;
+  }
 
   instruction += `【重要：チャットUI表示のための記述フォーマット】\n`;
   instruction += `UI側で発言者と描写を分離して吹き出し描画を行うため、物語本文は以下の「台本形式」の記法ルールを**絶対に厳守**してください。\n`;
@@ -498,29 +510,16 @@ export async function buildSystemInstruction(story) {
     instruction += `\n`;
   }
 
-  // 4. Character Attendance / Specifications
+  // 4. Character roster / specifications
   instruction += `【登場人物・キャラクター設定】\n`;
-  if (story.characters && story.characters.length > 0) {
-    for (const charRef of story.characters) {
-      const { characterId, attendance } = charRef;
-      if (attendance === 'absent') continue; // Skip absent characters completely
-
-      const char = await getCharacter(characterId);
-      if (!char) continue;
-
-      if (attendance === 'main') {
-        instruction += `■ ${char.name} (主要人物 - このシーンのメインキャラクター)\n`;
-        instruction += `・詳細設定・容姿: ${char.description || '特になし'}\n`;
-        instruction += `・性格・特徴: ${char.personality || '特になし'}\n`;
-        if (char.mes_example) {
-          instruction += `・台詞・口調サンプル:\n${char.mes_example}\n`;
-        }
-      } else if (attendance === 'support') {
-        instruction += `■ ${char.name} (補助人物 - 会話や行動に参加する脇役)\n`;
-        instruction += `・設定と性格の要約: ${char.description?.substring(0, 300) || '特になし'}\n`;
-        instruction += `・性格・口調の特徴: ${char.personality || '特になし'}\n`;
-      } else if (attendance === 'background') {
-        instruction += `■ ${char.name} (背景人物 - その場に居合わせるが、積極的には発言・行動しない)\n`;
+  const scopedCharacters = getStoryScopedCharacters(allCharacters, story);
+  if (scopedCharacters.length > 0) {
+    for (const char of scopedCharacters) {
+      instruction += `■ ${char.name}\n`;
+      instruction += `・詳細設定・容姿: ${char.description || '特になし'}\n`;
+      instruction += `・性格・特徴: ${char.personality || '特になし'}\n`;
+      if (char.mes_example) {
+        instruction += `・台詞・口調サンプル:\n${char.mes_example}\n`;
       }
       instruction += `\n`;
     }
@@ -532,22 +531,13 @@ export async function buildSystemInstruction(story) {
   instruction += `・キャラクターライブラリに登録された人物の口調、一人称、二人称、性格、台詞例は、同名のロアブック情報より常に優先すること。\n`;
   instruction += `・ロアブック内の人物情報は、所属、立場、背景、関係性などの補助資料として扱い、口調や演技の上書きには使わないこと。\n\n`;
 
-  // 5. Active Scene States
-  if (sceneState) {
-    instruction += `【現在のシーン状況 (Scene State)】\n`;
-    instruction += `・現在地: ${sceneState.location || '不明'}\n`;
-    instruction += `・時間帯: ${sceneState.timeOfDay || '不明'}\n`;
-    instruction += `・雰囲気: ${sceneState.atmosphere || '不明'}\n`;
-    instruction += `・直近の目的: ${sceneState.currentObjective || 'なし'}\n\n`;
-  }
-
-  // 6. Dynamic Memories (Short-term states & Relationships)
+  // 5. Dynamic memories (short-term states & relationships)
   let memoryStr = '';
   if (characterMemory && typeof characterMemory === 'object') {
     for (const [charId, mem] of Object.entries(characterMemory)) {
       const char = await getCharacter(charId);
       if (!char || !mem) continue;
-      memoryStr += `・${char.name}の状況: ${mem.status || '特になし'}, 短期目標: ${mem.shortTermGoal || 'なし'}, 位置: ${mem.location || 'シーン現在地'}\n`;
+      memoryStr += `・${char.name}の状況: ${mem.status || '特になし'}, 短期目標: ${mem.shortTermGoal || 'なし'}, 位置: ${mem.location || '未設定'}\n`;
       if (mem.notes) {
         memoryStr += `  (メモ: ${mem.notes})\n`;
       }
@@ -677,12 +667,6 @@ function extractKeywordsForLore(story) {
   const startIdx = Math.max(0, msgs.length - 2);
   for (let i = startIdx; i < msgs.length; i++) {
     textSource.push(msgs[i].content);
-  }
-
-  // シーン情報も追加
-  if (story.sceneState) {
-    textSource.push(story.sceneState.location || '');
-    textSource.push(story.sceneState.currentObjective || '');
   }
 
   const combinedText = textSource.join('\n');
