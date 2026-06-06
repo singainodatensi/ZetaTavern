@@ -35,7 +35,7 @@ function getDB() {
         db.createObjectStore('characters', { keyPath: 'characterId' });
       }
 
-      // Stories Store: { storyId: string, title: string, storytellerPrompt: string, worldPrompt: string, protagonist: Object, characters: Array, messages: Array, sceneState: Object, characterMemory: Object, relationshipMemory: Object, timestamp: number }
+      // Stories Store: { storyId: string, title: string, storytellerPrompt: string, worldPrompt: string, protagonist: Object, characters: Array, messages: Array, characterMemory: Object, relationshipMemory: Object, timestamp: number }
       if (!db.objectStoreNames.contains('stories')) {
         db.createObjectStore('stories', { keyPath: 'storyId' });
       }

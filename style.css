@@ -897,6 +897,42 @@ body {
   padding-bottom: 6px;
 }
 
+.sidebar-session-link-section {
+  padding-top: 4px;
+}
+
+.sidebar-session-link-copy {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-sub);
+}
+
+.sidebar-session-link-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.sidebar-session-link-btn:hover {
+  background: rgba(124, 77, 255, 0.08);
+  border-color: rgba(124, 77, 255, 0.35);
+}
+
+.sidebar-session-link-btn .material-symbols-outlined {
+  font-size: 18px;
+}
+
 /* Protagonist Mini Card */
 .sidebar-protagonist-card {
   display: flex;
@@ -1051,14 +1087,17 @@ body {
   font-size: 13px;
 }
 
-.char-attendance-select {
-  padding: 2px 6px;
+.char-active-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
-  background: var(--bg-input);
-  border-radius: 4px;
-  color: var(--text-main);
-  border: 1px solid var(--color-border);
-  outline: none;
+  color: var(--text-sub);
+}
+
+.char-active-checkbox {
+  margin: 0;
+  accent-color: var(--primary-color);
 }
 
 .char-role-body {
@@ -2263,6 +2302,49 @@ body {
   min-width: 0;
 }
 
+.lore-status-chip,
+.lore-source-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.lore-status-verified {
+  background: rgba(16, 185, 129, 0.16);
+  color: #7df0c1;
+}
+
+.lore-status-unverified {
+  background: rgba(245, 158, 11, 0.16);
+  color: #ffd37a;
+}
+
+.lore-status-pending {
+  background: rgba(59, 130, 246, 0.16);
+  color: #9ecbff;
+}
+
+.lore-status-failed {
+  background: rgba(239, 68, 68, 0.16);
+  color: #ff9d9d;
+}
+
+.lore-source-chip {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-sub);
+}
+
+.lore-source-ai {
+  background: rgba(124, 77, 255, 0.14);
+  color: #cab4ff;
+}
+
 .lore-item-actions {
   display: flex;
   gap: 4px;
@@ -2327,6 +2409,34 @@ body {
   color: var(--text-sub);
 }
 
+.session-lore-textarea,
+.session-lore-input {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+.session-lore-textarea {
+  resize: vertical;
+  line-height: 1.7;
+  min-height: 120px;
+}
+
+.session-lore-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.session-lore-actions .sidebar-session-link-btn {
+  width: auto;
+  min-width: 132px;
+}
+
 .session-event-list {
   list-style: none;
   display: flex;
@@ -2337,7 +2447,7 @@ body {
 .session-event-list li {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
   line-height: 1.6;
 }
 
@@ -2347,6 +2457,48 @@ body {
   font-size: 10px;
   margin-top: 4px;
   flex-shrink: 0;
+}
+
+.session-event-text {
+  flex: 1;
+}
+
+.session-event-delete-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.session-event-delete-btn:hover {
+  color: var(--danger, #f06292);
+}
+
+.session-event-delete-btn .material-symbols-outlined {
+  font-size: 16px;
+}
+
+.session-lore-add-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.session-lore-add-row .session-lore-input {
+  flex: 1;
+}
+
+.session-lore-add-row .sidebar-session-link-btn {
+  width: auto;
+  min-width: 92px;
+  padding: 0 14px;
 }
 
 /* Relationship / Affinity rows */
@@ -2403,4 +2555,125 @@ body {
   margin-top: 4px;
   margin-left: 24px;
   line-height: 1.5;
+}
+
+.lore-candidate-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.lore-candidate-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lore-candidate-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lore-candidate-heading h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-main);
+}
+
+.lore-candidate-count,
+.lore-candidate-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(124, 77, 255, 0.12);
+  color: var(--primary);
+  font-size: 12px;
+}
+
+.lore-candidate-help {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
+.lore-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lore-candidate-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: rgba(124, 77, 255, 0.04);
+}
+
+.lore-candidate-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.lore-candidate-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.lore-candidate-icon {
+  font-size: 18px;
+  color: var(--primary);
+}
+
+.lore-candidate-summary {
+  margin: 0;
+  line-height: 1.6;
+  color: var(--text-sub);
+  word-break: break-word;
+}
+
+.lore-candidate-profile-preview {
+  margin: 8px 0 0;
+  line-height: 1.6;
+  color: var(--text-muted);
+  word-break: break-word;
+  font-size: 12px;
+}
+
+.lore-candidate-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 768px) {
+  .lore-candidate-row {
+    flex-direction: column;
+  }
+
+  .lore-candidate-actions {
+    width: 100%;
+  }
+
+  .lore-candidate-actions .sidebar-session-link-btn,
+  .lore-candidate-actions .secondary-btn {
+    flex: 1 1 0;
+    justify-content: center;
+  }
 }

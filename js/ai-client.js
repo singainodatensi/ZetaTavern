@@ -42,6 +42,321 @@ function hasCharacterLoreConflict(lore, characters, franchise) {
   );
 }
 
+function selectSearchCapableModel(modelName) {
+  const requested = (modelName || '').trim();
+  if (!requested) return 'gemini-2.5-flash';
+
+  const normalized = requested.toLowerCase();
+  if (normalized.includes('gemini')) {
+    return requested;
+  }
+
+  return 'gemini-2.5-flash';
+}
+
+function normalizeLoreType(type) {
+  const allowed = new Set(['character', 'location', 'organization', 'term', 'event', 'item']);
+  return allowed.has(type) ? type : 'term';
+}
+
+function hasJapaneseText(value) {
+  return /[\u3040-\u30ff\u4e00-\u9faf々ー]/.test(value || '');
+}
+
+function isMostlyJapaneseLabel(value) {
+  return /^[\u3040-\u30ff\u4e00-\u9faf々ー・\s]+$/.test((value || '').trim());
+}
+
+export function normalizeLoreEntryName(name) {
+  const raw = (name || '').trim();
+  if (!raw) return '';
+
+  const candidates = new Set([raw]);
+  const parenMatches = raw.matchAll(/[\(（]([^\)）]+)[\)）]/g);
+  for (const match of parenMatches) {
+    candidates.add((match[1] || '').trim());
+  }
+
+  raw.split(/[\/|｜:,：]/).forEach(part => candidates.add((part || '').trim()));
+  const withoutParens = raw.replace(/\s*[\(（][^\)）]+[\)）]\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  if (withoutParens) candidates.add(withoutParens);
+
+  const cleaned = [...candidates]
+    .map(value => value.replace(/^[\s"'「『・]+|[\s"'」』・]+$/g, '').trim())
+    .map(value => value.replace(/という(?:特例|制度|存在|立場|仕組み|概念).*$/u, '').trim())
+    .map(value => value.replace(/の(?:特例|制度|存在|立場|仕組み|概念)$/u, '').trim())
+    .filter(Boolean);
+
+  const japaneseOnly = cleaned.filter(isMostlyJapaneseLabel);
+  if (japaneseOnly.length > 0) {
+    return japaneseOnly.sort((a, b) => a.length - b.length)[0];
+  }
+
+  const japaneseMixed = cleaned.filter(hasJapaneseText);
+  if (japaneseMixed.length > 0) {
+    return japaneseMixed.sort((a, b) => a.length - b.length)[0];
+  }
+
+  return raw;
+}
+
+const GENERIC_WORLD_LORE_NAMES = new Set([
+  '放課後', '学校', '教室', '廊下', '校舎', '部屋', '自宅', '街', '町', '都市', '世界',
+  '一日', '今日', '明日', '昨日', '時間', '朝', '昼', '夜', '夕方',
+  '勉強', '会話', '行動', '反応', '気持ち', '感情', '雰囲気', '状況', '関係',
+  '生命体', '知的生命体', '人間', '少女', '少年', '男子', '女子', '生徒', '先生',
+  'アクセサリー', 'スマホ', 'バッグ', 'ノート', 'イベント', 'フラグ', 'メモ',
+  'アイテム', '解呪アイテム', '魔法アイテム', '道具', '武器',
+  'カテゴリー', 'カテゴリ', '多様性', 'テーブル', 'フォーク',
+  '金', '物資', '情報', '金・物資・情報', 'タイミング'
+]);
+
+const WORLD_LORE_NAME_SUFFIX_HINTS = [
+  '高校', '学園', '学院', '学校', '大学', '寮', '邸', '屋敷', '城', '宮',
+  '王国', '帝国', '連邦', '共和国', '公国', '領', '都', '市', '町', '村',
+  '家', '組', '団', '隊', '軍', '教', '教会', '商会', '会社', '部',
+  '陣営', '騎士団', '魔法', '加護', '魔女', '試験', '選', '編'
+];
+
+const WORLD_LORE_NAME_PART_HINTS = [
+  '魔女教', '王選', '屋敷', '学園', '高校', '学院', '商会', '騎士団', '寮',
+  'マンション', 'アパート', 'ホテル', 'カフェ', '喫茶', '神殿', '聖域'
+];
+
+const WORLD_LORE_TERM_HINTS = [
+  '呪い', '加護', '権能', '精霊術', '魔法', '魔鉱石', '福音書', '祝福'
+];
+
+const WORLD_LORE_BLOCKED_PATTERNS = [
+  /以上$/, /以下$/, /未満$/, /以外$/, /ごと$/, /達$/, /たち$/, /ら$/,
+  /頑張$/, /普通$/, /みたい$/, /っぽい$/, /的$/, /用$/, /向け$/
+];
+
+export function isLikelyWorldLoreName(name, type = 'term') {
+  const value = normalizeLoreEntryName(name).replace(/\s+/g, '');
+  if (!value || value.length < 2) return false;
+  if (/^[0-9０-９]+$/.test(value)) return false;
+  if (/^[A-Za-z][A-Za-z0-9 _-]*$/.test(value)) return false;
+  if (GENERIC_WORLD_LORE_NAMES.has(value)) return false;
+  if (WORLD_LORE_BLOCKED_PATTERNS.some(pattern => pattern.test(value))) return false;
+
+  const katakanaOnly = /^[\u30A0-\u30FFー・]+$/.test(value);
+  const kanjiOnly = /^[\u4E00-\u9FAF々]+$/.test(value);
+  const hasJapanese = hasJapaneseText(value);
+  const hasHint =
+    WORLD_LORE_NAME_SUFFIX_HINTS.some(suffix => value.endsWith(suffix)) ||
+    WORLD_LORE_NAME_PART_HINTS.some(part => value.includes(part));
+  const isKnownTerm = WORLD_LORE_TERM_HINTS.includes(value);
+
+  if (type === 'character') {
+    return hasJapanese && !GENERIC_WORLD_LORE_NAMES.has(value);
+  }
+
+  if (isKnownTerm) return true;
+  if (hasHint) return true;
+  if (katakanaOnly) return value.length >= 3;
+  if (kanjiOnly) return value.length >= 2 && value.length <= 4;
+  if (hasJapanese && /[・=＝]/.test(value)) return true;
+
+  return false;
+}
+
+const SESSION_SPECIFIC_WORLD_LORE_PATTERNS = [
+  /オリジナルキャラクター|オリキャラ/i,
+  /このセッション|セッション限定|今回限り|今回だけ/i,
+  /即興|臨時|仮設|一時的/i,
+  /主人公(?:との|に対する|用の|専用|が|は)/,
+  /ユーザー(?:との|が|は)/,
+  /好感度|関係性メモ/i,
+  /今日|さっき|先ほど|今この場|その場で/i,
+  /ここで出会/i,
+  /新しく(?:作った|設立した|結成した|雇った|名乗った)/i,
+  /現在(?:の|は)?(?:拠点|同行|所属|状況)/i
+];
+
+function isSessionSpecificLoreText(text) {
+  const value = (text || '').trim();
+  if (!value) return false;
+  return SESSION_SPECIFIC_WORLD_LORE_PATTERNS.some(pattern => pattern.test(value));
+}
+
+function buildSessionLoreNote(entry, name, summary) {
+  const type = normalizeLoreType((entry?.type || '').trim());
+  const details = (entry?.details || '').trim();
+  const prefix = type === 'character' ? 'オリジナルキャラクター' : 'セッション設定';
+  return details
+    ? `${prefix}: ${name} - ${summary} / ${details}`
+    : `${prefix}: ${name} - ${summary}`;
+}
+
+function isSameLoreCandidate(candidate, franchise, type, name) {
+  return normalizeLoreKey(candidate?.franchise) === normalizeLoreKey(franchise) &&
+    normalizeLoreType(candidate?.type || '') === type &&
+    normalizeLoreKey(candidate?.name) === normalizeLoreKey(name);
+}
+
+function shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch) {
+  const type = normalizeLoreType((entry?.type || '').trim());
+  const combined = [
+    entry?.name,
+    entry?.summary,
+    entry?.details,
+    entry?.speech,
+    entry?.relationships
+  ].filter(Boolean).join(' ');
+
+  if (type === 'character' && !characterMatch && !existing) {
+    return true;
+  }
+
+  if (!existing && isSessionSpecificLoreText(combined)) {
+    return true;
+  }
+
+  return false;
+}
+
+function resolveStoryFranchise(story, characters = []) {
+  const direct = (story?.franchise || '').trim();
+  if (direct) return direct;
+
+  const firstStoryTag = Array.isArray(story?.tags)
+    ? story.tags.map(tag => (tag || '').trim()).find(Boolean)
+    : '';
+  if (firstStoryTag) return firstStoryTag;
+
+  const attachedIds = new Set((story?.characters || []).map(ref => ref.characterId));
+  const counts = new Map();
+  for (const character of characters) {
+    if (!attachedIds.has(character.characterId)) continue;
+    const values = [];
+    if (character.category) values.push(character.category);
+    if (Array.isArray(character.tags)) values.push(...character.tags);
+    for (const rawValue of values) {
+      const value = (rawValue || '').trim();
+      if (!value) continue;
+      counts.set(value, (counts.get(value) || 0) + 1);
+    }
+  }
+
+  let best = '';
+  let bestCount = 0;
+  for (const [value, count] of counts.entries()) {
+    if (count > bestCount) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+async function applySessionLoreUpdate(args, story) {
+  if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
+  if (args.summary) story.session_lore.summary = args.summary;
+  if (args.key_events) {
+    story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), ...args.key_events]));
+  }
+  if (args.affinity_updates) {
+    if (!story.relationshipMemory) story.relationshipMemory = {};
+    const characters = await getCharactersList();
+    for (const update of args.affinity_updates) {
+      const charMatch = characters.find(c => c.name === update.characterName);
+      if (charMatch) {
+        story.relationshipMemory[charMatch.characterId] = {
+          affinity: update.affinity,
+          notes: update.notes || ''
+        };
+      }
+    }
+  }
+}
+
+async function applyWorldLoreUpdate(args, story) {
+  const entries = Array.isArray(args?.entries) ? args.entries : [];
+  if (entries.length === 0) return { queuedCount: 0, reroutedCount: 0 };
+
+  const characters = await getCharactersList();
+  const franchise = resolveStoryFranchise(story, characters);
+  if (!franchise) return { queuedCount: 0, reroutedCount: 0 };
+
+  if (!Array.isArray(story.lore_candidates)) story.lore_candidates = [];
+
+  let queuedCount = 0;
+  let reroutedCount = 0;
+  for (const entry of entries) {
+    const name = normalizeLoreEntryName(entry?.name);
+    const summary = (entry?.summary || '').trim();
+    if (!name || !summary) continue;
+
+    const type = normalizeLoreType((entry?.type || '').trim());
+    const existing = await getLoreByNameAndFranchise(name, franchise);
+    const characterMatch = characters.find(c => normalizeLoreKey(c.name) === normalizeLoreKey(name));
+
+    if (!existing && !isLikelyWorldLoreName(name, type)) {
+      if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
+        if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
+        const sessionNote = buildSessionLoreNote(entry, name, summary);
+        story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), sessionNote]));
+        reroutedCount++;
+      }
+      continue;
+    }
+
+    if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
+      if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
+      const sessionNote = buildSessionLoreNote(entry, name, summary);
+      story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), sessionNote]));
+      reroutedCount++;
+      continue;
+    }
+
+    if (type === 'character' && hasCharacterLoreConflict({ name }, characters, franchise)) {
+      continue;
+    }
+    if (existing?.verified === true) {
+      continue;
+    }
+
+    if (existing) {
+      continue;
+    }
+
+    const candidate = {
+      id: crypto.randomUUID(),
+      franchise,
+      type,
+      name,
+      content: {
+        summary,
+        profile: (entry?.details || '').trim(),
+        speech: (entry?.speech || '').trim(),
+        relationships: (entry?.relationships || '').trim()
+      },
+      source: 'story-derived',
+      createdAt: Date.now()
+    };
+
+    const existingCandidateIndex = story.lore_candidates.findIndex(item =>
+      isSameLoreCandidate(item, franchise, type, name)
+    );
+
+    if (existingCandidateIndex >= 0) {
+      story.lore_candidates[existingCandidateIndex] = {
+        ...story.lore_candidates[existingCandidateIndex],
+        ...candidate,
+        id: story.lore_candidates[existingCandidateIndex].id,
+        createdAt: story.lore_candidates[existingCandidateIndex].createdAt || candidate.createdAt,
+        updatedAt: Date.now()
+      };
+    } else {
+      story.lore_candidates.push(candidate);
+    }
+    queuedCount++;
+  }
+
+  return { queuedCount, reroutedCount };
+}
+
 /**
  * Builds the comprehensive System Instruction for the Gemini API.
  * Combines storyteller rules, world prompts, protagonist info, active character roles,
@@ -268,6 +583,17 @@ export async function buildSystemInstruction(story) {
     }
     instruction += `\n`;
   }
+
+  instruction += `【ロア分類ルール】\n`;
+  instruction += `- セッションロア: このセッションで起きた出来事、現在の進行状況、主人公との関係変化、今回の行動でのみ意味を持つ情報。\n`;
+  instruction += `- セッションで新しく生まれたオリジナルキャラクター、今回限りの役職、即興の設定はセッションロア側に入れること。\n`;
+  instruction += `- ワールドロア: 作品世界で安定している固有設定。地名、学校名、組織名、家名、居住地、制度、陣営、用語、世界のルールなど。\n`;
+  instruction += `- ワールドロアの名称は日本語の代表表記で登録すること。英語併記や括弧つき併記はしないこと。例: Protection(加護) ではなく 加護。\n`;
+  instruction += `- 一時的な出来事や関係の変動をワールドロアへ入れないこと。\n`;
+  instruction += `- 逆に、作品全体で共有される安定設定をセッションロアの要点として消費しないこと。\n\n`;
+  instruction += `- 大きな出来事、関係性の変化、新規オリジナル人物の登場があったターンでは、本文を書く前に update_session_lore を優先して呼ぶこと。\n`;
+  instruction += `- update_world_lore は安定設定だけに使い、セッション情報の代用にしないこと。\n`;
+  instruction += `- update_world_lore は「確定登録」ではなく「ワールドロア候補の提案」として扱われる。安定設定だと強く判断できるものだけを提案すること。\n\n`;
 
   // ==========================================
   // RAG: 固有名詞の抽出とロアブックの注入
@@ -548,7 +874,7 @@ export async function generateStoryResponse(story) {
       tools.push({
         functionDeclarations: [{
           name: 'update_session_lore',
-          description: 'ストーリーの進行や現在の状況に応じて、登場人物の関係性や重要な出来事・記憶（セッションロア）を追記・更新します。',
+          description: 'このセッション固有の進行記録を更新します。現在の状況、進行中のイベント、主人公との関係変化、今回の行動でのみ意味を持つ出来事、セッションで新しく生まれたオリジナルキャラクターや即興設定だけを記録してください。地名・組織名・作品世界の安定設定はここに入れません。',
           parameters: {
             type: 'OBJECT',
             properties: {
@@ -575,6 +901,35 @@ export async function generateStoryResponse(story) {
                 items: { type: 'STRING' }
               }
             }
+          }
+        }]
+      });
+
+      tools.push({
+        functionDeclarations: [{
+          name: 'update_world_lore',
+          description: '作品世界で安定している設定をワールドロア候補として提案します。地名、学校名、組織名、家名、居住地、制度、世界ルール、陣営、固有用語など、セッションをまたいでも有効な情報だけを扱います。名称は日本語の代表表記だけを使い、英語併記や括弧つき併記は避けてください。',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              entries: {
+                type: 'ARRAY',
+                description: '安定設定として保存したいワールドロア項目の一覧。',
+                items: {
+                  type: 'OBJECT',
+                  properties: {
+                    name: { type: 'STRING', description: 'ロア項目名。例: 旭高校、ペンタゴン、王選、集英組' },
+                    type: { type: 'STRING', description: 'character, location, organization, term, event, item のいずれか。' },
+                    summary: { type: 'STRING', description: '一言で分かる概要。短く具体的に。' },
+                    details: { type: 'STRING', description: '必要なら補足説明。任意。' },
+                    speech: { type: 'STRING', description: '人物や組織の口調・特徴など。任意。' },
+                    relationships: { type: 'STRING', description: '他項目との恒常的な関係。任意。' }
+                  },
+                  required: ['name', 'type', 'summary']
+                }
+              }
+            },
+            required: ['entries']
           }
         }]
       });
@@ -606,65 +961,72 @@ export async function generateStoryResponse(story) {
         const result = await response.json();
 
         // Function Calling (update_session_lore) の呼び出し判定・実行
-        const call = result?.candidates?.[0]?.content?.parts?.find(p => p.functionCall);
-        if (call && call.functionCall.name === 'update_session_lore') {
+        const calls = result?.candidates?.[0]?.content?.parts?.filter(p => p.functionCall) || [];
+        if (calls.length > 0) {
           try {
-            const args = call.functionCall.args || {};
-            console.log('[Function Call: update_session_lore]', args);
+            const functionResponses = [];
+            let storyChanged = false;
 
-            if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
-            if (args.summary) story.session_lore.summary = args.summary;
-            if (args.key_events) {
-              story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), ...args.key_events]));
-            }
-            if (args.affinity_updates) {
-              if (!story.relationshipMemory) story.relationshipMemory = {};
-              const characters = await getCharactersList();
-              for (const update of args.affinity_updates) {
-                const charMatch = characters.find(c => c.name === update.characterName);
-                if (charMatch) {
-                  story.relationshipMemory[charMatch.characterId] = {
-                    affinity: update.affinity,
-                    notes: update.notes || ''
-                  };
-                }
-              }
-            }
+            for (const call of calls) {
+              const name = call.functionCall.name;
+              const args = call.functionCall.args || {};
+              console.log(`[Function Call: ${name}]`, args);
 
-            // バックグラウンドでセーブを実行
-            import('./db.js').then(async db => {
-              await db.saveStory(story);
-              if (typeof window !== 'undefined' && window.dispatchEvent) {
-                setTimeout(() => {
-                  const sidebarTab = document.getElementById('story-sidebar');
-                  if (sidebarTab) {
-                    import('./ui.js').then(ui => ui.renderSidebar());
+              if (name === 'update_session_lore') {
+                await applySessionLoreUpdate(args, story);
+                storyChanged = true;
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    response: { result: 'success' }
                   }
-                }, 100);
+                });
+              } else if (name === 'update_world_lore') {
+                const worldLoreResult = await applyWorldLoreUpdate(args, story);
+                if (worldLoreResult.reroutedCount > 0 || worldLoreResult.queuedCount > 0) {
+                  storyChanged = true;
+                }
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    response: {
+                      result: 'success',
+                      queuedCount: worldLoreResult.queuedCount,
+                      reroutedCount: worldLoreResult.reroutedCount
+                    }
+                  }
+                });
               }
-            });
-          } catch (fcErr) {
-            console.warn('[Function Call] Failed to execute update_session_lore:', fcErr);
-          }
+            }
 
-          // ★重要：テキストも一緒に返してきたか確認
-          const tmpExtracted = extractStoryTextAndThoughtFromApiResponse(result);
-          if (tmpExtracted.text) {
-             extracted = tmpExtracted;
-             break; // テキストがあればループ終了
-          } else {
-             // テキストがない（関数実行要求のみ）場合、結果を積んで再リクエスト
-             currentContents.push(result.candidates[0].content); // AIの関数呼び出し履歴を追加
-             currentContents.push({
-               role: 'user',
-               parts: [{
-                 functionResponse: {
-                   name: call.functionCall.name,
-                   response: { result: "success" } // AIに「保存成功したから本文書いて」と伝える
-                 }
-               }]
-             });
-             continue; // ループしてもう一度APIを叩く
+            if (storyChanged) {
+              import('./db.js').then(async db => {
+                await db.saveStory(story);
+                if (typeof window !== 'undefined' && window.dispatchEvent) {
+                  setTimeout(() => {
+                    const sidebarTab = document.getElementById('story-sidebar');
+                    if (sidebarTab) {
+                      import('./ui.js').then(ui => ui.renderSidebar());
+                    }
+                  }, 100);
+                }
+              });
+            }
+
+            const tmpExtracted = extractStoryTextAndThoughtFromApiResponse(result);
+            if (tmpExtracted.text) {
+               extracted = tmpExtracted;
+               break;
+            } else {
+               currentContents.push(result.candidates[0].content);
+               currentContents.push({
+                 role: 'user',
+                 parts: functionResponses
+               });
+               continue;
+            }
+          } catch (fcErr) {
+            console.warn('[Function Call] Failed to execute lore update:', fcErr);
           }
         }
 
@@ -782,7 +1144,11 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
 \`\`\`
 `;
 
-  const modelName = appState.modelName || 'gemini-2.5-flash';
+  const requestedModelName = appState.modelName || 'gemini-2.5-flash';
+  const modelName = selectSearchCapableModel(requestedModelName);
+  if (modelName !== requestedModelName) {
+    console.log(`[Lore Search] Switched model from ${requestedModelName} to ${modelName} for googleSearch support.`);
+  }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
   // 検索用のツールをONにし、JSON生成のため少しだけ温度を低め(0.7)に設定
@@ -846,23 +1212,37 @@ export async function generateLoreProfileFromSearch(name, franchise) {
 対象作品・コンテキスト: ${franchise}
 
 このワードについてGoogle検索を用いて原作の正確な設定情報を収集し、ZetaTavernロアブック用の構造化データを作成してください。
+検索時は必ず「対象ワード」と「対象作品・コンテキスト」を組み合わせ、どの作品の何を調べるかを明確にしてください。
 安易な捏造や無関係な作品の別単語との混同を避け、正確な原作知識を要約してください。
+検索で原作の安定設定として確認できない場合、あるいはこのワードがセッション限定の出来事・オリジナルキャラクター・即興設定だと判断した場合は、登録しないでください。
+普通名詞や一般語は登録禁止です。時間帯、日常行動、抽象概念、汎用アイテム名などは除外してください。
 
 出力は以下のJSONフォーマット（Markdownの \`\`\`json ... \`\`\` コードブロックで囲む）で返してください。
 
 \`\`\`json
 {
+  "shouldRegister": true,
+  "canonicalName": "加護",
   "type": "character", // character, location, organization, term, event, item のいずれか一つ
   "summary": "【概要・設定要約】100文字〜200文字程度の簡単な紹介・定義文。",
   "profile": "【プロフィール詳細】外見、性格、戦闘能力、役割などの詳細な設定テキスト。",
   "speech": "【口調や特徴】セリフや話し方の傾向、一人称/二人称、特徴的な口癖など（もしあれば記載、なければ空欄）。",
-  "relationships": "【人間関係・他者とのつながり】原作における他の主要キャラクターたちとのつながりや関係性（もしあれば記載、なければ空欄）。"
+  "relationships": "【人間関係・他者とのつながり】原作における他の主要キャラクターたちとのつながりや関係性（もしあれば記載、なければ空欄）。",
+  "reason": ""
 }
 \`\`\`
+
+ルール:
+- canonicalName には日本語の代表表記だけを書くこと。英語名や括弧つき併記は禁止。
+- 原作上の安定設定として確認できない場合は shouldRegister を false にし、summary 等は空欄で reason に理由を書くこと。
+- セッション固有情報やオリジナルキャラクターを原作設定として捏造してはいけません。
+- 次のような一般語は shouldRegister を false にしてください: 放課後, アクセサリー, 知的生命体, 勉強, 会話。
+- 検索対象が曖昧なら、対象作品・コンテキストを優先して判定してください。例: 「白鯨」だけでなく「Re:ゼロから始める異世界生活 の 白鯨」として扱うこと。
 `;
 
   const modelName = appState.modelName || 'gemini-2.5-flash';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  const searchModelName = selectSearchCapableModel(modelName);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${searchModelName}:generateContent?key=${apiKey}`;
   const generationConfig = { temperature: 0.5, topP: 0.9, maxOutputTokens: 4096 };
 
   const response = await fetch(url, {
@@ -899,5 +1279,14 @@ export async function generateLoreProfileFromSearch(name, franchise) {
     throw new Error('AIが正しいJSON形式で出力しませんでした。');
   }
 
-  return parsed;
+  return {
+    shouldRegister: parsed.shouldRegister !== false,
+    canonicalName: normalizeLoreEntryName(parsed.canonicalName || name),
+    type: normalizeLoreType((parsed.type || '').trim()),
+    summary: (parsed.summary || '').trim(),
+    profile: (parsed.profile || '').trim(),
+    speech: (parsed.speech || '').trim(),
+    relationships: (parsed.relationships || '').trim(),
+    reason: (parsed.reason || '').trim()
+  };
 }

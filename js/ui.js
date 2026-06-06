@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory, updateCharacterAttendance } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile } from './ai-client.js';
+import { generateCharacterProfile, generateLoreProfileFromSearch } from './ai-client.js';
 
 // ====== AIディレクタープリセットデータ ======
 export const DIRECTOR_PRESETS = {
@@ -1017,28 +1017,16 @@ export async function renderSidebar() {
   }
 
   html += `</div></div>`;
-
-  // セッションロア (Session Lore) をサイドバーの最下部に表示
-  const sessionLore = currentStory.session_lore || { summary: '', key_events: [] };
-  const eventListHTML = (sessionLore.key_events || []).map(ev => `<li>${escapeHTML(ev)}</li>`).join('');
   html += `
-    <div class="sidebar-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--border-color, #eee);">
-      <h4 style="display: flex; align-items: center; gap: 4px;">
-        <span class="material-symbols-outlined" style="font-size: 18px;">history_edu</span>
-        セッション記録・記憶
-      </h4>
-      <div class="scene-state-form">
-        <div class="form-group" style="margin-bottom: 8px;">
-          <label style="font-size: 11px;">ストーリーあらすじ / 関係性要約</label>
-          <textarea id="session-lore-summary-input" rows="3" style="width: 100%; font-size: 12px; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; background: var(--bg-card, #fff); color: inherit; resize: vertical;" placeholder="AIの状況整理やあらすじがここに記録されます...">${escapeHTML(sessionLore.summary || '')}</textarea>
-        </div>
-        <div class="form-group">
-          <label style="font-size: 11px;">獲得した主要フラグ / キーイベント</label>
-          <ul id="session-lore-events" style="margin: 4px 0 0 0; padding-left: 18px; font-size: 12px; line-height: 1.5; color: var(--text-color);">
-            ${eventListHTML || '<li style="color: var(--text-sub); list-style: none; margin-left:-18px;">記録されたイベントはありません</li>'}
-          </ul>
-        </div>
+    <div class="sidebar-section sidebar-session-link-section">
+      <h4>セッションロア</h4>
+      <div class="sidebar-session-link-copy">
+        進行状況や重要イベントはロアブックの「セッションロア」に集約しました。
       </div>
+      <button id="open-session-lore-btn" class="sidebar-session-link-btn" type="button">
+        <span class="material-symbols-outlined">history_edu</span>
+        <span>セッションロアを開く</span>
+      </button>
     </div>
   `;
 
@@ -1065,19 +1053,17 @@ function bindSidebarEvents() {
   const timeInput = document.getElementById('scene-time-input');
   const atmosInput = document.getElementById('scene-atmosphere-input');
   const objInput = document.getElementById('scene-objective-input');
-  const sessionSummaryInput = document.getElementById('session-lore-summary-input');
-
   // ----------------------------------
 
   if (locInput) locInput.oninput = (e) => { currentStory.sceneState.location = e.target.value; saveStateChanges(); };
   if (timeInput) timeInput.oninput = (e) => { currentStory.sceneState.timeOfDay = e.target.value; saveStateChanges(); };
   if (atmosInput) atmosInput.oninput = (e) => { currentStory.sceneState.atmosphere = e.target.value; saveStateChanges(); };
   if (objInput) objInput.oninput = (e) => { currentStory.sceneState.currentObjective = e.target.value; saveStateChanges(); };
-  if (sessionSummaryInput) {
-    sessionSummaryInput.oninput = (e) => {
-      if (!currentStory.session_lore) currentStory.session_lore = { summary: '', key_events: [] };
-      currentStory.session_lore.summary = e.target.value;
-      saveStateChanges();
+  const openSessionLoreBtn = document.getElementById('open-session-lore-btn');
+  if (openSessionLoreBtn) {
+    openSessionLoreBtn.onclick = () => {
+      renderLorebook('session');
+      updateState({ activeScreen: 'lorebook' });
     };
   }
 
@@ -1773,6 +1759,14 @@ export async function showStorySettingsModal() {
 
 
         <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">作品名タグ (Franchise)</label>
+          <input type="text" id="story-franchise-modal-input" value="${escapeHTML(currentStory.franchise || '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-weight: bold; font-size: 13px;">検索用作品名・別名</label>
+          <input type="text" id="story-franchise-context-modal-input" value="${escapeHTML(currentStory.franchiseContext || '')}" placeholder="例: リゼロ / Re:ゼロから始める異世界生活" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
           <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
         </div>
@@ -1899,6 +1893,8 @@ export async function showStorySettingsModal() {
 saveBtn.onclick = async () => {
     const name = modal.querySelector('#story-p-name-input').value.trim();
     const desc = modal.querySelector('#story-p-desc-input').value.trim();
+    const franchise = modal.querySelector('#story-franchise-modal-input').value.trim();
+    const franchiseContext = modal.querySelector('#story-franchise-context-modal-input').value.trim();
     const world = modal.querySelector('#story-world-input').value.trim();
     const promptText = modal.querySelector('#story-prompt-input').value.trim();
     const tagsText = modal.querySelector('#story-tags-input').value.trim();
@@ -1917,6 +1913,8 @@ saveBtn.onclick = async () => {
       }
 
       currentStory.protagonist = { name: name || '主人公', description: desc, avatarAssetId: avatarAssetId };
+      currentStory.franchise = franchise;
+      currentStory.franchiseContext = franchiseContext;
       currentStory.worldPrompt = world;
       currentStory.storytellerPrompt = promptText;
       currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
@@ -2065,6 +2063,7 @@ const LORE_TYPE_META = {
 
 // 現在のロアブックタブモード
 let currentLorebookMode = 'world';
+let lorebookRenderVersion = 0;
 
 /**
  * ロアブック画面のメインレンダラー。
@@ -2072,6 +2071,7 @@ let currentLorebookMode = 'world';
  */
 export async function renderLorebook(mode = null) {
   if (mode !== null) currentLorebookMode = mode;
+  const renderVersion = ++lorebookRenderVersion;
   const container = document.getElementById('lorebook-viewport');
   if (!container) return;
 
@@ -2087,11 +2087,11 @@ export async function renderLorebook(mode = null) {
   if (currentLorebookMode === 'session') {
     if (addBtn) addBtn.style.display = 'none';
     if (filtersRow) filtersRow.style.display = 'none';
-    await _renderSessionLore(container);
+    await _renderSessionLore(container, renderVersion);
   } else {
     if (addBtn) addBtn.style.display = '';
     if (filtersRow) filtersRow.style.display = '';
-    await _renderWorldLore(container);
+    await _renderWorldLore(container, renderVersion);
   }
 }
 
@@ -2099,13 +2099,23 @@ export async function renderLorebook(mode = null) {
  * 作品ロア（World Lore）を階層アコーディオンでレンダリングする。
  * フランチャイズ → ロアタイプ → 個別エントリーの階層構造。
  */
-async function _renderWorldLore(container) {
+async function _renderWorldLore(container, renderVersion = 0) {
   const searchInput = document.getElementById('lore-search-input');
   const filterSelect = document.getElementById('lore-filter-select');
   const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
   const filter = filterSelect ? filterSelect.value : 'all';
+  const { currentStory } = getState();
 
   const allLore = await db.getWorldLores();
+  if (renderVersion !== lorebookRenderVersion) return;
+  const loreCandidates = Array.isArray(currentStory?.lore_candidates)
+    ? currentStory.lore_candidates.filter(candidate => {
+      const nameMatch = candidate.name && candidate.name.toLowerCase().includes(query);
+      const summaryMatch = candidate.content?.summary && candidate.content.summary.toLowerCase().includes(query);
+      const franchiseMatch = candidate.franchise && candidate.franchise.toLowerCase().includes(query);
+      return !query || nameMatch || summaryMatch || franchiseMatch;
+    })
+    : [];
 
   // フィルタリング
   const filtered = allLore.filter(lore => {
@@ -2123,13 +2133,28 @@ async function _renderWorldLore(container) {
 
   container.innerHTML = '';
 
+  if (loreCandidates.length > 0) {
+    container.appendChild(await _createLoreCandidateSection(loreCandidates, currentStory));
+  }
+
   if (filtered.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <span class="material-symbols-outlined">auto_stories</span>
-        <p>該当するロア設定が見つかりません</p>
-        <p style="font-size:12px;opacity:0.6;">「新規ロア追加」ボタンから登録してください。</p>
-      </div>`;
+    if (renderVersion !== lorebookRenderVersion) return;
+    if (loreCandidates.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <span class="material-symbols-outlined">auto_stories</span>
+          <p>該当するロア設定が見つかりません</p>
+          <p style="font-size:12px;opacity:0.6;">「新規ロア追加」ボタンから登録してください。</p>
+        </div>`;
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'empty-state';
+      empty.innerHTML = `
+        <span class="material-symbols-outlined">inventory_2</span>
+        <p>登録済みのワールドロアはまだありません</p>
+        <p style="font-size:12px;opacity:0.6;">上の候補から採用するとここに追加されます。</p>`;
+      container.appendChild(empty);
+    }
     return;
   }
 
@@ -2143,9 +2168,98 @@ async function _renderWorldLore(container) {
 
   // 各フランチャイズのアコーディオンセクションを生成
   for (const [franchise, items] of franchiseMap) {
+    if (renderVersion !== lorebookRenderVersion) return;
     const section = _createFranchiseSection(franchise, items);
     container.appendChild(section);
   }
+}
+
+async function _createLoreCandidateSection(candidates, currentStory) {
+  const section = document.createElement('div');
+  section.className = 'lore-candidate-section';
+
+  const rowsHtml = candidates.map(candidate => {
+    const meta = LORE_TYPE_META[candidate.type] || { label: candidate.type || '候補', icon: 'lightbulb' };
+    return `
+      <div class="lore-candidate-row" data-candidate-id="${escapeHTML(candidate.id)}">
+        <div class="lore-candidate-main">
+          <div class="lore-candidate-title-row">
+            <span class="material-symbols-outlined lore-candidate-icon">${meta.icon}</span>
+            <strong>${escapeHTML(candidate.name)}</strong>
+            <span class="lore-candidate-chip">${escapeHTML(meta.label)}</span>
+            <span class="lore-candidate-chip">${escapeHTML(candidate.franchise || '共通')}</span>
+          </div>
+          <p class="lore-candidate-summary">${escapeHTML(candidate.content?.summary || '候補の要約はありません。')}</p>
+          ${candidate.content?.profile ? `<p class="lore-candidate-profile-preview">${escapeHTML(candidate.content.profile)}</p>` : ''}
+        </div>
+        <div class="lore-candidate-actions">
+          <button class="secondary-btn lore-candidate-enrich-btn" type="button" data-id="${escapeHTML(candidate.id)}">
+            詳細化
+          </button>
+          <button class="sidebar-session-link-btn lore-candidate-accept-btn" type="button" data-id="${escapeHTML(candidate.id)}">
+            <span class="material-symbols-outlined">check</span>
+            <span>採用</span>
+          </button>
+          <button class="secondary-btn lore-candidate-reject-btn" type="button" data-id="${escapeHTML(candidate.id)}">
+            却下
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+
+  section.innerHTML = `
+    <div class="lore-candidate-header">
+      <div class="lore-candidate-heading">
+        <span class="material-symbols-outlined">lightbulb</span>
+        <h3>ロア候補</h3>
+        <span class="lore-candidate-count">${candidates.length}件</span>
+      </div>
+      <p class="lore-candidate-help">AIが見つけた安定設定候補です。内容を見てからワールドロアへ採用できます。</p>
+    </div>
+    <div class="lore-candidate-list">${rowsHtml}</div>`;
+
+  section.addEventListener('click', async e => {
+    const enrichBtn = e.target.closest('.lore-candidate-enrich-btn');
+    const acceptBtn = e.target.closest('.lore-candidate-accept-btn');
+    const rejectBtn = e.target.closest('.lore-candidate-reject-btn');
+    if (!enrichBtn && !acceptBtn && !rejectBtn) return;
+    if (!currentStory) return;
+
+    const candidateId = (enrichBtn || acceptBtn || rejectBtn).dataset.id;
+    const allCandidates = Array.isArray(currentStory.lore_candidates) ? currentStory.lore_candidates : [];
+    const candidate = allCandidates.find(item => item.id === candidateId);
+    if (!candidate) return;
+
+    if (enrichBtn) {
+      showLoreEditModal(candidate, { fromCandidate: true });
+      return;
+    }
+
+    if (acceptBtn) {
+      await db.saveLore({
+        franchise: candidate.franchise || '共通',
+        type: candidate.type || 'term',
+        name: candidate.name,
+        content: {
+          summary: candidate.content?.summary || '',
+          profile: candidate.content?.profile || '',
+          speech: candidate.content?.speech || '',
+          relationships: candidate.content?.relationships || ''
+        },
+        source: candidate.source || 'story-derived',
+        verified: false,
+        status: 'completed'
+      });
+    }
+
+    currentStory.lore_candidates = allCandidates.filter(item => item.id !== candidateId);
+    await db.saveStory(currentStory);
+    const stories = await db.getStories();
+    updateState({ stories });
+    await renderLorebook('world');
+  });
+
+  return section;
 }
 
 /**
@@ -2244,10 +2358,10 @@ function _createFranchiseSection(franchise, items) {
 /**
  * セッションロア（現在のストーリー固有の進行状態）をレンダリングする。
  */
-async function _renderSessionLore(container) {
+async function _renderSessionLore(container, renderVersion = 0) {
   const { getState } = await import('./state.js');
   const state = getState();
-  const activeStory = state.activeStory;
+  const activeStory = state.currentStory;
 
   if (!activeStory) {
     container.innerHTML = `
@@ -2265,6 +2379,7 @@ async function _renderSessionLore(container) {
   // キャラクター名を取得するためにDBを参照
   const { getCharacters } = await import('./db.js');
   const allChars = await getCharacters();
+  if (renderVersion !== lorebookRenderVersion) return;
   const charMap = Object.fromEntries(allChars.map(c => [c.characterId, c.name]));
 
   let html = `<div class="session-lore-panel">`;
@@ -2284,10 +2399,13 @@ async function _renderSessionLore(container) {
         <h4>ストーリーの進行状況</h4>
       </div>
       <div class="session-lore-block-body">
-        ${sessionLore.summary
-          ? `<p style="line-height:1.7;">${escapeHTML(sessionLore.summary)}</p>`
-          : `<p style="opacity:0.5;">まだAIによる要約が生成されていません。ストーリーを進めると自動更新されます。</p>`
-        }
+        <textarea id="session-lore-editor-summary" class="session-lore-textarea" rows="6" placeholder="AIの要約や、手動で整理したい進行メモをここにまとめられます。">${escapeHTML(sessionLore.summary || '')}</textarea>
+        <div class="session-lore-actions">
+          <button id="session-lore-save-summary-btn" class="sidebar-session-link-btn" type="button">
+            <span class="material-symbols-outlined">save</span>
+            <span>要約を保存</span>
+          </button>
+        </div>
       </div>
     </div>`;
 
@@ -2301,11 +2419,27 @@ async function _renderSessionLore(container) {
       </div>
       <div class="session-lore-block-body">`;
   if (keyEvents.length > 0) {
-    html += `<ul class="session-event-list">${keyEvents.map(e => `<li>${escapeHTML(e)}</li>`).join('')}</ul>`;
+    html += `<ul class="session-event-list">${keyEvents.map((e, index) => `
+      <li>
+        <span class="session-event-text">${escapeHTML(e)}</span>
+        <button class="session-event-delete-btn" type="button" data-index="${index}" title="イベントを削除">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </li>
+    `).join('')}</ul>`;
   } else {
     html += `<p style="opacity:0.5;">まだ記録された出来事はありません。</p>`;
   }
-  html += `</div></div>`;
+  html += `
+        <div class="session-lore-add-row">
+          <input id="session-lore-new-event-input" class="session-lore-input" type="text" placeholder="重要イベントや獲得フラグを追加">
+          <button id="session-lore-add-event-btn" class="sidebar-session-link-btn" type="button">
+            <span class="material-symbols-outlined">add</span>
+            <span>追加</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
 
   // キャラクター関係性
   const relEntries = Object.entries(relationshipMemory);
@@ -2340,10 +2474,53 @@ async function _renderSessionLore(container) {
   }
   html += `</div></div></div>`;
 
+  if (renderVersion !== lorebookRenderVersion) return;
   container.innerHTML = html;
+
+  const persistSessionLoreChanges = async () => {
+    await db.saveStory(activeStory);
+    const stories = await db.getStories();
+    updateState({ stories });
+  };
+
+  const summaryInput = container.querySelector('#session-lore-editor-summary');
+  const saveSummaryBtn = container.querySelector('#session-lore-save-summary-btn');
+  if (saveSummaryBtn && summaryInput) {
+    saveSummaryBtn.onclick = async () => {
+      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', key_events: [] };
+      activeStory.session_lore.summary = summaryInput.value.trim();
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  }
+
+  const newEventInput = container.querySelector('#session-lore-new-event-input');
+  const addEventBtn = container.querySelector('#session-lore-add-event-btn');
+  if (addEventBtn && newEventInput) {
+    addEventBtn.onclick = async () => {
+      const value = newEventInput.value.trim();
+      if (!value) return;
+      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', key_events: [] };
+      const existingEvents = Array.isArray(activeStory.session_lore.key_events) ? activeStory.session_lore.key_events : [];
+      activeStory.session_lore.key_events = Array.from(new Set([...existingEvents, value]));
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  }
+
+  container.querySelectorAll('.session-event-delete-btn').forEach(button => {
+    button.onclick = async () => {
+      const index = Number(button.dataset.index);
+      if (!Number.isInteger(index) || index < 0) return;
+      if (!activeStory.session_lore || !Array.isArray(activeStory.session_lore.key_events)) return;
+      activeStory.session_lore.key_events.splice(index, 1);
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  });
 }
 
-export function showLoreEditModal(lore = null) {
+export function showLoreEditModal(lore = null, options = {}) {
   let modal = document.getElementById('lore-modal');
   if (modal) modal.remove();
 
@@ -2354,9 +2531,13 @@ export function showLoreEditModal(lore = null) {
 
   const isEdit = !!lore;
   const title = isEdit ? 'ロア設定の編集' : '新規ロアの作成';
+  const { currentStory } = getState();
   
   const loreName = isEdit ? lore.name : '';
   const loreFranchise = isEdit ? lore.franchise : '';
+  const loreSearchContext = isEdit
+    ? (lore.searchContext || currentStory?.franchiseContext || lore.franchise || '')
+    : (currentStory?.franchiseContext || currentStory?.franchise || '');
   const loreType = isEdit ? lore.type : 'term';
   const loreVerified = isEdit ? lore.verified : true;
 
@@ -2386,6 +2567,11 @@ export function showLoreEditModal(lore = null) {
           </div>
         </div>
 
+        <div class="form-group">
+          <label for="lore-search-context-input">検索用作品名・別名</label>
+          <input type="text" id="lore-search-context-input" placeholder="例: リゼロ / Re:ゼロから始める異世界生活" value="${escapeHTML(loreSearchContext)}">
+        </div>
+
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: center;">
           <div class="form-group">
             <label for="lore-type-select">ロアの種類</label>
@@ -2405,6 +2591,11 @@ export function showLoreEditModal(lore = null) {
             </label>
           </div>
         </div>
+
+        <button id="lore-ai-gen-btn" type="button" class="primary-btn" style="display:flex; align-items:center; justify-content:center; gap:6px;">
+          <span class="material-symbols-outlined">travel_explore</span>
+          ネット検索で詳細補完
+        </button>
 
         <div class="form-group">
           <label for="lore-summary-textarea">概要・設定要約 (summary)</label>
@@ -2434,10 +2625,59 @@ export function showLoreEditModal(lore = null) {
   `;
   document.body.appendChild(modal);
 
+  const enrichBtn = modal.querySelector('#lore-ai-gen-btn');
+  if (enrichBtn) {
+    enrichBtn.onclick = async () => {
+      const name = modal.querySelector('#lore-name-input').value.trim();
+      const franchise = modal.querySelector('#lore-franchise-input').value.trim();
+      const searchContext = modal.querySelector('#lore-search-context-input').value.trim();
+      if (!name) {
+        alert('先にロア名を入力してください。');
+        return;
+      }
+
+      const searchKey = searchContext || franchise || currentStory?.franchiseContext || currentStory?.franchise || '';
+      if (!searchKey) {
+        alert('検索精度のため、作品カテゴリか検索用作品名を入力してください。');
+        return;
+      }
+
+      const originalHtml = enrichBtn.innerHTML;
+      enrichBtn.innerHTML = '<span class="material-symbols-outlined" style="animation: spin 1s linear infinite;">sync</span> 補完中...';
+      enrichBtn.disabled = true;
+
+      try {
+        const generated = await generateLoreProfileFromSearch(name, searchKey);
+        if (generated?.shouldRegister === false) {
+          alert(`ロアの深掘りに失敗しました。\n${generated.reason || '対象作品の安定設定として確認できませんでした。'}`);
+          return;
+        }
+
+        if (generated.canonicalName) {
+          modal.querySelector('#lore-name-input').value = generated.canonicalName;
+        }
+        if (generated.type) {
+          modal.querySelector('#lore-type-select').value = generated.type;
+        }
+        modal.querySelector('#lore-summary-textarea').value = generated.summary || '';
+        modal.querySelector('#lore-profile-textarea').value = generated.profile || '';
+        modal.querySelector('#lore-speech-textarea').value = generated.speech || '';
+        modal.querySelector('#lore-relationships-textarea').value = generated.relationships || '';
+        alert('ロア候補の詳細補完が完了しました。内容を確認して保存してください。');
+      } catch (err) {
+        alert(`ロアの深掘りに失敗しました: ${err.message}`);
+      } finally {
+        enrichBtn.innerHTML = originalHtml;
+        enrichBtn.disabled = false;
+      }
+    };
+  }
+
   const saveBtn = modal.querySelector('#lore-save-submit-btn');
   saveBtn.onclick = async () => {
     const name = modal.querySelector('#lore-name-input').value.trim();
     const franchise = modal.querySelector('#lore-franchise-input').value.trim();
+    const searchContext = modal.querySelector('#lore-search-context-input').value.trim();
     const type = modal.querySelector('#lore-type-select').value;
     const verified = modal.querySelector('#lore-verified-checkbox').checked;
     
@@ -2454,6 +2694,7 @@ export function showLoreEditModal(lore = null) {
     const itemToSave = {
       id: lore ? lore.id : undefined,
       franchise: franchise || '共通',
+      searchContext,
       type,
       name,
       content: {
@@ -2468,8 +2709,15 @@ export function showLoreEditModal(lore = null) {
     };
 
     await db.saveLore(itemToSave);
+
+    if (options.fromCandidate && currentStory && Array.isArray(currentStory.lore_candidates)) {
+      currentStory.lore_candidates = currentStory.lore_candidates.filter(item => item.id !== lore?.id);
+      await db.saveStory(currentStory);
+      const stories = await db.getStories();
+      updateState({ stories });
+    }
+
     modal.remove();
     renderLorebook();
   };
 }
-

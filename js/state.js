@@ -8,6 +8,8 @@ const state = {
   apiProvider: 'gemini',
   apiKey: '',
   modelName: 'gemini-2.5-flash',
+  availableModels: [],
+  lastUsedModel: '',
   
   // Data lists
   stories: [],
@@ -21,7 +23,7 @@ const state = {
   showChoices: true,     // Option A/B/C toggle
   
   // Participant attendance for current active story
-  // e.g., { "char-uuid": "main" | "support" | "background" | "absent" }
+  // e.g., { "char-uuid": "active" | "absent" }
   attendance: {}
 };
 
@@ -65,6 +67,10 @@ export function updateState(updates) {
   notify('stateChanged', state);
 }
 
+export function normalizeCharacterAttendance(role) {
+  return role === 'absent' ? 'absent' : 'active';
+}
+
 /**
  * Sets the active story, syncing character attendance state.
  */
@@ -76,7 +82,7 @@ export function setActiveStory(story) {
     state.attendance = {};
     if (story.characters && Array.isArray(story.characters)) {
       story.characters.forEach(c => {
-        state.attendance[c.characterId] = c.attendance;
+        state.attendance[c.characterId] = normalizeCharacterAttendance(c.attendance);
       });
     }
   } else {
@@ -92,8 +98,9 @@ export function setActiveStory(story) {
  */
 export function updateCharacterAttendance(characterId, role) {
   if (!state.currentStory) return;
-  
-  state.attendance[characterId] = role;
+
+  const normalizedRole = normalizeCharacterAttendance(role);
+  state.attendance[characterId] = normalizedRole;
   
   // Sync back to currentStory data structure
   if (!state.currentStory.characters) {
@@ -102,11 +109,11 @@ export function updateCharacterAttendance(characterId, role) {
   
   const charIndex = state.currentStory.characters.findIndex(c => c.characterId === characterId);
   if (charIndex > -1) {
-    state.currentStory.characters[charIndex].attendance = role;
+    state.currentStory.characters[charIndex].attendance = normalizedRole;
   } else {
-    state.currentStory.characters.push({ characterId, attendance: role });
+    state.currentStory.characters.push({ characterId, attendance: normalizedRole });
   }
-  
-  notify('attendanceChanged', { characterId, role });
+
+  notify('attendanceChanged', { characterId, role: normalizedRole });
   notify('stateChanged', state);
 }

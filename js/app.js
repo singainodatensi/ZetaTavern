@@ -6,7 +6,7 @@
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
 import * as ui from './ui.js';
-import { generateStoryResponse } from './ai-client.js';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js';
 import * as dropbox from './dropbox.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -32,6 +32,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'custom_models',
   'dropbox_app_key',
   'dropbox_sync_frequency',
+  'lore_auto_search_enabled',
   'thinking_level',
   'api_timeout',
   'api_retries',
@@ -86,6 +87,388 @@ async function hasCharacterLibraryConflict(keyword, franchise) {
     normalizeLoreKey(character?.name) === normalizedKeyword &&
     isCharacterInFranchise(character, franchise)
   );
+}
+
+function pickMostLikelyLoreFranchise(candidates) {
+  const counts = new Map();
+  for (const candidate of candidates) {
+    const value = (candidate || '').trim();
+    if (!value) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+
+  let best = '';
+  let bestCount = 0;
+  for (const [value, count] of counts.entries()) {
+    if (count > bestCount) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+async function resolveLoreFranchise(story) {
+  const direct = (story?.franchise || '').trim();
+  if (direct) return direct;
+
+  const storyTag = Array.isArray(story?.tags)
+    ? story.tags.map(tag => (tag || '').trim()).find(Boolean)
+    : '';
+  if (storyTag) return storyTag;
+
+  const attachedIds = new Set((story?.characters || []).map(ref => ref.characterId));
+  const loadedCharacters = getState().characters?.length ? getState().characters : await db.getCharacters();
+  const candidates = [];
+
+  for (const character of loadedCharacters) {
+    if (!attachedIds.has(character.characterId)) continue;
+    if (character.category) candidates.push(character.category);
+    if (Array.isArray(character.tags)) candidates.push(...character.tags);
+  }
+
+  return pickMostLikelyLoreFranchise(candidates);
+}
+
+const LORE_KEYWORD_STOPWORDS = new Set([
+  '主人公', '地の文', 'ナレーション', 'セリフ', '会話', '場面', '現在地',
+  '時間帯', '状況', '世界', '国名', '地名', '名前', '話', '設定', '情報',
+  '関係', '記録', '記憶', '主要', 'イベント', 'キャラ', 'キャラクター',
+  'アイテム', '解呪アイテム', '道具', '武器',
+  'カテゴリー', 'カテゴリ', '多様性', 'テーブル', 'フォーク',
+  '金', '物資', '情報', '金・物資・情報', 'タイミング'
+]);
+
+const SESSION_SPECIFIC_AUTO_LORE_PATTERNS = [
+  /オリジナルキャラクター|オリキャラ/i,
+  /このセッション|セッション限定|今回限り|今回だけ/i,
+  /即興|臨時|仮設|一時的/i,
+  /主人公(?:との|に対する|用の|専用|が|は)/,
+  /ユーザー(?:との|が|は)/,
+  /好感度|関係性メモ/i,
+  /今日|さっき|先ほど|今この場|その場で/i,
+  /ここで出会/i,
+  /新しく(?:作った|設立した|結成した|雇った|名乗った)/i,
+  /現在(?:の|は)?(?:拠点|同行|所属|状況)/i
+];
+
+const LORE_LOCATION_HINTS = ['高校', '学園', '学院', '学校', '寮', '屋敷', '邸', '城', '宮', '神殿', '聖域', '都', '市', '町', '村', 'マンション', 'アパート', 'ホテル', 'カフェ', '喫茶'];
+const LORE_ORGANIZATION_HINTS = ['組', '団', '隊', '軍', '教', '教会', '商会', '会社', '部', '陣営', '騎士団'];
+const LORE_EVENT_HINTS = ['王選', '試験', '祭', '編', '会議', '戦'];
+const LORE_ITEM_HINTS = ['剣', '杖', '指輪', '徽章', '勲章', '書', '石'];
+const LORE_TOPIC_SUFFIXES = ['社会構造', '文化', '歴史', '政治体制', '経済構造', '制度', '仕組み', '種族構成', '身分制度'];
+
+function isLoreKeywordCandidate(word, story) {
+  const trimmed = (word || '').trim();
+  if (!trimmed || trimmed.length < 2) return false;
+  if (/^[0-9０-９]+$/.test(trimmed)) return false;
+  if (LORE_KEYWORD_STOPWORDS.has(trimmed)) return false;
+
+  const normalized = normalizeLoreKey(trimmed);
+  if (normalized === normalizeLoreKey(story?.franchise)) return false;
+  if (normalized === normalizeLoreKey(story?.protagonist?.name)) return false;
+  if (!isLikelyWorldLoreName(trimmed)) return false;
+
+  return true;
+}
+
+function isSessionSpecificAutoLoreText(text) {
+  const value = (text || '').trim();
+  if (!value) return false;
+  return SESSION_SPECIFIC_AUTO_LORE_PATTERNS.some(pattern => pattern.test(value));
+}
+
+function shouldSkipAutoLoreRegistration(result, story) {
+  if (!result || result.shouldRegister === false) {
+    return true;
+  }
+
+  const combined = [
+    result.canonicalName,
+    result.summary,
+    result.profile,
+    result.speech,
+    result.relationships,
+    result.reason
+  ].filter(Boolean).join(' ');
+
+  if (!result.summary) return true;
+  if (isSessionSpecificAutoLoreText(combined)) return true;
+  if (!isLikelyWorldLoreName(result.canonicalName, result.type)) return true;
+
+  const normalizedName = normalizeLoreKey(result.canonicalName);
+  if (normalizedName === normalizeLoreKey(story?.protagonist?.name)) {
+    return true;
+  }
+
+  return false;
+}
+
+function inferLoreCandidateType(name) {
+  const value = (name || '').trim();
+  if (!value) return 'term';
+  if (LORE_LOCATION_HINTS.some(hint => value.includes(hint) || value.endsWith(hint))) return 'location';
+  if (LORE_ORGANIZATION_HINTS.some(hint => value.includes(hint) || value.endsWith(hint))) return 'organization';
+  if (LORE_EVENT_HINTS.some(hint => value.includes(hint) || value.endsWith(hint))) return 'event';
+  if (LORE_ITEM_HINTS.some(hint => value.endsWith(hint))) return 'item';
+  return 'term';
+}
+
+function isLikelyLoreTopicName(value) {
+  const text = normalizeLoreEntryName(value);
+  if (!text || text.length < 4) return false;
+  return LORE_TOPIC_SUFFIXES.some(suffix => text.endsWith(suffix) && text.length > suffix.length + 1);
+}
+
+function extractRequestedLoreTopics(story) {
+  const msgs = story.messages || [];
+  const lastUser = [...msgs].reverse().find(msg => msg.role === 'user');
+  const text = (lastUser?.content || '').replace(/\s+/g, ' ').trim();
+  if (!text) return [];
+
+  const topics = new Set();
+  const directPatterns = [
+    /([^\n。！？]{2,40}?の(?:社会構造|文化|歴史|政治体制|経済構造|制度|仕組み|種族構成|身分制度))(?:について|を|は|って|とは)?(?:教えて|知りたい|説明|詳しく|頼む|見せて)?/gu,
+    /([^\n。！？]{2,40}?)(?:について|とは)(?:教えて|知りたい|説明|詳しく|頼む|見せて)?/gu
+  ];
+
+  for (const pattern of directPatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const candidate = normalizeLoreEntryName((match[1] || '').trim());
+      if (!candidate || LORE_KEYWORD_STOPWORDS.has(candidate)) continue;
+      if (isLikelyLoreTopicName(candidate) || isLikelyWorldLoreName(candidate)) {
+        topics.add(candidate);
+      }
+    }
+  }
+
+  return Array.from(topics).slice(0, 2);
+}
+
+function extractRecentTurnLoreKeywords(story) {
+  const wordsSet = new Set();
+  const msgs = story.messages || [];
+  const recent = msgs.slice(-2);
+  const textSource = [];
+
+  for (const msg of recent) {
+    textSource.push(msg.content || '');
+    textSource.push(msg.aiContent || '');
+  }
+
+  const combinedText = textSource.join('\n');
+  const quotedMatches = [...combinedText.matchAll(/[「『]([^「」『』\n]{2,24})[」』]/g)].map(match => match[1] || '');
+  const boldMatches = [...combinedText.matchAll(/\*\*([^*\n]{2,24})\*\*/g)].map(match => match[1] || '');
+  const matchesKatakana = combinedText.match(/[\u30A0-\u30FF\u30FC・]{2,24}/g) || [];
+  const matchesKanji = combinedText.match(/[\u4E00-\u9FAF]{2,10}/g) || [];
+  const matchesMixedJapanese = combinedText.match(/[\u4E00-\u9FAF々][\u3040-\u309F]{1,3}/g) || [];
+  const matchesEnglish = combinedText.match(/[A-Z][a-zA-Z]{2,15}/g) || [];
+
+  [...quotedMatches, ...boldMatches, ...matchesKatakana, ...matchesKanji, ...matchesMixedJapanese, ...matchesEnglish].forEach(word => {
+    const w = normalizeLoreEntryName(word.trim());
+    if (isLoreKeywordCandidate(w, story)) {
+      wordsSet.add(w);
+    }
+  });
+
+  return Array.from(wordsSet)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 4);
+}
+
+function getRecentLoreContextText(story) {
+  const msgs = story.messages || [];
+  return msgs.slice(-2)
+    .flatMap(msg => [msg.content || '', msg.aiContent || ''])
+    .join('\n');
+}
+
+function getRecentModelLoreContextText(story) {
+  const msgs = story.messages || [];
+  return msgs
+    .filter(msg => msg.role === 'model')
+    .slice(-1)
+    .flatMap(msg => [msg.content || ''])
+    .join('\n');
+}
+
+function splitJapaneseSentences(text) {
+  return ((text || '').match(/[^。！？\n]+[。！？]?/g) || [])
+    .map(sentence => sentence.trim())
+    .filter(Boolean);
+}
+
+function sanitizeLorePassageText(text) {
+  return (text || '')
+    .replace(/\*\*/g, '')
+    .replace(/[`#>*_]/g, '')
+    .replace(/\r/g, '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line =>
+      line &&
+      !/ロアブック|機能テスト|世界観の深掘り|解説します|先ほどの概要|さらに/.test(line)
+    )
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findLoreContextSnippet(text, keyword) {
+  const source = sanitizeLorePassageText(text).replace(/[（(][^）)]*[）)]/g, '');
+  const target = (keyword || '').trim();
+  if (!source || !target) return '';
+
+  const index = source.indexOf(target);
+  if (index < 0) return '';
+
+  const before = source.slice(0, index);
+  const after = source.slice(index + target.length);
+  const lastBoundary = Math.max(before.lastIndexOf('。'), before.lastIndexOf('！'), before.lastIndexOf('？'));
+  const nextCandidates = ['。', '！', '？']
+    .map(mark => after.indexOf(mark))
+    .filter(pos => pos >= 0);
+  const nextBoundary = nextCandidates.length > 0 ? Math.min(...nextCandidates) : -1;
+
+  const start = lastBoundary >= 0 ? lastBoundary + 1 : Math.max(0, index - 48);
+  const end = nextBoundary >= 0 ? index + target.length + nextBoundary + 1 : Math.min(source.length, index + target.length + 48);
+  let snippet = source.slice(start, end).trim();
+
+  if (start > 0) snippet = `...${snippet}`;
+  if (end < source.length) snippet = `${snippet}...`;
+  snippet = snippet
+    .replace(new RegExp(`${target}について\\s*${target}について`, 'g'), `${target}について`)
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (snippet.length > 120) {
+    snippet = `${snippet.slice(0, 117).trim()}...`;
+  }
+  return snippet;
+}
+
+function extractLorePassage(text, keyword) {
+  const source = sanitizeLorePassageText(text);
+  const target = (keyword || '').trim();
+  if (!source || !target) return '';
+
+  const sentences = splitJapaneseSentences(source);
+  if (sentences.length === 0) {
+    return findLoreContextSnippet(source, target);
+  }
+
+  const sentenceIndex = sentences.findIndex(sentence => sentence.includes(target));
+  if (sentenceIndex < 0) {
+    return findLoreContextSnippet(source, target);
+  }
+
+  const picked = [];
+  let totalLength = 0;
+  for (let i = sentenceIndex; i < sentences.length; i++) {
+    const sentence = sentences[i];
+    if (!sentence) continue;
+    picked.push(sentence);
+    totalLength += sentence.length;
+    if (picked.length >= 3 || totalLength >= 260) break;
+  }
+
+  return picked.join(' ').trim();
+}
+
+function buildLoreCandidateContent(name, type, passage = '') {
+  const fallback = `「${name}」が作品全体で共有される安定設定なら採用してください。`;
+  if (!passage) {
+    return {
+      summary: fallback,
+      profile: ''
+    };
+  }
+
+  const sentences = splitJapaneseSentences(passage);
+  if (sentences.length === 0) {
+    return {
+      summary: fallback,
+      profile: passage
+    };
+  }
+
+  let summary = sentences[0].trim();
+  if (summary.length > 110) {
+    summary = `${summary.slice(0, 107).trim()}...`;
+  }
+
+  const profile = sentences.slice(0, 3).join(' ').trim();
+  return {
+    summary,
+    profile: profile !== summary ? profile : ''
+  };
+}
+
+async function queueLoreCandidatesFromRecentTurn(story) {
+  const franchise = await resolveLoreFranchise(story);
+  if (!franchise) return 0;
+
+  if (!story.franchise) {
+    story.franchise = franchise;
+  }
+
+  if (!Array.isArray(story.lore_candidates)) {
+    story.lore_candidates = [];
+  }
+
+  const existingLore = await db.getWorldLores();
+  const existingCandidateKeys = new Set(
+    story.lore_candidates.map(candidate => `${normalizeLoreKey(candidate.franchise)}::${normalizeLoreKey(candidate.name)}`)
+  );
+
+  let queuedCount = 0;
+  const requestedTopics = extractRequestedLoreTopics(story);
+  const keywords = requestedTopics.length > 0 ? [] : extractRecentTurnLoreKeywords(story);
+  const combinedContextText = getRecentLoreContextText(story);
+  const modelContextText = getRecentModelLoreContextText(story);
+  const candidatesToQueue = [
+    ...requestedTopics.map(name => ({ name, sourceKind: 'user-topic' })),
+    ...keywords.map(name => ({ name, sourceKind: 'local-heuristic' }))
+  ];
+
+  for (const entry of candidatesToQueue) {
+    const keyword = entry.name;
+    const name = normalizeLoreEntryName(keyword);
+    if (!name) continue;
+    if (!isLikelyLoreTopicName(name) && !isLikelyWorldLoreName(name)) continue;
+    if (await hasCharacterLibraryConflict(name, franchise)) continue;
+
+    const existsInLore = existingLore.some(lore =>
+      normalizeLoreKey(lore.franchise) === normalizeLoreKey(franchise) &&
+      normalizeLoreKey(lore.name) === normalizeLoreKey(name)
+    );
+    if (existsInLore) continue;
+
+    const candidateKey = `${normalizeLoreKey(franchise)}::${normalizeLoreKey(name)}`;
+    if (existingCandidateKeys.has(candidateKey)) continue;
+
+    const type = isLikelyLoreTopicName(name) ? 'term' : inferLoreCandidateType(name);
+    const preferredContext = entry.sourceKind === 'user-topic' ? modelContextText || combinedContextText : combinedContextText;
+    const passage = extractLorePassage(preferredContext, name);
+    const candidateContent = buildLoreCandidateContent(name, type, passage);
+    story.lore_candidates.push({
+      id: crypto.randomUUID(),
+      franchise,
+      type,
+      name,
+      content: {
+        summary: candidateContent.summary,
+        profile: candidateContent.profile,
+        speech: '',
+        relationships: ''
+      },
+      source: entry.sourceKind,
+      createdAt: Date.now()
+    });
+    existingCandidateKeys.add(candidateKey);
+    queuedCount++;
+  }
+
+  return queuedCount;
 }
 
 // Boot strap execution
@@ -193,6 +576,7 @@ async function loadConfigurations() {
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
   const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
+  const loreAutoSearchEnabled = await db.getSetting('lore_auto_search_enabled', false);
   const thinkingLevel = await db.getSetting('thinking_level', 'standard');
   
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
@@ -222,6 +606,7 @@ async function loadConfigurations() {
     narrationBg: narrationBg,
     narrationColor: narrationColor,
     narrationOpacity: narrationOpacity,
+    loreAutoSearchEnabled: loreAutoSearchEnabled,
     thinkingLevel: thinkingLevel // ★ 追加
   });
 
@@ -281,6 +666,12 @@ async function loadConfigurations() {
   }
 }
 
+async function isLoreAutoSearchEnabled() {
+  const stateValue = getState().loreAutoSearchEnabled;
+  if (typeof stateValue === 'boolean') return stateValue;
+  return await db.getSetting('lore_auto_search_enabled', false);
+}
+
 /**
  * Syncs the story settings fields (Rule, world prompts, protagonist specs)
  */
@@ -288,6 +679,7 @@ function fillStorySettingsForm(story) {
   const rPrompt = document.getElementById('story-rule-prompt');
   const wPrompt = document.getElementById('story-world-prompt');
   const fInput = document.getElementById('story-franchise-input');
+  const fContextInput = document.getElementById('story-franchise-context-input');
   const pName = document.getElementById('protagonist-name');
   const pDesc = document.getElementById('protagonist-desc');
   const pPreview = document.getElementById('protagonist-img-preview');
@@ -296,6 +688,7 @@ function fillStorySettingsForm(story) {
     if (rPrompt) rPrompt.value = '';
     if (wPrompt) wPrompt.value = '';
     if (fInput) fInput.value = '';
+    if (fContextInput) fContextInput.value = '';
     if (pName) pName.value = '';
     if (pDesc) pDesc.value = '';
     if (pPreview) pPreview.src = 'assets/default-silhouette.png';
@@ -305,6 +698,7 @@ function fillStorySettingsForm(story) {
   if (rPrompt) rPrompt.value = story.storytellerPrompt || '';
   if (wPrompt) wPrompt.value = story.worldPrompt || '';
   if (fInput) fInput.value = story.franchise || '';
+  if (fContextInput) fContextInput.value = story.franchiseContext || '';
   if (pName) pName.value = story.protagonist?.name || '';
   if (pDesc) pDesc.value = story.protagonist?.description || '';
   
@@ -686,6 +1080,7 @@ async function bindEvents() {
   const rPrompt = document.getElementById('story-rule-prompt');
   const wPrompt = document.getElementById('story-world-prompt');
   const fInput = document.getElementById('story-franchise-input');
+  const fContextInput = document.getElementById('story-franchise-context-input');
 
   const saveCurrentStoryConfig = () => {
     const { currentStory } = getState();
@@ -693,6 +1088,7 @@ async function bindEvents() {
     currentStory.storytellerPrompt = rPrompt.value.trim();
     currentStory.worldPrompt = wPrompt.value.trim();
     currentStory.franchise = fInput ? fInput.value.trim() : '';
+    currentStory.franchiseContext = fContextInput ? fContextInput.value.trim() : '';
     db.saveStory(currentStory).then(async () => {
       const stories = await db.getStories();
       updateState({ stories });
@@ -703,6 +1099,7 @@ async function bindEvents() {
   if (rPrompt) rPrompt.oninput = () => { saveCurrentStoryConfig(); triggerAutoResize(rPrompt); };
   if (wPrompt) wPrompt.oninput = () => { saveCurrentStoryConfig(); triggerAutoResize(wPrompt); };
   if (fInput) fInput.oninput = () => { saveCurrentStoryConfig(); };
+  if (fContextInput) fContextInput.oninput = () => { saveCurrentStoryConfig(); };
 
   // Protagonist Profile updates
   const pName = document.getElementById('protagonist-name');
@@ -831,8 +1228,9 @@ async function createNewStory() {
   if (storyTitle === null) return;
 
   const newStory = {
-title: storyTitle || '無題のストーリー',
+    title: storyTitle || '無題のストーリー',
     franchise: '', // ★作品タグ（原作検索・ロア用）
+    franchiseContext: '',
     storytellerPrompt: '', // ★デフォルトの長い指示はコアに移動したため空でOK
     worldPrompt: DEFAULT_WORLD_PROMPT,
     tags: [],
@@ -864,7 +1262,8 @@ title: storyTitle || '無題のストーリー',
       currentObjective: '周りの様子を伺う'
     },
     characterMemory: {},
-    relationshipMemory: {}
+    relationshipMemory: {},
+    lore_candidates: []
   };
 
   try {
@@ -961,10 +1360,13 @@ async function submitStoryTurn(mode = 'normal') {
       timestamp: Date.now()
     });
 
+    await queueLoreCandidatesFromRecentTurn(currentStory);
     await db.saveStory(currentStory);
 
-    // バックグラウンドで自動ロア検索とデータベース保存を実行（非同期）
-    triggerBackgroundLoreLookup(currentStory);
+    // バックグラウンド検索はコストが高いため、明示的に有効化された場合のみ実行する
+    if (await isLoreAutoSearchEnabled()) {
+      triggerBackgroundLoreLookup(currentStory);
+    }
     
     // Auto sync story lists count
     const stories = await db.getStories();
@@ -1607,35 +2009,48 @@ function setupVisibilitySync() {
 // ==========================================
 // 自動ロア検索バックグラウンド処理
 // ==========================================
-import { generateLoreProfileFromSearch } from './ai-client.js';
 
 async function triggerBackgroundLoreLookup(story) {
-  const franchise = story.franchise || '';
-  if (!franchise) return; // 作品タグがない場合は検索クエリの正確性が保てないためスキップ
+  if (!(await isLoreAutoSearchEnabled())) {
+    console.log('[Lore Automatic Lookup] Skipped because auto lore search is disabled.');
+    return;
+  }
 
-  // キーワードの抽出 (直近のメッセージなどを解析)
-  // ai-clientの関数を動的に呼び出すための簡易的な抽出処理
+  const franchise = await resolveLoreFranchise(story);
+  if (!franchise) {
+    console.log('[Lore Automatic Lookup] Skipped because no franchise could be resolved.');
+    return;
+  }
+
+  if (!story.franchise) {
+    story.franchise = franchise;
+    db.saveStory(story).catch(err => {
+      console.warn('[Lore Automatic Lookup] Failed to persist inferred franchise:', err);
+    });
+  }
+
   const detectedKeywords = extractKeywordsForLore(story);
-  if (detectedKeywords.length === 0) return;
+  if (detectedKeywords.length === 0) {
+    console.log('[Lore Automatic Lookup] No keyword candidates found for franchise:', franchise);
+    return;
+  }
+
+  console.log('[Lore Automatic Lookup] Resolved franchise and keywords:', franchise, detectedKeywords);
 
   for (const keyword of detectedKeywords) {
     try {
       const existing = await db.getLoreByNameAndFranchise(keyword, franchise);
-      if (existing) {
-        // すでに登録されているか、現在処理中、あるいは過去のエラーならスキップ
-        if (existing.status === 'completed' || existing.status === 'pending' || existing.status === 'failed') {
-          continue;
-        }
+      if (existing && ['completed', 'pending', 'failed'].includes(existing.status)) {
+        continue;
       }
 
-      // 未登録の場合はプレースホルダー登録して処理開始
       const placeholder = {
         id: 'lore_' + crypto.randomUUID(),
         franchise,
         type: 'term',
         name: keyword,
         content: {
-          summary: '自動検索・要約中...',
+          summary: 'Searching lore...',
           profile: '',
           speech: '',
           relationships: ''
@@ -1645,27 +2060,48 @@ async function triggerBackgroundLoreLookup(story) {
         status: 'pending'
       };
       await db.saveLore(placeholder);
+      if (getState().activeScreen === 'lorebook') {
+        ui.renderLorebook();
+      }
 
-      // バックグラウンドで非同期実行
-      executeLoreLookup(placeholder, keyword, franchise);
-
+      executeLoreLookup(placeholder, keyword, franchise, story);
     } catch (e) {
       console.warn(`Error check or initial save for lore keyword ${keyword}:`, e);
     }
   }
 }
 
-async function executeLoreLookup(placeholder, keyword, franchise) {
+async function executeLoreLookup(placeholder, keyword, franchise, story) {
   try {
     console.log(`[Lore Automatic Lookup] Starting search for [${franchise}] ${keyword}`);
     const result = await generateLoreProfileFromSearch(keyword, franchise);
 
-    if (result.type === 'character' && await hasCharacterLibraryConflict(keyword, franchise)) {
-      console.log(`[Lore Automatic Lookup] Skipped duplicate character lore for ${keyword} because character library data takes priority.`);
+    if (shouldSkipAutoLoreRegistration(result, story)) {
+      console.log(`[Lore Automatic Lookup] Skipped auto-registration for ${keyword}: ${result?.reason || 'not a stable world lore entry'}`);
       await db.deleteLore(placeholder.id);
       return;
     }
-    
+
+    const canonicalName = normalizeLoreEntryName(result.canonicalName || keyword);
+    if (!canonicalName) {
+      await db.deleteLore(placeholder.id);
+      return;
+    }
+
+    const existingCanonical = await db.getLoreByNameAndFranchise(canonicalName, franchise);
+    if (existingCanonical && existingCanonical.id !== placeholder.id) {
+      console.log(`[Lore Automatic Lookup] Skipped duplicate lore for ${canonicalName}.`);
+      await db.deleteLore(placeholder.id);
+      return;
+    }
+
+    if (result.type === 'character' && await hasCharacterLibraryConflict(canonicalName, franchise)) {
+      console.log(`[Lore Automatic Lookup] Skipped duplicate character lore for ${canonicalName} because character library data takes priority.`);
+      await db.deleteLore(placeholder.id);
+      return;
+    }
+
+    placeholder.name = canonicalName;
     placeholder.content = {
       summary: result.summary || '',
       profile: result.profile || '',
@@ -1686,6 +2122,9 @@ async function executeLoreLookup(placeholder, keyword, franchise) {
     placeholder.status = 'failed';
     placeholder.content.summary = `自動検索に失敗しました。Error: ${err.message}`;
     await db.saveLore(placeholder);
+    if (getState().activeScreen === 'lorebook') {
+      ui.renderLorebook();
+    }
   }
 }
 
@@ -1694,24 +2133,31 @@ function extractKeywordsForLore(story) {
   const wordsSet = new Set();
   const textSource = [];
   const msgs = story.messages || [];
-  const startIdx = Math.max(0, msgs.length - 2);
+  const startIdx = Math.max(0, msgs.length - 4);
   for (let i = startIdx; i < msgs.length; i++) {
-    textSource.push(msgs[i].content);
+    textSource.push(msgs[i].content || '');
+    textSource.push(msgs[i].aiContent || '');
   }
   if (story.sceneState) {
     textSource.push(story.sceneState.location || '');
     textSource.push(story.sceneState.currentObjective || '');
+    textSource.push(story.sceneState.summary || '');
   }
+
   const combinedText = textSource.join('\n');
-  const matchesKatakana = combinedText.match(/[\u30a0-\u30ffー]{2,15}/g) || [];
-  const matchesKanji = combinedText.match(/[\u4e00-\u9faf]{2,10}/g) || [];
+  const matchesKatakana = combinedText.match(/[\u30A0-\u30FF\u30FC・]{2,24}/g) || [];
+  const matchesKanji = combinedText.match(/[\u4E00-\u9FAF]{2,10}/g) || [];
+  const matchesMixedJapanese = combinedText.match(/[\u4E00-\u9FAF々][\u3040-\u309F]{1,3}/g) || [];
   const matchesEnglish = combinedText.match(/[A-Z][a-zA-Z]{2,15}/g) || [];
 
-  [...matchesKatakana, ...matchesKanji, ...matchesEnglish].forEach(word => {
+  [...matchesKatakana, ...matchesKanji, ...matchesMixedJapanese, ...matchesEnglish].forEach(word => {
     const w = word.trim();
-    if (w && w.length >= 2) {
+    if (isLoreKeywordCandidate(w, story)) {
       wordsSet.add(w);
     }
   });
-  return Array.from(wordsSet);
+
+  return Array.from(wordsSet)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 6);
 }

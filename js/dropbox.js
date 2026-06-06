@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js';
+import { getSetting, saveSetting } from './db.js?v=20260606c';
 
 // ============================================================
 // 定数
@@ -758,8 +758,22 @@ export async function pushToDropbox({ stories, characters, settings, assets, onP
     await ensureAssetsFolderExists();
 
     if (assets && assets.length > 0) {
-      progress(`${assets.length}件のアセットをアップロード中...`);
-      await uploadAssetsInBatches(assets, (cur, tot) => progress(`アセット ${cur}/${tot} をアップロード中...`));
+      progress('クラウド上の既存アセットを確認中...');
+      const remoteEntries = await listRemoteAssets();
+      const remoteAssetIds = new Set(remoteEntries.map(entry => entry?.name).filter(Boolean));
+      const assetsToUpload = assets.filter(item => item?.assetId && !remoteAssetIds.has(item.assetId));
+      const skippedCount = assets.length - assetsToUpload.length;
+
+      if (skippedCount > 0) {
+        progress(`既存アセット ${skippedCount} 件をスキップします...`);
+      }
+
+      if (assetsToUpload.length > 0) {
+        progress(`${assetsToUpload.length}件のアセットをアップロード中...`);
+        await uploadAssetsInBatches(assetsToUpload, (cur, tot) => progress(`アセット ${cur}/${tot} をアップロード中...`));
+      } else {
+        progress('アップロードが必要な新規アセットはありません。');
+      }
     }
 
     progress('プッシュ完了！');

@@ -17,9 +17,21 @@
   
   <!-- Offline Libraries -->
   <script src="marked.js" defer></script>
+
+  <script>
+    (function () {
+      var buildVersion = '20260606z';
+      var url = new URL(window.location.href);
+      if (url.searchParams.get('v') !== buildVersion) {
+        url.searchParams.set('v', buildVersion);
+        window.history.replaceState(null, '', url);
+      }
+      window.__ZT_BUILD_VERSION__ = buildVersion;
+    })();
+  </script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260522e" defer></script>
+  <script type="module" src="js/app.js?v=20260606z" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -173,6 +185,11 @@
                   <div class="form-group">
                     <label for="story-franchise-input">作品名タグ (Franchise)</label>
                     <input type="text" id="story-franchise-input" placeholder="例: Re:ゼロ から始める異世界生活 (原作検索用)">
+                  </div>
+
+                  <div class="form-group">
+                    <label for="story-franchise-context-input">検索用作品名・別名 (任意)</label>
+                    <input type="text" id="story-franchise-context-input" placeholder="例: リゼロ / Re:ゼロから始める異世界生活">
                   </div>
 
                   <div class="form-group">
