@@ -8,6 +8,7 @@ const state = {
   apiProvider: 'gemini',
   apiKey: '',
   modelName: 'gemini-2.5-flash',
+  searchModelName: '',
   availableModels: [],
   lastUsedModel: '',
   

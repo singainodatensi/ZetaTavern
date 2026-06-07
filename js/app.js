@@ -28,6 +28,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'api_provider',
   'api_key',
   'model_name',
+  'search_model_name',
   'show_choices',
   'autoscroll_enabled',
   'custom_models',
@@ -42,6 +43,115 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'narration_color',
   'narration_opacity'
 ];
+
+const DEFAULT_MODEL_OPTIONS = [
+  { value: 'gemini-2.5-flash-lite', label: 'gemini-2.5-flash-lite (無料枠多め・高速)' },
+  { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (高速・最適)' },
+  { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro (超高精度・長文)' },
+  { value: 'gemini-2.0-flash', label: 'gemini-2.0-flash (前世代高速)' },
+  { value: 'gemini-3-flash-preview', label: 'gemini-3-flash-preview (Preview・検索対応)' },
+  { value: 'gemma-4-31b-it', label: 'gemma-4-31b-it (Gemma 4・高推論・無料)' },
+  { value: 'gemma-4-26b-a4b-it', label: 'gemma-4-26b-a4b-it (Gemma 4・軽量・無料)' },
+  { value: 'gemma-3-27b-it', label: 'gemma-3-27b-it (Gemma 3・高推論)' }
+];
+
+const DEFAULT_MODEL_VALUES = DEFAULT_MODEL_OPTIONS.map(option => option.value);
+
+function populateModelSelect(selectEl, customModels = [], options = {}) {
+  if (!selectEl) return;
+
+  const {
+    includeFollowOption = false,
+    followOptionLabel = '使用モデルに追従',
+    selectedValue = ''
+  } = options;
+
+  selectEl.innerHTML = '';
+
+  if (includeFollowOption) {
+    const followOpt = document.createElement('option');
+    followOpt.value = '';
+    followOpt.textContent = followOptionLabel;
+    selectEl.appendChild(followOpt);
+  }
+
+  DEFAULT_MODEL_OPTIONS.forEach(option => {
+    const opt = document.createElement('option');
+    opt.value = option.value;
+    opt.textContent = option.label;
+    selectEl.appendChild(opt);
+  });
+
+  customModels.forEach(customModel => {
+    if (!DEFAULT_MODEL_VALUES.includes(customModel)) {
+      const opt = document.createElement('option');
+      opt.value = customModel;
+      opt.textContent = `${customModel} (カスタム)`;
+      selectEl.appendChild(opt);
+    }
+  });
+
+  if (selectedValue && !DEFAULT_MODEL_VALUES.includes(selectedValue) && !customModels.includes(selectedValue)) {
+    const opt = document.createElement('option');
+    opt.value = selectedValue;
+    opt.textContent = `${selectedValue} (カスタム)`;
+    selectEl.appendChild(opt);
+  }
+
+  selectEl.value = selectedValue;
+}
+
+function renderCustomModelList(customModels = []) {
+  const container = document.getElementById('custom-model-list');
+  if (!container) return;
+
+  if (!Array.isArray(customModels) || customModels.length === 0) {
+    container.innerHTML = '<span style="font-size: 12px; color: var(--text-sub);">追加したカスタムモデルはここに表示されます。</span>';
+    return;
+  }
+
+  container.innerHTML = '';
+  customModels.forEach(model => {
+    const chip = document.createElement('span');
+    chip.className = 'custom-model-chip';
+    chip.dataset.model = model;
+    chip.style.display = 'inline-flex';
+    chip.style.alignItems = 'center';
+    chip.style.gap = '6px';
+    chip.style.padding = '5px 8px';
+    chip.style.borderRadius = '999px';
+    chip.style.border = '1px solid var(--border-color, #ccc)';
+    chip.style.background = 'var(--bg-input, rgba(255,255,255,0.03))';
+    chip.style.fontSize = '12px';
+
+    const label = document.createElement('span');
+    label.textContent = model;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'custom-model-remove-btn';
+    removeBtn.dataset.model = model;
+    removeBtn.title = '削除';
+    removeBtn.style.border = 'none';
+    removeBtn.style.background = 'none';
+    removeBtn.style.color = 'inherit';
+    removeBtn.style.cursor = 'pointer';
+    removeBtn.style.padding = '0';
+    removeBtn.style.display = 'inline-flex';
+    removeBtn.style.alignItems = 'center';
+    removeBtn.style.justifyContent = 'center';
+
+    const icon = document.createElement('span');
+    icon.className = 'material-symbols-outlined';
+    icon.style.fontSize = '16px';
+    icon.textContent = 'close';
+    removeBtn.appendChild(icon);
+
+    chip.appendChild(label);
+    chip.appendChild(removeBtn);
+    container.appendChild(chip);
+  });
+}
 
 async function collectDropboxSettings() {
   const settings = {};
@@ -573,6 +683,7 @@ async function loadConfigurations() {
   const provider = await db.getSetting('api_provider', 'gemini');
   const key = await db.getSetting('api_key', '');
   const model = await db.getSetting('model_name', 'gemini-2.5-flash');
+  const searchModel = await db.getSetting('search_model_name', '');
   const choices = await db.getSetting('show_choices', true);
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
@@ -599,6 +710,7 @@ async function loadConfigurations() {
     apiProvider: provider,
     apiKey: key,
     modelName: model,
+    searchModelName: searchModel,
     showChoices: choices,
     autoscrollEnabled: autoscroll, // ★Stateに反映
     apiTimeout: apiTimeout,
@@ -615,6 +727,7 @@ async function loadConfigurations() {
   const provEl = document.getElementById('api-provider-select');
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
+  const searchModelEl = document.getElementById('search-model-name-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★DOM取得
   const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
@@ -639,32 +752,23 @@ async function loadConfigurations() {
   if (nOpacityEl) nOpacityEl.value = narrationOpacity;
   if (thinkingEl) thinkingEl.value = thinkingLevel; // ★ 追加
 
-  if (modelEl) {
-    const defaultValues = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it'];
-    Array.from(modelEl.options).forEach(opt => {
-      if (!defaultValues.includes(opt.value)) {
-        modelEl.remove(opt.index);
-      }
-    });
-
-    customModels.forEach(customModel => {
-      const opt = document.createElement('option');
-      opt.value = customModel;
-      opt.textContent = `${customModel} (カスタム)`;
-      modelEl.appendChild(opt);
-    });
-
-    if (!defaultValues.includes(model) && !customModels.includes(model)) {
-      const opt = document.createElement('option');
-      opt.value = model;
-      opt.textContent = `${model} (カスタム)`;
-      modelEl.appendChild(opt);
-      customModels.push(model);
-      await db.saveSetting('custom_models', customModels);
-    }
-
-    modelEl.value = model;
+  const normalizedCustomModels = Array.isArray(customModels) ? [...new Set(customModels.filter(Boolean))] : [];
+  if (model && !DEFAULT_MODEL_VALUES.includes(model) && !normalizedCustomModels.includes(model)) {
+    normalizedCustomModels.push(model);
+    await db.saveSetting('custom_models', normalizedCustomModels);
   }
+  if (searchModel && !DEFAULT_MODEL_VALUES.includes(searchModel) && !normalizedCustomModels.includes(searchModel)) {
+    normalizedCustomModels.push(searchModel);
+    await db.saveSetting('custom_models', normalizedCustomModels);
+  }
+
+  populateModelSelect(modelEl, normalizedCustomModels, { selectedValue: model });
+  populateModelSelect(searchModelEl, normalizedCustomModels, {
+    includeFollowOption: true,
+    followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
+    selectedValue: searchModel
+  });
+  renderCustomModelList(normalizedCustomModels);
 }
 
 async function isLoreAutoSearchEnabled() {
@@ -953,10 +1057,12 @@ async function bindEvents() {
   const provEl = document.getElementById('api-provider-select');
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
+  const searchModelEl = document.getElementById('search-model-name-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★自動スクロールDOM
   const customModelInput = document.getElementById('custom-model-input');
   const customModelAddBtn = document.getElementById('custom-model-add-btn');
+  const customModelList = document.getElementById('custom-model-list');
   const retriesEl = document.getElementById('settings-retries-input');
   const timeoutEl = document.getElementById('settings-timeout-input');
   const fontSizeEl = document.getElementById('font-size-input');
@@ -985,6 +1091,13 @@ async function bindEvents() {
       const val = e.target.value;
       updateState({ modelName: val });
       db.saveSetting('model_name', val);
+    };
+  }
+  if (searchModelEl) {
+    searchModelEl.onchange = (e) => {
+      const val = e.target.value;
+      updateState({ searchModelName: val });
+      db.saveSetting('search_model_name', val);
     };
   }
   if (choicesEl) {
@@ -1056,33 +1169,63 @@ async function bindEvents() {
       if (!newModel) return;
 
       const customModels = await db.getSetting('custom_models', []);
-
-      let optionExists = false;
-      for (let i = 0; i < modelEl.options.length; i++) {
-        if (modelEl.options[i].value === newModel) {
-          optionExists = true;
-          break;
-        }
+      const normalizedCustomModels = Array.isArray(customModels) ? [...new Set(customModels.filter(Boolean))] : [];
+      if (!DEFAULT_MODEL_VALUES.includes(newModel) && !normalizedCustomModels.includes(newModel)) {
+        normalizedCustomModels.push(newModel);
+        await db.saveSetting('custom_models', normalizedCustomModels);
       }
 
-      if (!optionExists) {
-        const opt = document.createElement('option');
-        opt.value = newModel;
-        opt.textContent = `${newModel} (カスタム)`;
-        modelEl.appendChild(opt);
-      }
+      populateModelSelect(modelEl, normalizedCustomModels, { selectedValue: newModel });
+      populateModelSelect(searchModelEl, normalizedCustomModels, {
+        includeFollowOption: true,
+        followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
+        selectedValue: getState().searchModelName || ''
+      });
+      renderCustomModelList(normalizedCustomModels);
 
-      if (!customModels.includes(newModel)) {
-        customModels.push(newModel);
-        await db.saveSetting('custom_models', customModels);
-      }
-
-      modelEl.value = newModel;
       updateState({ modelName: newModel });
       await db.saveSetting('model_name', newModel);
 
       customModelInput.value = '';
       alert(`モデル「${newModel}」を追加し、現在モデルとして適用しました。`);
+    };
+  }
+
+  if (customModelList) {
+    customModelList.onclick = async (e) => {
+      const removeBtn = e.target.closest('.custom-model-remove-btn');
+      if (!removeBtn) return;
+
+      const modelToRemove = removeBtn.dataset.model;
+      if (!modelToRemove) return;
+      if (!confirm(`カスタムモデル「${modelToRemove}」を削除しますか？`)) return;
+
+      let customModels = await db.getSetting('custom_models', []);
+      customModels = Array.isArray(customModels) ? customModels.filter(model => model && model !== modelToRemove) : [];
+      await db.saveSetting('custom_models', customModels);
+
+      const updates = {};
+      if (getState().modelName === modelToRemove) {
+        updates.modelName = 'gemini-2.5-flash';
+        await db.saveSetting('model_name', updates.modelName);
+      }
+      if (getState().searchModelName === modelToRemove) {
+        updates.searchModelName = '';
+        await db.saveSetting('search_model_name', '');
+      }
+      if (Object.keys(updates).length > 0) {
+        updateState(updates);
+      }
+
+      populateModelSelect(modelEl, customModels, {
+        selectedValue: updates.modelName || getState().modelName
+      });
+      populateModelSelect(searchModelEl, customModels, {
+        includeFollowOption: true,
+        followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
+        selectedValue: updates.searchModelName !== undefined ? updates.searchModelName : getState().searchModelName
+      });
+      renderCustomModelList(customModels);
     };
   }
 

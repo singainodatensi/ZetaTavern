@@ -43,21 +43,84 @@ function hasCharacterLoreConflict(lore, characters, franchise) {
   );
 }
 
+const DEFAULT_SEARCH_MODEL_NAME = 'gemini-2.5-flash-lite';
+
 function selectSearchCapableModel(modelName) {
   const requested = (modelName || '').trim();
-  if (!requested) return 'gemini-2.5-flash';
+  if (!requested) return DEFAULT_SEARCH_MODEL_NAME;
 
   const normalized = requested.toLowerCase();
   if (normalized.includes('gemini')) {
     return requested;
   }
 
-  return 'gemini-2.5-flash';
+  return DEFAULT_SEARCH_MODEL_NAME;
+}
+
+function resolveSearchModelName(appState) {
+  const preferred = (appState?.searchModelName || '').trim();
+  if (preferred) return selectSearchCapableModel(preferred);
+  return selectSearchCapableModel(appState?.modelName || DEFAULT_SEARCH_MODEL_NAME);
 }
 
 function normalizeLoreType(type) {
   const allowed = new Set(['character', 'location', 'organization', 'term', 'event', 'item']);
   return allowed.has(type) ? type : 'term';
+}
+
+function stripLoreCitations(text) {
+  return (text || '')
+    .replace(/\s*\[(?:\d+\s*(?:,\s*\d+\s*)*)\]/g, '')
+    .replace(/\s*\[\d+(?:\s*,\s*\d+)*\s*[,，]\s*[^\]]+\]/g, '')
+    .replace(/出典[:：][^\n。]*/g, '')
+    .replace(/参考[:：][^\n。]*/g, '');
+}
+
+function normalizeLoreWritingTone(text) {
+  let value = (text || '').trim();
+  if (!value) return '';
+
+  value = value
+    .replace(/この[^\n。]*について(?:は|を)?/g, '')
+    .replace(/ユーザーに対しての説明[^。\n]*。?/g, '')
+    .replace(/検索結果によると/g, '')
+    .replace(/原作では/g, '')
+    .replace(/とされています/g, 'とされる')
+    .replace(/といわれています/g, 'といわれる')
+    .replace(/となっています/g, 'となっている')
+    .replace(/されています/g, 'されている')
+    .replace(/していました/g, 'していた')
+    .replace(/していきます/g, 'していく')
+    .replace(/できます/g, 'できる')
+    .replace(/挙げられます/g, '挙げられる')
+    .replace(/見られます/g, '見られる')
+    .replace(/存在します/g, '存在する')
+    .replace(/該当します/g, '該当する')
+    .replace(/意味します/g, '意味する')
+    .replace(/示します/g, '示す')
+    .replace(/指します/g, '指す')
+    .replace(/表します/g, '表す')
+    .replace(/担います/g, '担う')
+    .replace(/果たします/g, '果たす')
+    .replace(/持ちます/g, '持つ')
+    .replace(/使います/g, '使う')
+    .replace(/できます。/g, 'できる。')
+    .replace(/です。/g, 'である。')
+    .replace(/です、/g, 'であり、')
+    .replace(/です$/g, 'である');
+
+  value = value
+    .replace(/\s+/g, ' ')
+    .replace(/([。！？])\1+/g, '$1')
+    .replace(/^[、。\s]+|[、。\s]+$/g, '')
+    .trim();
+
+  return value;
+}
+
+function sanitizeLoreText(text) {
+  const stripped = stripLoreCitations(text);
+  return normalizeLoreWritingTone(stripped);
 }
 
 function hasJapaneseText(value) {
@@ -1128,10 +1191,10 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
 \`\`\`
 `;
 
-  const requestedModelName = appState.modelName || 'gemini-2.5-flash';
-  const modelName = selectSearchCapableModel(requestedModelName);
+  const requestedModelName = appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME;
+  const modelName = resolveSearchModelName(appState);
   if (modelName !== requestedModelName) {
-    console.log(`[Lore Search] Switched model from ${requestedModelName} to ${modelName} for googleSearch support.`);
+    console.log(`[Character Search] Switched model from ${requestedModelName} to ${modelName} for googleSearch support.`);
   }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
@@ -1222,10 +1285,16 @@ export async function generateLoreProfileFromSearch(name, franchise) {
 - セッション固有情報やオリジナルキャラクターを原作設定として捏造してはいけません。
 - 次のような一般語は shouldRegister を false にしてください: 放課後, アクセサリー, 知的生命体, 勉強, 会話。
 - 検索対象が曖昧なら、対象作品・コンテキストを優先して判定してください。例: 「白鯨」だけでなく「Re:ゼロから始める異世界生活 の 白鯨」として扱うこと。
+- summary / profile / speech / relationships には引用番号や脚注表記（[1], [1, 2] など）を書かないこと。
+- summary / profile / speech / relationships はユーザーへの説明文ではなく、ロアブックにそのまま保存できる設定文として書くこと。
+- 文体は簡潔で硬めの常体に統一すること。基本は「〜である」「〜とされる」「〜を指す」などを使い、「〜です」「〜となっています」は避けること。
 `;
 
-  const modelName = appState.modelName || 'gemini-2.5-flash';
-  const searchModelName = selectSearchCapableModel(modelName);
+  const requestedModelName = appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME;
+  const searchModelName = resolveSearchModelName(appState);
+  if (searchModelName !== requestedModelName) {
+    console.log(`[Lore Search] Switched model from ${requestedModelName} to ${searchModelName} for googleSearch support.`);
+  }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${searchModelName}:generateContent?key=${apiKey}`;
   const generationConfig = { temperature: 0.5, topP: 0.9, maxOutputTokens: 4096 };
 
@@ -1267,10 +1336,10 @@ export async function generateLoreProfileFromSearch(name, franchise) {
     shouldRegister: parsed.shouldRegister !== false,
     canonicalName: normalizeLoreEntryName(parsed.canonicalName || name),
     type: normalizeLoreType((parsed.type || '').trim()),
-    summary: (parsed.summary || '').trim(),
-    profile: (parsed.profile || '').trim(),
-    speech: (parsed.speech || '').trim(),
-    relationships: (parsed.relationships || '').trim(),
-    reason: (parsed.reason || '').trim()
+    summary: sanitizeLoreText(parsed.summary || ''),
+    profile: sanitizeLoreText(parsed.profile || ''),
+    speech: sanitizeLoreText(parsed.speech || ''),
+    relationships: sanitizeLoreText(parsed.relationships || ''),
+    reason: stripLoreCitations(parsed.reason || '').trim()
   };
 }

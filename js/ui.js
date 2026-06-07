@@ -890,6 +890,56 @@ export function bindScrollJumpControls() {
   }
 }
 
+async function confirmLoreDeletion(loreName) {
+  const skipKey = 'skip_confirm_delete_lore';
+  const skipConfirm = await db.getSetting(skipKey, false);
+  if (skipConfirm) return true;
+
+  return new Promise(resolve => {
+    let modal = document.getElementById('lore-delete-confirm-modal');
+    if (modal) modal.remove();
+
+    modal = document.createElement('div');
+    modal.id = 'lore-delete-confirm-modal';
+    modal.className = 'modal-wrapper';
+    modal.style.zIndex = '6000';
+    modal.innerHTML = `
+      <div style="background: var(--bg-card, #fff); color: var(--text-color, #fff); width: min(92vw, 420px); border-radius: 8px; padding: 20px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 14px; box-sizing: border-box;">
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <h3 style="margin: 0; font-size: 16px;">ロアを削除しますか？</h3>
+          <p style="margin: 0; color: var(--text-sub); line-height: 1.6;">ロア「${escapeHTML(loreName || '名称未設定')}」を削除します。この操作は元に戻せません。</p>
+        </div>
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-sub);">
+          <input id="lore-delete-confirm-skip" type="checkbox">
+          <span>次回以降この確認を表示しない</span>
+        </label>
+        <div style="display: flex; justify-content: flex-end; gap: 10px;">
+          <button id="lore-delete-confirm-cancel" class="secondary-btn" type="button">キャンセル</button>
+          <button id="lore-delete-confirm-ok" class="primary-btn" type="button">削除する</button>
+        </div>
+      </div>
+    `;
+
+    const close = async (confirmed) => {
+      const skipChecked = modal.querySelector('#lore-delete-confirm-skip')?.checked;
+      if (confirmed && skipChecked) {
+        await db.saveSetting(skipKey, true);
+      }
+      modal.remove();
+      resolve(confirmed);
+    };
+
+    modal.addEventListener('click', e => {
+      if (e.target === modal) close(false);
+    });
+
+    modal.querySelector('#lore-delete-confirm-cancel')?.addEventListener('click', () => close(false));
+    modal.querySelector('#lore-delete-confirm-ok')?.addEventListener('click', () => close(true));
+
+    document.body.appendChild(modal);
+  });
+}
+
 /**
  * キャラクターの吹き出し（セグメント）ごとの編集モーダルを表示する関数
  */
@@ -2502,7 +2552,7 @@ function _createFranchiseSection(franchise, items) {
     } else if (deleteBtn) {
       const loreName = deleteBtn.dataset.name;
       const loreId = deleteBtn.dataset.id;
-      if (confirm(`ロア「${loreName}」を削除しますか？`)) {
+      if (await confirmLoreDeletion(loreName)) {
         await db.deleteLore(loreId);
         renderLorebook();
       }
