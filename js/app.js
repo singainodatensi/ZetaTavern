@@ -5,7 +5,7 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js';
+import * as ui from './ui.js?v=20260608e';
 import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js';
 import * as dropbox from './dropbox.js';
 import { buildStoryCharacterRefs } from './story-characters.js';
@@ -1337,7 +1337,26 @@ async function bindEvents() {
       if (file) {
         ui.importCharacterJSON(file);
       }
+      e.target.value = '';
     };
+  }
+
+  // 6b. Lore Import Trigger
+  const importLoreInput = document.getElementById('lore-import-input');
+  const importLoreBtn = document.getElementById('lore-import-btn');
+  if (importLoreBtn && importLoreInput) {
+    importLoreBtn.onclick = () => importLoreInput.click();
+    importLoreInput.onchange = async (e) => {
+      const files = e.target.files;
+      if (files && files.length > 0) {
+        await ui.importLoreJSON(files);
+      }
+      e.target.value = '';
+    };
+  }
+  const lorePasteBtn = document.getElementById('lore-paste-btn');
+  if (lorePasteBtn) {
+    lorePasteBtn.onclick = () => ui.showLorePasteModal();
   }
 
   // 7. Dropbox buttons

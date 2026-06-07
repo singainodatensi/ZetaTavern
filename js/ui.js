@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch } from './ai-client.js';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -1858,6 +1858,158 @@ export async function importCharacterJSON(file) {
   }
 }
 
+export async function importLoreJSON(files) {
+  const fileList = Array.from(files || []).filter(Boolean);
+  if (fileList.length === 0) return;
+
+  const defaults = buildLoreImportDefaults();
+
+  let importedCount = 0;
+  let updatedCount = 0;
+  let skippedCount = 0;
+  const importedNames = [];
+
+  try {
+    for (const file of fileList) {
+      const text = await file.text();
+      const importObj = JSON.parse(text);
+      const entries = extractLoreEntriesFromImport(importObj, defaults);
+
+      if (entries.length === 0) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const result = await importLoreEntries(entries, defaults);
+      importedCount += result.importedCount;
+      updatedCount += result.updatedCount;
+      importedNames.push(...result.importedNames);
+    }
+
+    await renderLorebook('world');
+
+    const headline = importedCount || updatedCount
+      ? `ロアを取り込みました。`
+      : `取り込めるロアが見つかりませんでした。`;
+    const details = [
+      `新規追加: ${importedCount}件`,
+      `上書き更新: ${updatedCount}件`,
+      skippedCount ? `スキップ: ${skippedCount}ファイル` : '',
+      importedNames.length ? `対象: ${importedNames.slice(0, 8).join(' / ')}${importedNames.length > 8 ? ' ...' : ''}` : ''
+    ].filter(Boolean).join('\n');
+
+    alert(`${headline}\n${details}\n\n対応形式:\n- zetatavern-lore\n- zetatavern-lorebook\n- entries 配列つきの汎用 JSON`);
+  } catch (err) {
+    alert(`ロアJSONの取り込みに失敗しました:\n${err.message}\n\n※ name / franchise / summary などを含む JSON を選択してください。`);
+  }
+}
+
+export function showLorePasteModal() {
+  let modal = document.getElementById('lore-paste-modal');
+  if (modal) modal.remove();
+
+  const { currentStory } = getState();
+  const defaultFranchise = currentStory?.franchise || '';
+  const defaultSearchContext = currentStory?.franchiseContext || currentStory?.franchise || '';
+
+  modal = document.createElement('div');
+  modal.id = 'lore-paste-modal';
+  modal.className = 'modal-wrapper';
+  modal.style.zIndex = '5000';
+  modal.innerHTML = `
+    <div class="modal-overlay"></div>
+    <div class="modal-content" style="max-width: 720px; width: 92%;">
+      <div class="modal-header">
+        <h3>ロアJSONを貼り付け</h3>
+        <button id="lore-paste-close-btn" class="icon-btn-circle" type="button">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="lore-search-intro">
+          <span class="material-symbols-outlined">content_paste_go</span>
+          <p>外部AIが出力した <code>json</code> コードブロックを、そのまま貼り付けて取り込めます。</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group">
+            <label for="lore-paste-franchise-input">既定の作品名</label>
+            <input type="text" id="lore-paste-franchise-input" value="${escapeHTML(defaultFranchise)}" placeholder="例: リゼロ">
+          </div>
+          <div class="form-group">
+            <label for="lore-paste-search-context-input">検索用作品名・別名</label>
+            <input type="text" id="lore-paste-search-context-input" value="${escapeHTML(defaultSearchContext)}" placeholder="例: Re:ゼロから始める異世界生活">
+          </div>
+        </div>
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-sub);">
+          <input id="lore-paste-force-franchise-checkbox" type="checkbox">
+          <span>貼り付け内容の作品名より、上の作品名を優先して登録する</span>
+        </label>
+        <div class="form-group">
+          <label for="lore-paste-textarea">貼り付け内容</label>
+          <textarea id="lore-paste-textarea" rows="16" style="width:100%; resize: vertical;" placeholder='jsonコード、またはコードブロックをそのまま貼り付け'></textarea>
+        </div>
+        <details style="font-size: 12px; color: var(--text-sub);">
+          <summary>対応形式</summary>
+          <div style="margin-top: 8px; line-height: 1.7;">
+            <div>- <code>zetatavern-lore</code></div>
+            <div>- <code>zetatavern-lorebook</code></div>
+            <div>- <code>entries</code> 配列つきの JSON</div>
+            <div>- ロア配列の直貼り</div>
+            <div>- <code>type: "person"</code> は自動で登場人物に変換</div>
+          </div>
+        </details>
+      </div>
+      <div class="modal-footer">
+        <button id="lore-paste-cancel-btn" class="secondary-btn" type="button">キャンセル</button>
+        <button id="lore-paste-submit-btn" class="primary-btn" type="button">取り込む</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const closeModal = () => modal.remove();
+  modal.querySelector('#lore-paste-close-btn')?.addEventListener('click', closeModal);
+  modal.querySelector('#lore-paste-cancel-btn')?.addEventListener('click', closeModal);
+  modal.addEventListener('click', e => {
+    if (e.target === modal || e.target.classList.contains('modal-overlay')) closeModal();
+  });
+
+  const textarea = modal.querySelector('#lore-paste-textarea');
+  textarea?.focus();
+
+  modal.querySelector('#lore-paste-submit-btn')?.addEventListener('click', async () => {
+    const rawText = textarea?.value || '';
+    const jsonText = stripCodeFence(rawText);
+    if (!jsonText) {
+      alert('JSONコードを貼り付けてください。');
+      return;
+    }
+
+    const franchise = modal.querySelector('#lore-paste-franchise-input')?.value.trim() || '';
+    const searchContext = modal.querySelector('#lore-paste-search-context-input')?.value.trim() || franchise;
+    const forceFranchise = !!modal.querySelector('#lore-paste-force-franchise-checkbox')?.checked;
+
+    try {
+      const parsed = JSON.parse(jsonText);
+      const defaults = buildLoreImportDefaults({ franchise, searchContext, forceFranchise });
+      const entries = extractLoreEntriesFromImport(parsed, defaults);
+      if (entries.length === 0) {
+        alert('取り込めるロアが見つかりませんでした。name や entries を確認してください。');
+        return;
+      }
+
+      const result = await importLoreEntries(entries, defaults);
+      await renderLorebook('world');
+      closeModal();
+
+      alert(`ロアを取り込みました。\n新規追加: ${result.importedCount}件\n上書き更新: ${result.updatedCount}件\n\n対象: ${result.importedNames.slice(0, 10).join(' / ')}${result.importedNames.length > 10 ? ' ...' : ''}`);
+    } catch (err) {
+      alert(`貼り付け内容の取り込みに失敗しました:\n${err.message}\n\n※ コードブロック形式のままでも取り込めます。`);
+    }
+  });
+}
+
 export async function showStorySettingsModal() {
   const { currentStory } = getState();
   if (!currentStory) return;
@@ -2253,6 +2405,189 @@ const LORE_TYPE_META = {
   event:        { label: '歴史・事件',     icon: 'event'         },
   item:         { label: 'アイテム・道具', icon: 'inventory_2'   },
 };
+
+const LORE_IMPORT_TYPE_VALUES = new Set(Object.keys(LORE_TYPE_META));
+const LORE_IMPORT_TYPE_ALIASES = {
+  person: 'character',
+  people: 'character',
+  human: 'character',
+  人物: 'character',
+  登場人物: 'character',
+  character: 'character',
+  place: 'location',
+  area: 'location',
+  region: 'location',
+  地名: 'location',
+  場所: 'location',
+  location: 'location',
+  faction: 'organization',
+  group: 'organization',
+  guild: 'organization',
+  組織: 'organization',
+  勢力: 'organization',
+  organization: 'organization',
+  world: 'term',
+  lore: 'term',
+  用語: 'term',
+  世界観: 'term',
+  term: 'term',
+  history: 'event',
+  incident: 'event',
+  事件: 'event',
+  歴史: 'event',
+  event: 'event',
+  artifact: 'item',
+  tool: 'item',
+  道具: 'item',
+  アイテム: 'item',
+  item: 'item'
+};
+
+function normalizeImportedLoreType(type) {
+  const value = (type || '').trim().toLowerCase();
+  const aliased = LORE_IMPORT_TYPE_ALIASES[value] || value;
+  return LORE_IMPORT_TYPE_VALUES.has(aliased) ? aliased : 'term';
+}
+
+function resolveImportedLoreField(source, keys = []) {
+  if (!source || typeof source !== 'object') return '';
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function normalizeImportedLoreEntry(rawEntry, defaults = {}) {
+  const source = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+  const contentSource = source.content && typeof source.content === 'object' ? source.content : {};
+
+  const rawName = resolveImportedLoreField(source, ['name', 'title', 'keyword', 'canonicalName', '名称', '名前']);
+  const name = normalizeLoreEntryName(rawName);
+  if (!name) return null;
+
+  const franchise = resolveImportedLoreField(source, ['franchise', 'series', 'work', 'tag', '作品', '作品名']) ||
+    defaults.franchise ||
+    '共通';
+  const searchContext = resolveImportedLoreField(source, ['searchContext', 'franchiseContext', 'context', '検索用作品名', '検索コンテキスト']) ||
+    defaults.searchContext ||
+    '';
+  const summary = resolveImportedLoreField(contentSource, ['summary', 'overview', 'description', '概要', '説明']) ||
+    resolveImportedLoreField(source, ['summary', 'overview', 'description', '概要', '説明']);
+  const profile = resolveImportedLoreField(contentSource, ['profile', 'details', 'body', 'content', '詳細', '本文']) ||
+    resolveImportedLoreField(source, ['profile', 'details', 'body', 'content', '詳細', '本文']);
+  const speech = resolveImportedLoreField(contentSource, ['speech', 'tone', 'style', '口調', '話し方']) ||
+    resolveImportedLoreField(source, ['speech', 'tone', 'style', '口調', '話し方']);
+  const relationships = resolveImportedLoreField(contentSource, ['relationships', 'relations', '関係性', '関連']) ||
+    resolveImportedLoreField(source, ['relationships', 'relations', '関係性', '関連']);
+
+  return {
+    id: typeof source.id === 'string' && source.id.trim() ? source.id.trim() : undefined,
+    franchise,
+    searchContext,
+    type: normalizeImportedLoreType(resolveImportedLoreField(source, ['type', 'category', 'loreType', '種類', 'カテゴリ'])),
+    name,
+    content: {
+      summary,
+      profile,
+      speech,
+      relationships
+    },
+    source: 'manual-import',
+    verified: source.verified !== false,
+    status: 'completed'
+  };
+}
+
+function extractLoreEntriesFromImport(importObj, defaults = {}) {
+  if (Array.isArray(importObj)) {
+    return importObj.map(item => normalizeImportedLoreEntry(item, defaults)).filter(Boolean);
+  }
+
+  if (!importObj || typeof importObj !== 'object') {
+    throw new Error('JSON の形式が不正です。');
+  }
+
+  if (importObj.spec === 'zetatavern-lorebook' && Array.isArray(importObj.entries)) {
+    return importObj.entries.map(item => normalizeImportedLoreEntry(item, defaults)).filter(Boolean);
+  }
+
+  if (importObj.spec === 'zetatavern-lore') {
+    const payload = importObj.entry && typeof importObj.entry === 'object' ? importObj.entry : importObj;
+    const single = normalizeImportedLoreEntry(payload, defaults);
+    return single ? [single] : [];
+  }
+
+  if (Array.isArray(importObj.entries)) {
+    return importObj.entries.map(item => normalizeImportedLoreEntry(item, defaults)).filter(Boolean);
+  }
+
+  const single = normalizeImportedLoreEntry(importObj, defaults);
+  return single ? [single] : [];
+}
+
+function stripCodeFence(text) {
+  const raw = (text || '').trim();
+  if (!raw) return '';
+
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  return fenced ? fenced[1].trim() : raw;
+}
+
+async function importLoreEntries(entries, defaults = {}) {
+  let importedCount = 0;
+  let updatedCount = 0;
+  const importedNames = [];
+
+  for (const entry of entries) {
+    const normalizedEntry = { ...entry };
+    if (defaults.forceFranchise) {
+      normalizedEntry.franchise = defaults.forceFranchise;
+    }
+    if (defaults.forceSearchContext) {
+      normalizedEntry.searchContext = defaults.forceSearchContext;
+    } else if (!normalizedEntry.searchContext && normalizedEntry.franchise) {
+      normalizedEntry.searchContext = normalizedEntry.franchise;
+    }
+
+    const existing = await db.getLoreByNameAndFranchise(normalizedEntry.name, normalizedEntry.franchise);
+    const itemToSave = existing
+      ? {
+        ...existing,
+        ...normalizedEntry,
+        id: existing.id,
+        content: {
+          summary: normalizedEntry.content?.summary || '',
+          profile: normalizedEntry.content?.profile || '',
+          speech: normalizedEntry.content?.speech || '',
+          relationships: normalizedEntry.content?.relationships || ''
+        }
+      }
+      : normalizedEntry;
+
+    await db.saveLore(itemToSave);
+    importedNames.push(normalizedEntry.name);
+    if (existing) {
+      updatedCount += 1;
+    } else {
+      importedCount += 1;
+    }
+  }
+
+  return { importedCount, updatedCount, importedNames };
+}
+
+function buildLoreImportDefaults(options = {}) {
+  const { currentStory } = getState();
+  const franchise = (options.franchise ?? currentStory?.franchise ?? '').trim();
+  const searchContext = (options.searchContext ?? currentStory?.franchiseContext ?? currentStory?.franchise ?? '').trim();
+  return {
+    franchise,
+    searchContext,
+    forceFranchise: options.forceFranchise ? franchise : '',
+    forceSearchContext: options.forceFranchise ? searchContext : ''
+  };
+}
 
 // 現在のロアブックタブモード
 let currentLorebookMode = 'world';

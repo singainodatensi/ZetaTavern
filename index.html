@@ -20,7 +20,7 @@
 
   <script>
     (function () {
-      var buildVersion = '20260607c';
+      var buildVersion = '20260608e';
       var url = new URL(window.location.href);
       if (url.searchParams.get('v') !== buildVersion) {
         url.searchParams.set('v', buildVersion);
@@ -31,7 +31,7 @@
   </script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260607c" defer></script>
+  <script type="module" src="js/app.js?v=20260608e" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -271,6 +271,15 @@
             <div class="library-header">
               <h2>ロアブック（世界観ナレッジ）</h2>
               <div class="library-actions">
+                <button id="lore-paste-btn" class="secondary-btn">
+                  <span class="material-symbols-outlined">content_paste</span>
+                  <span>コード貼り付け</span>
+                </button>
+                <button id="lore-import-btn" class="secondary-btn">
+                  <span class="material-symbols-outlined">download</span>
+                  <span>JSON取り込み</span>
+                </button>
+                <input type="file" id="lore-import-input" accept=".json" class="hidden" multiple>
                 <button id="lore-add-btn" class="primary-btn">
                   <span class="material-symbols-outlined">add</span>
                   <span>新規ロア追加</span>
