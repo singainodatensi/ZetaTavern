@@ -123,6 +123,10 @@ function _buildDropboxCorsSafeFetch(domain, endpoint, accessToken, options = {})
   corsSafeOptions.headers = {
     'Content-Type': 'text/plain; charset=dropbox-cors-hack',
   };
+  if (domain === 'api' && corsSafeOptions.method === 'POST' && (corsSafeOptions.body === undefined || corsSafeOptions.body === null)) {
+    // Dropbox の一部 RPC エンドポイントは「引数なし」を null として期待する。
+    corsSafeOptions.body = 'null';
+  }
 
   return { url: requestUrl.toString(), options: corsSafeOptions };
 }
@@ -294,7 +298,7 @@ export async function getAccessToken(code, redirectUri, codeVerifier, clientId) 
  * 接続テスト (現在のユーザー情報を取得)
  */
 export async function testConnection() {
-  return _request('api', '/users/get_current_account', { method: 'POST' });
+  return _request('api', '/users/get_current_account', { method: 'POST', body: 'null' });
 }
 
 /**

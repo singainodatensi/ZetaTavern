@@ -7,7 +7,7 @@ import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
 import * as ui from './ui.js?v=20260608h';
 import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260608h';
-import * as dropbox from './dropbox.js?v=20260608i';
+import * as dropbox from './dropbox.js?v=20260608j';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -1748,8 +1748,11 @@ async function initDropbox() {
       updateSyncStatusIndicator('idle');
     } catch (e) {
       console.warn('[Dropbox] 接続テストに失敗しました。', e);
-      updateDropboxUI(false);
-      updateSyncStatusIndicator('offline');
+      const nameEl = document.getElementById('dropbox-user-name');
+      if (nameEl && !nameEl.textContent.trim()) {
+        nameEl.textContent = 'Dropbox と連携済み (接続確認に失敗)';
+      }
+      updateSyncStatusIndicator('idle');
     }
   }
 }
