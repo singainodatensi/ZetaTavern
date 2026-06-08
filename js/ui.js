@@ -354,6 +354,97 @@ export function parseModelOutputToSegments(text) {
   return segments.length > 0 ? segments : [{ type: 'narration', text: text }];
 }
 
+async function buildDialogueMessageElement({
+  speaker,
+  avatarUrl,
+  roleClass,
+  speechLines = [],
+  imageToken = null,
+  story = null,
+  messageIndex = null,
+  editableSegment = null
+}) {
+  const msgEl = document.createElement('div');
+  msgEl.className = `chat-message ${roleClass} chat-message-dialogue`;
+  msgEl.dataset.speaker = speaker || '';
+  msgEl.dataset.expression = 'default';
+
+  let linesHTML = '';
+  for (const line of speechLines) {
+    if (line.kind === 'speech') {
+      linesHTML += `<p class="chat-speech">${escapeHTML(line.text)}</p>`;
+    } else if (line.kind === 'action') {
+      linesHTML += `<p class="chat-action"><em>*${escapeHTML(line.text)}*</em></p>`;
+    }
+  }
+
+  msgEl.innerHTML = `
+    <div class="chat-avatar chat-avatar-portrait">
+      <img src="${avatarUrl}" alt="${escapeHTML(speaker)}">
+    </div>
+    <div class="chat-content-wrapper chat-adv-panel">
+      <div class="chat-panel-header">
+        <span class="chat-sender-name">${escapeHTML(speaker)}</span>
+      </div>
+      <div class="chat-bubble chat-dialogue-body">
+        ${linesHTML}
+        ${editableSegment ? `
+          <button class="segment-edit-btn" title="この台詞を編集" type="button">
+            <span class="material-symbols-outlined" style="font-size:16px;">edit</span>
+          </button>` : ''}
+      </div>
+    </div>
+  `;
+
+  const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
+  const bubbleEl = msgEl.querySelector('.chat-bubble');
+  const editBtn = msgEl.querySelector('.segment-edit-btn');
+
+  if (contentWrapper && imageToken) {
+    const imageEl = createStoryImageElement(imageToken, story, 'story-inline-image story-inline-image-chat');
+    if (imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
+  }
+
+  if (bubbleEl && editBtn && editableSegment && Number.isInteger(messageIndex)) {
+    bubbleEl.addEventListener('mouseenter', () => editBtn.style.opacity = '1');
+    bubbleEl.addEventListener('mouseleave', () => editBtn.style.opacity = '0');
+    editBtn.onclick = () => showEditSegmentModal(messageIndex, editableSegment);
+  }
+
+  return msgEl;
+}
+
+async function buildUserNarrationMessageElement({
+  senderName,
+  avatarUrl,
+  htmlContent,
+  imageToken = null,
+  story = null
+}) {
+  const msgEl = document.createElement('div');
+  msgEl.className = 'chat-message user-role chat-message-dialogue';
+  msgEl.dataset.speaker = senderName || '';
+  msgEl.dataset.expression = 'default';
+  msgEl.innerHTML = `
+    <div class="chat-avatar chat-avatar-portrait"><img src="${avatarUrl}" alt="${escapeHTML(senderName)}"></div>
+    <div class="chat-content-wrapper chat-adv-panel">
+      <div class="chat-panel-header">
+        <span class="chat-sender-name">${escapeHTML(senderName)}</span>
+      </div>
+      <div class="chat-bubble chat-dialogue-body">${htmlContent}</div>
+    </div>
+  `;
+
+  if (imageToken) {
+    const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
+    const bubbleEl = msgEl.querySelector('.chat-bubble');
+    const imageEl = createStoryImageElement(imageToken, story, 'story-inline-image story-inline-image-chat');
+    if (contentWrapper && imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
+  }
+
+  return msgEl;
+}
+
 function matchCharacterByName(speakerName, characters) {
   if (!speakerName || !characters || characters.length === 0) return null;
   const normalised = speakerName.trim();
@@ -597,39 +688,16 @@ for (let i = 0; i < messages.length; i++) {
                 avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
               }
             }
-
-            const msgEl = document.createElement('div');
-            msgEl.className = `chat-message ${roleClass}`;
-            let linesHTML = '';
-            for (const line of seg.lines) {
-              if (line.kind === 'speech') {
-                linesHTML += `<p class="chat-speech">${escapeHTML(line.text)}</p>`;
-              } else if (line.kind === 'action') {
-                linesHTML += `<p class="chat-action"><em>*${escapeHTML(line.text)}*</em></p>`;
-              }
-            }
-            msgEl.innerHTML = `
-              <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
-              <div class="chat-content-wrapper" style="position: relative;">
-                <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
-                <div class="chat-bubble" style="position: relative;">
-                  ${linesHTML}
-                  <button class="segment-edit-btn" title="この台詞を編集" style="position: absolute; right: -28px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; opacity: 0; transition: opacity 0.2s; display: flex; align-items: center; justify-content: center; color: var(--text-sub);"><span class="material-symbols-outlined" style="font-size:16px;">edit</span></button>
-                </div>
-              </div>
-            `;
-            const bubbleEl = msgEl.querySelector('.chat-bubble');
-            const editBtn = msgEl.querySelector('.segment-edit-btn');
-            const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
-            if (contentWrapper && seg.image) {
-              const imageEl = createStoryImageElement(seg.image, currentStory, 'story-inline-image story-inline-image-chat');
-              if (imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
-            }
-            if (bubbleEl && editBtn) {
-              bubbleEl.addEventListener('mouseenter', () => editBtn.style.opacity = '1');
-              bubbleEl.addEventListener('mouseleave', () => editBtn.style.opacity = '0');
-              editBtn.onclick = () => showEditSegmentModal(i, seg);
-            }
+            const msgEl = await buildDialogueMessageElement({
+              speaker: seg.speaker,
+              avatarUrl,
+              roleClass,
+              speechLines: seg.lines,
+              imageToken: seg.image,
+              story: currentStory,
+              messageIndex: i,
+              editableSegment: seg
+            });
             contentContainer.appendChild(msgEl);
           }
         }
@@ -684,33 +752,22 @@ for (let i = 0; i < messages.length; i++) {
             if (charMatch) {
               avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
             }
-          const msgEl = document.createElement('div');
-            msgEl.className = 'chat-message bot-role';
-            
-            let linesHTML = '';
+            const speechLines = [];
             if (seg.action) {
-              linesHTML += `<p class="chat-action"><em>*${escapeHTML(seg.action)}*</em></p>`;
+              speechLines.push({ kind: 'action', text: seg.action });
             }
             if (seg.text) {
               const displaySpeech = seg.text.startsWith('「') ? seg.text : `「${seg.text}」`;
-              linesHTML += `<p class="chat-speech">${escapeHTML(displaySpeech)}</p>`;
+              speechLines.push({ kind: 'speech', text: displaySpeech });
             }
-
-            msgEl.innerHTML = `
-              <div class="chat-avatar"><img src="${avatarUrl}" alt="${escapeHTML(seg.speaker)}"></div>
-              <div class="chat-content-wrapper">
-                <span class="chat-sender-name">${escapeHTML(seg.speaker)}</span>
-                <div class="chat-bubble">
-                  ${linesHTML}
-                </div>
-              </div>
-            `;
-            if (seg.image) {
-              const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
-              const bubbleEl = msgEl.querySelector('.chat-bubble');
-              const imageEl = createStoryImageElement(seg.image, currentStory, 'story-inline-image story-inline-image-chat');
-              if (contentWrapper && imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
-            }
+            const msgEl = await buildDialogueMessageElement({
+              speaker: seg.speaker,
+              avatarUrl,
+              roleClass: 'bot-role',
+              speechLines,
+              imageToken: seg.image,
+              story: currentStory
+            });
             contentContainer.appendChild(msgEl);
           } else {
             let avatarUrl = 'assets/default-silhouette.png';
@@ -721,22 +778,13 @@ for (let i = 0; i < messages.length; i++) {
             let contentHTML = window.marked && typeof window.marked.parse === 'function'
               ? sanitizeHTML(window.marked.parse(seg.text))
               : sanitizeHTML(seg.text.replace(/\n/g, '<br>'));
-            
-            const msgEl = document.createElement('div');
-            msgEl.className = 'chat-message user-role';
-            msgEl.innerHTML = `
-              <div class="chat-avatar"><img src="${avatarUrl}" alt="${senderName}"></div>
-              <div class="chat-content-wrapper">
-                <span class="chat-sender-name">${senderName}</span>
-                <div class="chat-bubble">${contentHTML}</div>
-              </div>
-            `;
-            if (seg.image) {
-              const contentWrapper = msgEl.querySelector('.chat-content-wrapper');
-              const bubbleEl = msgEl.querySelector('.chat-bubble');
-              const imageEl = createStoryImageElement(seg.image, currentStory, 'story-inline-image story-inline-image-chat');
-              if (contentWrapper && imageEl) contentWrapper.insertBefore(imageEl, bubbleEl || null);
-            }
+            const msgEl = await buildUserNarrationMessageElement({
+              senderName,
+              avatarUrl,
+              htmlContent: contentHTML,
+              imageToken: seg.image,
+              story: currentStory
+            });
             contentContainer.appendChild(msgEl);
           }
         }
@@ -2385,9 +2433,11 @@ styleInject.textContent = `
   }
   @media (max-width: 1023px) {
     #story-viewport { padding: 12px 8px !important; }
-    .chat-message { margin-bottom: 14px !important; gap: 8px !important; }
-    .chat-avatar { width: 60px !important; height: 60px !important; }
-    .chat-bubble { padding: 10px 12px !important; max-width: 82% !important; }
+    .chat-message { margin-bottom: 14px !important; gap: 10px !important; }
+    .chat-avatar { width: 56px !important; height: 56px !important; border-radius: 10px !important; }
+    .chat-content-wrapper { max-width: calc(100% - 66px) !important; }
+    .chat-panel-header { min-height: 30px !important; padding: 7px 12px !important; }
+    .chat-bubble { padding: 12px 12px 13px !important; max-width: 100% !important; }
     .narration-content { padding-left: 48px !important; max-width: 95% !important; font-size: 0.95em !important; }
     
     /* モバイル向けアクションボタンの常時薄表示対応 */
@@ -2401,6 +2451,16 @@ styleInject.textContent = `
   .chat-content-wrapper {
     flex: 1;
     min-width: 0;
+  }
+  .chat-message-dialogue .chat-content-wrapper {
+    flex: 0 1 auto !important;
+    width: fit-content !important;
+    max-width: min(100%, 680px) !important;
+  }
+  .chat-message-dialogue .chat-adv-panel {
+    width: fit-content !important;
+    min-width: min(240px, 100%) !important;
+    max-width: 100% !important;
   }
   .chat-bubble p, .narration-content, .narration-content p, .chat-speech, .chat-action {
     word-break: break-word !important;
