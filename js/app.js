@@ -5,7 +5,7 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260608o';
+import * as ui from './ui.js?v=20260609a';
 import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260608l';
 import * as dropbox from './dropbox.js?v=20260608k';
 import { buildStoryCharacterRefs } from './story-characters.js';
@@ -23,6 +23,7 @@ let hasBooted = false;
 let isSyncInProgress = false; // 同期の多重実行を防ぐ排他ガードフラグ
 let isDropboxAutoSyncRunning = false;
 let pendingDropboxAutoSync = null;
+let hasDropboxAutoSyncEventBinding = false;
 
 const DROPBOX_SYNC_SETTING_KEYS = [
   'api_provider',
@@ -870,6 +871,13 @@ function toggleScreenVisibility(activeScreen) {
  * Binds all general DOM events.
  */
 async function bindEvents() {
+  if (!hasDropboxAutoSyncEventBinding && typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('dropbox-auto-sync-request', (event) => {
+      queueDropboxAutoSync(event?.detail?.storyId || null);
+    });
+    hasDropboxAutoSyncEventBinding = true;
+  }
+
   const mobileDrawer = document.getElementById('mobile-drawer');
   const sidebarContainer = document.getElementById('story-sidebar-container');
   const mobileMoreSheet = document.getElementById('mobile-more-sheet');
@@ -1312,6 +1320,7 @@ async function bindEvents() {
           const stories = await db.getStories();
           updateState({ stories });
           ui.renderSidebar();
+          queueDropboxAutoSync(currentStory.storyId);
         });
       }
     };
@@ -2361,6 +2370,7 @@ async function triggerBackgroundLoreLookup(story) {
         status: 'pending'
       };
       await db.saveLore(placeholder);
+      queueDropboxAutoSync(story?.storyId || null);
       if (getState().activeScreen === 'lorebook') {
         ui.renderLorebook();
       }
@@ -2380,12 +2390,14 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     if (shouldSkipAutoLoreRegistration(result, story)) {
       console.log(`[Lore Automatic Lookup] Skipped auto-registration for ${keyword}: ${result?.reason || 'not a stable world lore entry'}`);
       await db.deleteLore(placeholder.id);
+      queueDropboxAutoSync(story?.storyId || null);
       return;
     }
 
     const canonicalName = normalizeLoreEntryName(result.canonicalName || keyword);
     if (!canonicalName) {
       await db.deleteLore(placeholder.id);
+      queueDropboxAutoSync(story?.storyId || null);
       return;
     }
 
@@ -2393,12 +2405,14 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     if (existingCanonical && existingCanonical.id !== placeholder.id) {
       console.log(`[Lore Automatic Lookup] Skipped duplicate lore for ${canonicalName}.`);
       await db.deleteLore(placeholder.id);
+      queueDropboxAutoSync(story?.storyId || null);
       return;
     }
 
     if (result.type === 'character' && await hasCharacterLibraryConflict(canonicalName, franchise)) {
       console.log(`[Lore Automatic Lookup] Skipped duplicate character lore for ${canonicalName} because character library data takes priority.`);
       await db.deleteLore(placeholder.id);
+      queueDropboxAutoSync(story?.storyId || null);
       return;
     }
 
@@ -2412,6 +2426,7 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     placeholder.type = result.type || 'term';
     placeholder.status = 'completed';
     await db.saveLore(placeholder);
+    queueDropboxAutoSync(story?.storyId || null);
     console.log(`[Lore Automatic Lookup] Completed and saved lore for ${keyword}`);
     
     // ロアブック画面が表示されている場合はリアルタイムに再描画
@@ -2423,6 +2438,7 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     placeholder.status = 'failed';
     placeholder.content.summary = `自動検索に失敗しました。Error: ${err.message}`;
     await db.saveLore(placeholder);
+    queueDropboxAutoSync(story?.storyId || null);
     if (getState().activeScreen === 'lorebook') {
       ui.renderLorebook();
     }

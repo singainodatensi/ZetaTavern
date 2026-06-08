@@ -65,6 +65,13 @@ function normalizeSessionLoreEventForDisplay(event) {
   return '';
 }
 
+function requestDropboxAutoSync(storyId = null) {
+  if (typeof window === 'undefined' || !window.dispatchEvent) return;
+  window.dispatchEvent(new CustomEvent('dropbox-auto-sync-request', {
+    detail: { storyId: storyId || null }
+  }));
+}
+
 export async function getAvatarUrl(assetId) {
   if (!assetId) return 'assets/default-silhouette.png';
   if (blobUrlCache.has(assetId)) return blobUrlCache.get(assetId);
@@ -1544,6 +1551,7 @@ export async function renderCharacterLibrary() {
           updateState({ characters: updatedChars });
           renderCharacterLibrary();
           renderSidebar();
+          requestDropboxAutoSync();
         });
       }
     };
@@ -1824,6 +1832,7 @@ export async function showCharacterModal(char = null) {
       modal.classList.add('hidden');
       renderCharacterLibrary();
       renderSidebar();
+      requestDropboxAutoSync();
     } catch (err) {
       alert(`保存に失敗しました: ${err.message}`);
     }
@@ -1982,6 +1991,7 @@ async function importCharacterEntries(entries, defaults = {}) {
   updateState({ characters: updatedChars });
   renderCharacterLibrary();
   renderSidebar();
+  requestDropboxAutoSync();
 
   return { importedCount, withAvatarCount, importedNames };
 }
@@ -2147,6 +2157,7 @@ export async function importLoreJSON(files) {
     }
 
     await renderLorebook('world');
+    requestDropboxAutoSync();
 
     const headline = importedCount || updatedCount
       ? `ロアを取り込みました。`
@@ -2261,6 +2272,7 @@ export function showLorePasteModal() {
 
       const result = await importLoreEntries(entries, defaults);
       await renderLorebook('world');
+      requestDropboxAutoSync(currentStory?.storyId || null);
       closeModal();
 
       alert(`ロアを取り込みました。\n新規追加: ${result.importedCount}件\n上書き更新: ${result.updatedCount}件\n\n対象: ${result.importedNames.slice(0, 10).join(' / ')}${result.importedNames.length > 10 ? ' ...' : ''}`);
@@ -2530,6 +2542,7 @@ saveBtn.onclick = async () => {
       await db.saveStory(currentStory);
       const updatedStories = await db.getStories();
       updateState({ stories: updatedStories });
+      requestDropboxAutoSync(currentStory.storyId);
       closeModal();
       renderStoryList();
       renderSidebar();
@@ -3036,6 +3049,7 @@ async function _createLoreCandidateSection(candidates, currentStory) {
       const stories = await db.getStories();
       updateState({ stories });
       await renderLorebook('world');
+      requestDropboxAutoSync(currentStory.storyId);
       return;
     }
 
@@ -3071,6 +3085,7 @@ async function _createLoreCandidateSection(candidates, currentStory) {
     const stories = await db.getStories();
     updateState({ stories });
     await renderLorebook('world');
+    requestDropboxAutoSync(currentStory.storyId);
   });
 
   return section;
@@ -3162,6 +3177,7 @@ function _createFranchiseSection(franchise, items) {
       if (await confirmLoreDeletion(loreName)) {
         await db.deleteLore(loreId);
         renderLorebook();
+        requestDropboxAutoSync();
       }
     }
   });
@@ -3297,6 +3313,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     await db.saveStory(activeStory);
     const stories = await db.getStories();
     updateState({ stories });
+    requestDropboxAutoSync(activeStory.storyId);
   };
 
   const summaryInput = container.querySelector('#session-lore-editor-summary');
@@ -3542,5 +3559,6 @@ export function showLoreEditModal(lore = null, options = {}) {
 
     modal.remove();
     renderLorebook();
+    requestDropboxAutoSync(currentStory?.storyId || null);
   };
 }
