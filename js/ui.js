@@ -65,10 +65,13 @@ function normalizeSessionLoreEventForDisplay(event) {
   return '';
 }
 
-function requestDropboxAutoSync(storyId = null) {
+function requestDropboxAutoSync(storyId = null, options = {}) {
   if (typeof window === 'undefined' || !window.dispatchEvent) return;
   window.dispatchEvent(new CustomEvent('dropbox-auto-sync-request', {
-    detail: { storyId: storyId || null }
+    detail: {
+      storyId: storyId || null,
+      forceFull: !!options.forceFull
+    }
   }));
 }
 
@@ -2272,7 +2275,7 @@ export function showLorePasteModal() {
 
       const result = await importLoreEntries(entries, defaults);
       await renderLorebook('world');
-      requestDropboxAutoSync(currentStory?.storyId || null);
+      requestDropboxAutoSync(currentStory?.storyId || null, { forceFull: true });
       closeModal();
 
       alert(`ロアを取り込みました。\n新規追加: ${result.importedCount}件\n上書き更新: ${result.updatedCount}件\n\n対象: ${result.importedNames.slice(0, 10).join(' / ')}${result.importedNames.length > 10 ? ' ...' : ''}`);
@@ -2542,7 +2545,7 @@ saveBtn.onclick = async () => {
       await db.saveStory(currentStory);
       const updatedStories = await db.getStories();
       updateState({ stories: updatedStories });
-      requestDropboxAutoSync(currentStory.storyId);
+      requestDropboxAutoSync(currentStory.storyId, { forceFull: true });
       closeModal();
       renderStoryList();
       renderSidebar();
@@ -3085,7 +3088,7 @@ async function _createLoreCandidateSection(candidates, currentStory) {
     const stories = await db.getStories();
     updateState({ stories });
     await renderLorebook('world');
-    requestDropboxAutoSync(currentStory.storyId);
+    requestDropboxAutoSync(currentStory.storyId, { forceFull: true });
   });
 
   return section;
@@ -3177,7 +3180,7 @@ function _createFranchiseSection(franchise, items) {
       if (await confirmLoreDeletion(loreName)) {
         await db.deleteLore(loreId);
         renderLorebook();
-        requestDropboxAutoSync();
+        requestDropboxAutoSync(null, { forceFull: true });
       }
     }
   });
@@ -3559,6 +3562,6 @@ export function showLoreEditModal(lore = null, options = {}) {
 
     modal.remove();
     renderLorebook();
-    requestDropboxAutoSync(currentStory?.storyId || null);
+    requestDropboxAutoSync(currentStory?.storyId || null, { forceFull: true });
   };
 }
