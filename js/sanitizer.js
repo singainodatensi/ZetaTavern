@@ -10,7 +10,7 @@
  */
 export function escapeHTML(str) {
   if (!str) return '';
-  return str.replace(/[&<>"']/g, match => {
+  return String(str).replace(/[&<>"']/g, match => {
     switch (match) {
       case '&': return '&amp;';
       case '<': return '&lt;';

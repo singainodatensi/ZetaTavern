@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260608k';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260608l';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -46,6 +46,24 @@ const DIRECTOR_PARAMS = [
 // ===========================================
 
 const blobUrlCache = new Map();
+
+function normalizeSessionLoreEventForDisplay(event) {
+  if (typeof event === 'string') return event.trim();
+  if (event == null) return '';
+  if (typeof event === 'number' || typeof event === 'boolean') return String(event);
+  if (typeof event === 'object') {
+    const candidates = [event.text, event.summary, event.title, event.name, event.label, event.event];
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    try {
+      return JSON.stringify(event);
+    } catch (_) {
+      return '';
+    }
+  }
+  return '';
+}
 
 export async function getAvatarUrl(assetId) {
   if (!assetId) return 'assets/default-silhouette.png';
@@ -2952,7 +2970,9 @@ async function _renderSessionLore(container, renderVersion = 0) {
     </div>`;
 
   // 重要イベント
-  const keyEvents = sessionLore.key_events || [];
+  const keyEvents = Array.isArray(sessionLore.key_events)
+    ? sessionLore.key_events.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
+    : [];
   html += `
     <div class="session-lore-block">
       <div class="session-lore-block-header">

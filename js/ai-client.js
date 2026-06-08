@@ -314,6 +314,38 @@ function resolveStoryFranchise(story, characters = []) {
   return best;
 }
 
+function normalizeSessionLoreEvent(event) {
+  if (typeof event === 'string') return event.trim();
+  if (event == null) return '';
+  if (typeof event === 'number' || typeof event === 'boolean') return String(event);
+  if (typeof event === 'object') {
+    const candidates = [
+      event.text,
+      event.summary,
+      event.title,
+      event.name,
+      event.label,
+      event.event
+    ];
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    try {
+      return JSON.stringify(event);
+    } catch (_) {
+      return '';
+    }
+  }
+  return '';
+}
+
+function mergeSessionLoreEvents(existingEvents = [], nextEvents = []) {
+  const merged = [...existingEvents, ...nextEvents]
+    .map(normalizeSessionLoreEvent)
+    .filter(Boolean);
+  return Array.from(new Set(merged));
+}
+
 async function applySessionLoreUpdate(args, story) {
   if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
   if (args.summary) {
@@ -321,7 +353,7 @@ async function applySessionLoreUpdate(args, story) {
     story.session_lore.summary_source = 'ai';
   }
   if (args.key_events) {
-    story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), ...args.key_events]));
+    story.session_lore.key_events = mergeSessionLoreEvents(story.session_lore.key_events || [], args.key_events);
   }
   if (args.affinity_updates) {
     if (!story.relationshipMemory) story.relationshipMemory = {};
@@ -363,7 +395,7 @@ async function applyWorldLoreUpdate(args, story) {
       if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
         if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
         const sessionNote = buildSessionLoreNote(entry, name, summary);
-        story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), sessionNote]));
+        story.session_lore.key_events = mergeSessionLoreEvents(story.session_lore.key_events || [], [sessionNote]);
         reroutedCount++;
       }
       continue;
@@ -372,7 +404,7 @@ async function applyWorldLoreUpdate(args, story) {
     if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
       if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
       const sessionNote = buildSessionLoreNote(entry, name, summary);
-      story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), sessionNote]));
+      story.session_lore.key_events = mergeSessionLoreEvents(story.session_lore.key_events || [], [sessionNote]);
       reroutedCount++;
       continue;
     }
