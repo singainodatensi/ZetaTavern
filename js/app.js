@@ -5,7 +5,7 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260608n';
+import * as ui from './ui.js?v=20260608o';
 import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260608l';
 import * as dropbox from './dropbox.js?v=20260608k';
 import { buildStoryCharacterRefs } from './story-characters.js';
@@ -1339,6 +1339,10 @@ async function bindEvents() {
       }
       e.target.value = '';
     };
+  }
+  const charPasteBtn = document.getElementById('char-paste-btn');
+  if (charPasteBtn) {
+    charPasteBtn.onclick = () => ui.showCharacterPasteModal();
   }
 
   // 6b. Lore Import Trigger

@@ -166,6 +166,96 @@ ZetaTavern は、単なるチャット UI ではありません。
 - 性格
 - 台詞サンプル
 
+#### キャラクターコード貼り付けテンプレート
+
+キャラクターライブラリには、**JSON ファイル取り込み**だけでなく**コード貼り付け**でも登録できます。  
+ブラウザ版 Gemini / Claude / Meta AI などにキャラクター設定を作らせるときは、次の形式で出力させるとそのまま貼り付けやすいです。
+
+対応しているのは主に次です。
+
+- `zetatavern-character`
+- `chara_card_v2`
+- `chara_card_v3`
+- 旧式 V1 形式
+- `entries` 配列つきの複数キャラ JSON
+- キャラ配列の直貼り
+
+まずは **ZetaTavern 専用形式** を使うのが一番安定します。
+
+**単体キャラの推奨テンプレート**
+
+```json
+{
+  "spec": "zetatavern-character",
+  "version": 1,
+  "name": "中野四葉",
+  "category": "五等分の花嫁",
+  "tags": ["五等分の花嫁", "ヒロイン", "姉妹"],
+  "description": "中野家の四女。明るく運動神経が高く、感情表現が素直。",
+  "personality": "人懐っこく前向き。頼まれると断れない。自分より他人を優先しやすい。",
+  "mes_example": "四葉:「おはようー！」\n四葉:「えへへ、今日は何するの？」",
+  "avatarBase64": ""
+}
+```
+
+**複数キャラまとめ取り込みテンプレート**
+
+```json
+{
+  "spec": "zetatavern-characters",
+  "version": 1,
+  "entries": [
+    {
+      "name": "中野一花",
+      "category": "五等分の花嫁",
+      "tags": ["五等分の花嫁", "姉妹"],
+      "description": "中野家の長女。大人びた雰囲気を持つ女優志望。",
+      "personality": "余裕があり、からかい上手。時々本音を隠す。",
+      "mes_example": "一花:「お姉さんに任せなさい？」",
+      "avatarBase64": ""
+    },
+    {
+      "name": "中野四葉",
+      "category": "五等分の花嫁",
+      "tags": ["五等分の花嫁", "姉妹"],
+      "description": "中野家の四女。明るく元気で、身体能力が高い。",
+      "personality": "天真爛漫で協力的。思い込みで突っ走ることもある。",
+      "mes_example": "四葉:「やったー！」",
+      "avatarBase64": ""
+    }
+  ]
+}
+```
+
+**他の AI に渡す依頼文テンプレート**
+
+```txt
+以下のキャラクターを、ZetaTavern に取り込める JSON 形式で出力してください。
+
+条件:
+- JSONコードブロックのみを出力する
+- 形式は zetatavern-character を使う
+- 項目は name / category / tags / description / personality / mes_example / avatarBase64
+- avatarBase64 は画像がない場合は空文字でよい
+- description は外見・立場・背景の要約
+- personality は性格・価値観・行動傾向
+- mes_example は口調が分かる短い会話例を2〜4行
+- 日本語で書く
+
+対象キャラクター:
+中野四葉
+作品:
+五等分の花嫁
+```
+
+**補足**
+
+- `category` は作品名や所属カテゴリとして扱われる
+- `tags` はストーリータグ一致の判定にも使える
+- `avatarBase64` が空でも取り込み可能
+- コードブロックのまま貼り付けてよい
+- 既定のカテゴリ / タグを UI 側で上書きして登録することもできる
+
 ### 3. ロアブック
 
 次をまとめて扱います。

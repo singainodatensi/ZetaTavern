@@ -1854,74 +1854,268 @@ async function exportCharacterJSON(char) {
   } catch (err) { alert(`エクスポートに失敗しました: ${err.message}`); }
 }
 
+function normalizeImportedTags(value, defaults = []) {
+  if (Array.isArray(value)) {
+    return value.map(tag => String(tag || '').trim()).filter(Boolean);
+  }
+  if (typeof value === 'string') {
+    return value.split(',').map(tag => tag.trim()).filter(Boolean);
+  }
+  return Array.isArray(defaults) ? defaults : [];
+}
+
+function normalizeImportedCharacterEntry(importObj, defaults = {}) {
+  if (!importObj || typeof importObj !== 'object') {
+    return null;
+  }
+
+  const defaultCategory = (defaults.category || '').trim();
+  const defaultTags = Array.isArray(defaults.tags) ? defaults.tags : [];
+
+  let charData = {
+    name: '名称未設定',
+    category: defaultCategory,
+    tags: [...defaultTags],
+    description: '',
+    personality: '',
+    mes_example: '',
+    avatarBase64: ''
+  };
+
+  if (importObj.spec === 'zetatavern-character') {
+    charData.name = importObj.name || charData.name;
+    charData.category = importObj.category || charData.category;
+    charData.tags = normalizeImportedTags(importObj.tags, charData.tags);
+    charData.description = importObj.description || '';
+    charData.personality = importObj.personality || '';
+    charData.mes_example = importObj.mes_example || '';
+    charData.avatarBase64 = importObj.avatarBase64 || '';
+  } else if (importObj.spec === 'chara_card_v2' || importObj.spec === 'chara_card_v3') {
+    const data = importObj.data || {};
+    charData.name = data.name || charData.name;
+    charData.category = data.category || data.first_mes_category || charData.category;
+    charData.tags = normalizeImportedTags(data.tags, charData.tags);
+    charData.description = data.description || '';
+
+    let combinedPersonality = data.personality || '';
+    if (data.system_prompt) combinedPersonality += `\n\n【システム設定】\n${data.system_prompt}`;
+    if (data.creator_notes) combinedPersonality += `\n\n【クリエイターノート】\n${data.creator_notes}`;
+
+    charData.personality = combinedPersonality.trim();
+    charData.mes_example = data.mes_example || '';
+  } else if (importObj.name && importObj.description !== undefined) {
+    charData.name = importObj.name || charData.name;
+    charData.category = importObj.category || charData.category;
+    charData.tags = normalizeImportedTags(importObj.tags, charData.tags);
+    charData.description = importObj.description || '';
+    charData.personality = importObj.personality || '';
+    charData.mes_example = importObj.mes_example || '';
+    charData.avatarBase64 = importObj.avatarBase64 || '';
+  } else {
+    return null;
+  }
+
+  if (!charData.name || !String(charData.name).trim()) {
+    return null;
+  }
+
+  charData.name = String(charData.name).trim();
+  charData.category = String(charData.category || '').trim();
+  charData.tags = normalizeImportedTags(charData.tags, []);
+  charData.description = String(charData.description || '').trim();
+  charData.personality = String(charData.personality || '').trim();
+  charData.mes_example = String(charData.mes_example || '').trim();
+  charData.avatarBase64 = String(charData.avatarBase64 || '').trim();
+  return charData;
+}
+
+function extractCharacterEntriesFromImport(importObj, defaults = {}) {
+  if (Array.isArray(importObj)) {
+    return importObj.map(item => normalizeImportedCharacterEntry(item, defaults)).filter(Boolean);
+  }
+
+  if (!importObj || typeof importObj !== 'object') {
+    throw new Error('JSON の形式が不正です。');
+  }
+
+  if ((importObj.spec === 'zetatavern-characterbook' || importObj.spec === 'zetatavern-characters') && Array.isArray(importObj.entries)) {
+    return importObj.entries.map(item => normalizeImportedCharacterEntry(item, defaults)).filter(Boolean);
+  }
+
+  if (Array.isArray(importObj.entries)) {
+    return importObj.entries.map(item => normalizeImportedCharacterEntry(item, defaults)).filter(Boolean);
+  }
+
+  const single = normalizeImportedCharacterEntry(importObj, defaults);
+  return single ? [single] : [];
+}
+
+async function importCharacterEntries(entries, defaults = {}) {
+  let importedCount = 0;
+  let withAvatarCount = 0;
+  const importedNames = [];
+
+  for (const entry of entries) {
+    const tags = normalizeImportedTags(entry.tags, defaults.tags || []);
+    const charData = {
+      name: entry.name,
+      category: defaults.forceCategory ? defaults.category : (entry.category || defaults.category || ''),
+      tags: defaults.forceTags ? [...(defaults.tags || [])] : tags,
+      description: entry.description || '',
+      personality: entry.personality || '',
+      mes_example: entry.mes_example || '',
+      avatarAssetId: ''
+    };
+
+    if (entry.avatarBase64) {
+      const blob = db.base64ToBlob(entry.avatarBase64);
+      charData.avatarAssetId = await db.saveAsset(blob, blob.type);
+      withAvatarCount += 1;
+    }
+
+    await db.saveCharacter(charData);
+    importedCount += 1;
+    importedNames.push(charData.name);
+  }
+
+  const updatedChars = await db.getCharacters();
+  updateState({ characters: updatedChars });
+  renderCharacterLibrary();
+  renderSidebar();
+
+  return { importedCount, withAvatarCount, importedNames };
+}
+
+function buildCharacterImportDefaults(options = {}) {
+  const { currentStory } = getState();
+  const storyFranchise = currentStory?.franchise || '';
+  const category = (options.category ?? storyFranchise ?? '').trim();
+  const tags = normalizeImportedTags(options.tags, category ? [category] : []);
+  return {
+    category,
+    tags,
+    forceCategory: !!options.forceCategory,
+    forceTags: !!options.forceTags
+  };
+}
+
 export async function importCharacterJSON(file) {
   try {
     const text = await file.text();
     const importObj = JSON.parse(text);
-    
-    // ZetaTavernに取り込むための基本データ構造
-    let charData = {
-      name: '名称未設定', category: '', tags: [],
-      description: '', personality: '',
-      mes_example: '', avatarAssetId: ''
-    };
-    
-    let avatarBase64 = '';
-
-    // パターン1: ZetaTavern専用フォーマット
-    if (importObj.spec === 'zetatavern-character') {
-      charData.name = importObj.name || charData.name;
-      charData.category = importObj.category || '';
-      charData.tags = importObj.tags || [];
-      charData.description = importObj.description || '';
-      charData.personality = importObj.personality || '';
-      charData.mes_example = importObj.mes_example || '';
-      avatarBase64 = importObj.avatarBase64 || '';
-    } 
-    // パターン2: Character Card V2 / V3 フォーマット (SillyTavern, Chub等)
-    else if (importObj.spec === 'chara_card_v2' || importObj.spec === 'chara_card_v3') {
-      const data = importObj.data || {};
-      charData.name = data.name || charData.name;
-      charData.description = data.description || '';
-      
-      // V2カードの各種設定（クリエイターノートやシステムプロンプトなど）をpersonalityにまとめる
-      let combinedPersonality = data.personality || '';
-      if (data.system_prompt) combinedPersonality += `\n\n【システム設定】\n${data.system_prompt}`;
-      if (data.creator_notes) combinedPersonality += `\n\n【クリエイターノート】\n${data.creator_notes}`;
-      
-      charData.personality = combinedPersonality.trim();
-      charData.mes_example = data.mes_example || '';
-      charData.tags = data.tags || [];
-    } 
-    // パターン3: 古い V1 フォーマット (元祖 TavernAI)
-    else if (importObj.name && importObj.description !== undefined) {
-      charData.name = importObj.name;
-      charData.description = importObj.description || '';
-      charData.personality = importObj.personality || '';
-      charData.mes_example = importObj.mes_example || '';
-    } 
-    else {
+    const defaults = buildCharacterImportDefaults();
+    const entries = extractCharacterEntriesFromImport(importObj, defaults);
+    if (entries.length === 0) {
       throw new Error('キャラクターデータが見つかりませんでした。\n対応フォーマット: ZetaTavern, V2, V3, V1 JSON');
     }
 
-    // アバター画像の復元 (ZetaTavernからのエクスポート時のみ画像がBase64で同梱されている)
-    if (avatarBase64) {
-      // db.js の base64ToBlob が必要になります
-      const blob = db.base64ToBlob(avatarBase64);
-      charData.avatarAssetId = await db.saveAsset(blob, blob.type);
+    const result = await importCharacterEntries(entries, defaults);
+    alert(`キャラクターを取り込みました。\n新規追加: ${result.importedCount}件\n画像付き: ${result.withAvatarCount}件\n\n対象: ${result.importedNames.slice(0, 10).join(' / ')}${result.importedNames.length > 10 ? ' ...' : ''}\n\n（※画像がない項目は、編集画面からアバターを手動設定できます）`);
+  } catch (err) {
+    alert(`取り込みに失敗しました:\n${err.message}\n\n※正しいキャラクターカードのJSONファイルを選択してください。`);
+  }
+}
+
+export function showCharacterPasteModal() {
+  let modal = document.getElementById('character-paste-modal');
+  if (modal) modal.remove();
+
+  const defaults = buildCharacterImportDefaults();
+
+  modal = document.createElement('div');
+  modal.id = 'character-paste-modal';
+  modal.className = 'modal-wrapper';
+  modal.style.zIndex = '5000';
+  modal.innerHTML = `
+    <div class="modal-overlay"></div>
+    <div class="modal-content" style="max-width: 720px; width: 92%;">
+      <div class="modal-header">
+        <h3>キャラクターJSONを貼り付け</h3>
+        <button id="character-paste-close-btn" class="icon-btn-circle" type="button">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="lore-search-intro">
+          <span class="material-symbols-outlined">content_paste_go</span>
+          <p>外部AIが出力した <code>json</code> コードブロックを、そのまま貼り付けてキャラクター登録できます。</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group">
+            <label for="character-paste-category-input">既定のカテゴリ / 作品名</label>
+            <input type="text" id="character-paste-category-input" value="${escapeHTML(defaults.category)}" placeholder="例: リゼロ">
+          </div>
+          <div class="form-group">
+            <label for="character-paste-tags-input">既定のタグ</label>
+            <input type="text" id="character-paste-tags-input" value="${escapeHTML((defaults.tags || []).join(', '))}" placeholder="例: リゼロ, ヒロイン">
+          </div>
+        </div>
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-sub);">
+          <input id="character-paste-force-category-checkbox" type="checkbox">
+          <span>貼り付け内容のカテゴリより、上のカテゴリ / タグを優先して登録する</span>
+        </label>
+        <div class="form-group">
+          <label for="character-paste-textarea">貼り付け内容</label>
+          <textarea id="character-paste-textarea" rows="16" style="width:100%; resize: vertical;" placeholder='jsonコード、またはコードブロックをそのまま貼り付け'></textarea>
+        </div>
+        <details style="font-size: 12px; color: var(--text-sub);">
+          <summary>対応形式</summary>
+          <div style="margin-top: 8px; line-height: 1.7;">
+            <div>- <code>zetatavern-character</code></div>
+            <div>- <code>chara_card_v2</code> / <code>chara_card_v3</code></div>
+            <div>- 旧式 V1 形式</div>
+            <div>- <code>entries</code> 配列つきの複数キャラ JSON</div>
+            <div>- キャラ配列の直貼り</div>
+          </div>
+        </details>
+      </div>
+      <div class="modal-footer">
+        <button id="character-paste-cancel-btn" class="secondary-btn" type="button">キャンセル</button>
+        <button id="character-paste-submit-btn" class="primary-btn" type="button">取り込む</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const closeModal = () => modal.remove();
+  modal.querySelector('#character-paste-close-btn')?.addEventListener('click', closeModal);
+  modal.querySelector('#character-paste-cancel-btn')?.addEventListener('click', closeModal);
+  modal.addEventListener('click', e => {
+    if (e.target === modal || e.target.classList.contains('modal-overlay')) closeModal();
+  });
+
+  const textarea = modal.querySelector('#character-paste-textarea');
+  textarea?.focus();
+
+  modal.querySelector('#character-paste-submit-btn')?.addEventListener('click', async () => {
+    const rawText = textarea?.value || '';
+    const jsonText = stripCodeFence(rawText);
+    if (!jsonText) {
+      alert('JSONコードを貼り付けてください。');
+      return;
     }
 
-    // データベースに保存し、UIを更新
-    await db.saveCharacter(charData);
-    const updatedChars = await db.getCharacters();
-    updateState({ characters: updatedChars });
-    renderCharacterLibrary();
-    renderSidebar();
-    
-    alert(`キャラクター「${charData.name}」を取り込みました。\n（※画像は含まれていないため、編集画面からアバター画像を手動で設定してください）`);
-  } catch (err) { 
-    alert(`取り込みに失敗しました:\n${err.message}\n\n※正しいキャラクターカードのJSONファイルを選択してください。`); 
-  }
+    const category = modal.querySelector('#character-paste-category-input')?.value.trim() || '';
+    const tags = normalizeImportedTags(modal.querySelector('#character-paste-tags-input')?.value || '', category ? [category] : []);
+    const forceCategory = !!modal.querySelector('#character-paste-force-category-checkbox')?.checked;
+
+    try {
+      const parsed = JSON.parse(jsonText);
+      const defaults = buildCharacterImportDefaults({ category, tags, forceCategory, forceTags: forceCategory });
+      const entries = extractCharacterEntriesFromImport(parsed, defaults);
+      if (entries.length === 0) {
+        alert('取り込めるキャラクターデータが見つかりませんでした。name や entries を確認してください。');
+        return;
+      }
+
+      const result = await importCharacterEntries(entries, defaults);
+      closeModal();
+      alert(`キャラクターを取り込みました。\n新規追加: ${result.importedCount}件\n画像付き: ${result.withAvatarCount}件\n\n対象: ${result.importedNames.slice(0, 10).join(' / ')}${result.importedNames.length > 10 ? ' ...' : ''}`);
+    } catch (err) {
+      alert(`貼り付け内容の取り込みに失敗しました:\n${err.message}\n\n※ コードブロック形式のままでも取り込めます。`);
+    }
+  });
 }
 
 export async function importLoreJSON(files) {
