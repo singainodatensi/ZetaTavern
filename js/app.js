@@ -5,7 +5,7 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260609a';
+import * as ui from './ui.js?v=20260609b';
 import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260608l';
 import * as dropbox from './dropbox.js?v=20260608k';
 import { buildStoryCharacterRefs } from './story-characters.js';
@@ -1970,6 +1970,7 @@ async function performDropboxPush() {
   try {
     const stories    = await db.getStories();
     const characters = await db.getCharacters();
+    const lores      = await db.getWorldLores();
 
     const assetIds = new Set();
     [...stories, ...characters].forEach(item => {
@@ -1987,6 +1988,7 @@ async function performDropboxPush() {
     await dropbox.pushToDropbox({
       stories,
       characters,
+      lores,
       settings: await collectDropboxSettings(),
       assets,
       onProgress: msg => setDropboxProgress(msg)
@@ -2021,7 +2023,7 @@ async function performDropboxPull() {
     const localAssets = await db.getAll('assets');
     const localAssetIds = new Set(localAssets.map(a => a.assetId));
 
-    const { stories, characters, settings, newAssets } = await dropbox.pullFromDropbox({
+    const { stories, characters, lores, settings, newAssets } = await dropbox.pullFromDropbox({
       localAssetIds,
       onProgress: msg => setDropboxProgress(msg)
     });
@@ -2042,12 +2044,16 @@ async function performDropboxPull() {
 
     await db.clearStore('stories');
     await db.clearStore('characters');
+    await db.clearStore('world_lore');
 
     for (const story of stories) {
       await db.saveStory(story);
     }
     for (const char of characters) {
       await db.saveCharacter(char);
+    }
+    for (const lore of (lores || [])) {
+      await db.saveLore(lore);
     }
 
     const now = Date.now();
@@ -2066,10 +2072,11 @@ async function performDropboxPull() {
 
     ui.renderStoryList();
     ui.renderCharacterLibrary();
+    ui.renderLorebook();
     ui.renderStory();
     ui.renderSidebar();
 
-    alert(`クラウドからの復元が完了しました！\nストーリー: ${stories.length}件, キャラクター: ${characters.length}件, 新規アセット: ${newAssets.length}件`);
+    alert(`クラウドからの復元が完了しました！\nストーリー: ${stories.length}件, キャラクター: ${characters.length}件, ロア: ${(lores || []).length}件, 新規アセット: ${newAssets.length}件`);
   } catch (err) {
     setDropboxProgress(null);
     alert(`Pull 同期に失敗しました:\n${err.message}`);
@@ -2132,6 +2139,7 @@ async function performAutoDropboxSync(storyId = null) {
 async function performDropboxPushSilent({ storyId = null, preferDelta = false } = {}) {
   const stories    = await db.getStories();
   const characters = await db.getCharacters();
+  const lores      = await db.getWorldLores();
   const settings = await collectDropboxSettings();
 
   if (preferDelta && storyId) {
@@ -2163,6 +2171,7 @@ async function performDropboxPushSilent({ storyId = null, preferDelta = false } 
   await dropbox.pushToDropbox({
     stories,
     characters,
+    lores,
     settings,
     assets,
     onProgress: msg => console.log('[Dropbox AutoSync]', msg)
@@ -2259,7 +2268,7 @@ async function performStartupSync() {
     const localAssets = await db.getAll('assets');
     const localAssetIds = new Set(localAssets.map(a => a.assetId));
 
-    const { stories, characters, settings, newAssets } = await dropbox.pullFromDropbox({
+    const { stories, characters, lores, settings, newAssets } = await dropbox.pullFromDropbox({
       localAssetIds,
       onProgress: msg => console.log('[Dropbox StartupSync]', msg)
     });
@@ -2272,8 +2281,10 @@ async function performStartupSync() {
       }
       await db.clearStore('stories');
       await db.clearStore('characters');
+      await db.clearStore('world_lore');
       for (const story of stories) await db.saveStory(story);
       for (const char of characters) await db.saveCharacter(char);
+      for (const lore of (lores || [])) await db.saveLore(lore);
 
       const updatedStories = await db.getStories();
       const updatedChars   = await db.getCharacters();
@@ -2289,6 +2300,7 @@ async function performStartupSync() {
       }
       ui.renderStoryList();
       ui.renderCharacterLibrary();
+      ui.renderLorebook();
     }
 
     const now = Date.now();

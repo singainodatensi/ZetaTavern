@@ -42,6 +42,7 @@ const LOCK_TTL_MS     = 30 * 60 * 1000;
 const V2_ROOT         = '/ZetaTavern/v2';
 const V2_MANIFEST     = `${V2_ROOT}/manifest.json`;
 const V2_SETTINGS     = `${V2_ROOT}/settings.json`;
+const V2_LORES        = `${V2_ROOT}/world_lore.json`;
 const V2_CHAR_DIR     = `${V2_ROOT}/characters`;
 const V2_STORY_DIR    = `${V2_ROOT}/stories`;
 const MESSAGE_CHUNK_SIZE = 100;
@@ -421,7 +422,7 @@ function splitStoryForSync(story) {
   return { meta, chunks };
 }
 
-async function uploadV2Data({ stories = [], characters = [], settings = {}, onProgress }) {
+async function uploadV2Data({ stories = [], characters = [], lores = [], settings = {}, onProgress }) {
   const now = Date.now();
   const progress = msg => { if (onProgress) onProgress(msg); };
 
@@ -437,9 +438,13 @@ async function uploadV2Data({ stories = [], characters = [], settings = {}, onPr
     schemaVersion: 2,
     updatedAt: now,
     settingsPath: V2_SETTINGS,
+    loresPath: V2_LORES,
     characters: {},
     stories: {}
   };
+
+  progress(`ロア ${lores.length} 件を同期中...`);
+  await uploadJson(V2_LORES, { lores, updatedAt: now });
 
   progress(`キャラクター ${characters.length} 件を同期中...`);
   for (const character of characters) {
@@ -530,6 +535,8 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
   progress('同期目次を取得しました。差分を復元中...');
   const settingsPayload = await downloadJson(manifest.settingsPath || V2_SETTINGS);
   const settings = settingsPayload?.settings || {};
+  const lorePayload = await downloadJson(manifest.loresPath || V2_LORES);
+  const lores = Array.isArray(lorePayload?.lores) ? lorePayload.lores : [];
 
   const characters = [];
   for (const entry of Object.values(manifest.characters || {})) {
@@ -567,7 +574,7 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
     }
   }
 
-  return { stories, characters, settings, newAssets };
+  return { stories, characters, lores, settings, newAssets };
 }
 
 // ============================================================
@@ -782,7 +789,7 @@ export async function checkLockFile() {
  * @param {Array}  opts.assets  - [{ assetId, blob }]
  * @param {Function} [opts.onProgress]  - (message: string) => void
  */
-export async function pushToDropbox({ stories, characters, settings, assets, onProgress }) {
+export async function pushToDropbox({ stories, characters, lores, settings, assets, onProgress }) {
   const progress = msg => { console.log('[Dropbox Push]', msg); if (onProgress) onProgress(msg); };
 
   progress('同期を開始します...');
@@ -794,7 +801,7 @@ export async function pushToDropbox({ stories, characters, settings, assets, onP
   await uploadLockFile('push');
   try {
     progress('分割メタデータをアップロード中...');
-    await uploadV2Data({ stories, characters, settings, onProgress });
+    await uploadV2Data({ stories, characters, lores, settings, onProgress });
 
     progress('アセットフォルダを確認中...');
     await ensureAssetsFolderExists();
@@ -884,7 +891,7 @@ export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
  * @param {object} opts
  * @param {Set<string>} opts.localAssetIds  - ローカルにすでに存在するアセットIDの集合
  * @param {Function} [opts.onProgress]
- * @returns {{ stories: Array, characters: Array, settings: object, newAssets: Array<{assetId, blob}> }}
+ * @returns {{ stories: Array, characters: Array, lores: Array, settings: object, newAssets: Array<{assetId, blob}> }}
  */
 export async function pullFromDropbox({ localAssetIds, onProgress }) {
   const progress = msg => { console.log('[Dropbox Pull]', msg); if (onProgress) onProgress(msg); };
