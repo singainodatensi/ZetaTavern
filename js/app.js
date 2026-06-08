@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260609c';
+import * as ui from './ui.js?v=20260609d';
 import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260608l';
-import * as dropbox from './dropbox.js?v=20260609c';
+import * as dropbox from './dropbox.js?v=20260609d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -875,7 +875,9 @@ async function bindEvents() {
     window.addEventListener('dropbox-auto-sync-request', (event) => {
       queueDropboxAutoSync({
         storyId: event?.detail?.storyId || null,
-        forceFull: !!event?.detail?.forceFull
+        forceFull: !!event?.detail?.forceFull,
+        syncStory: !!event?.detail?.syncStory,
+        syncLores: !!event?.detail?.syncLores
       });
     });
     hasDropboxAutoSyncEventBinding = true;
@@ -2091,14 +2093,22 @@ async function performDropboxPull() {
 
 /** ターン終了後に自動同期を行うか確認する（静的UI表示） */
 function queueDropboxAutoSync(request = {}) {
+  const hasExplicitScope = request?.syncStory !== undefined || request?.syncLores !== undefined;
   const normalized = {
     storyId: request?.storyId || null,
-    forceFull: !!request?.forceFull
+    forceFull: !!request?.forceFull,
+    syncStory: hasExplicitScope ? !!request.syncStory : !!request?.storyId,
+    syncLores: !!request?.syncLores
   };
+  if (!normalized.forceFull && !normalized.syncStory && !normalized.syncLores) {
+    normalized.forceFull = true;
+  }
   pendingDropboxAutoSync = pendingDropboxAutoSync
     ? {
       storyId: normalized.storyId || pendingDropboxAutoSync.storyId || null,
-      forceFull: pendingDropboxAutoSync.forceFull || normalized.forceFull
+      forceFull: pendingDropboxAutoSync.forceFull || normalized.forceFull,
+      syncStory: pendingDropboxAutoSync.syncStory || normalized.syncStory,
+      syncLores: pendingDropboxAutoSync.syncLores || normalized.syncLores
     }
     : normalized;
   if (isDropboxAutoSyncRunning) return;
@@ -2118,7 +2128,7 @@ function queueDropboxAutoSync(request = {}) {
   }, 0);
 }
 
-async function performAutoDropboxSync({ storyId = null, forceFull = false } = {}) {
+async function performAutoDropboxSync({ storyId = null, forceFull = false, syncStory = false, syncLores = false } = {}) {
   const connected = await dropbox.isConnected();
   if (!connected) return;
 
@@ -2133,7 +2143,16 @@ async function performAutoDropboxSync({ storyId = null, forceFull = false } = {}
     console.log('[Dropbox] 自動同期を開始...');
     updateSyncStatusIndicator('syncing');
     try {
-      await performDropboxPushSilent({ storyId, preferDelta: !forceFull });
+      let completed = false;
+      if (!forceFull && (syncStory || syncLores)) {
+        completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores });
+        if (!completed) {
+          console.log('[Dropbox AutoSync] 差分同期の基準がないため、フル同期します。');
+        }
+      }
+      if (!completed) {
+        await performDropboxPushSilent({ storyId, preferDelta: !forceFull && syncStory && !syncLores });
+      }
       const now = Date.now();
       await db.saveSetting('dropbox_last_sync', now);
       updateLastSyncText(now);
@@ -2188,6 +2207,34 @@ async function performDropboxPushSilent({ storyId = null, preferDelta = false } 
     assets,
     onProgress: msg => console.log('[Dropbox AutoSync]', msg)
   });
+}
+
+async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = false, syncLores = false } = {}) {
+  const stories = await db.getStories();
+  const lores = await db.getWorldLores();
+  const settings = await collectDropboxSettings();
+
+  if (syncStory && storyId) {
+    const story = stories.find(item => item.storyId === storyId);
+    if (story) {
+      const storyResult = await dropbox.pushStoryDeltaToDropbox({
+        story,
+        settings,
+        onProgress: msg => console.log('[Dropbox AutoSync]', msg)
+      });
+      if (!storyResult) return false;
+    }
+  }
+
+  if (syncLores) {
+    const loreResult = await dropbox.pushLoreDeltaToDropbox({
+      lores,
+      onProgress: msg => console.log('[Dropbox AutoSync]', msg)
+    });
+    if (!loreResult) return false;
+  }
+
+  return true;
 }
 
 /**
@@ -2394,7 +2441,7 @@ async function triggerBackgroundLoreLookup(story) {
         status: 'pending'
       };
       await db.saveLore(placeholder);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, forceFull: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
       if (getState().activeScreen === 'lorebook') {
         ui.renderLorebook();
       }
@@ -2414,14 +2461,14 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     if (shouldSkipAutoLoreRegistration(result, story)) {
       console.log(`[Lore Automatic Lookup] Skipped auto-registration for ${keyword}: ${result?.reason || 'not a stable world lore entry'}`);
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, forceFull: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
       return;
     }
 
     const canonicalName = normalizeLoreEntryName(result.canonicalName || keyword);
     if (!canonicalName) {
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, forceFull: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
       return;
     }
 
@@ -2429,14 +2476,14 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     if (existingCanonical && existingCanonical.id !== placeholder.id) {
       console.log(`[Lore Automatic Lookup] Skipped duplicate lore for ${canonicalName}.`);
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, forceFull: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
       return;
     }
 
     if (result.type === 'character' && await hasCharacterLibraryConflict(canonicalName, franchise)) {
       console.log(`[Lore Automatic Lookup] Skipped duplicate character lore for ${canonicalName} because character library data takes priority.`);
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, forceFull: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
       return;
     }
 
@@ -2450,7 +2497,7 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     placeholder.type = result.type || 'term';
     placeholder.status = 'completed';
     await db.saveLore(placeholder);
-    queueDropboxAutoSync({ storyId: story?.storyId || null, forceFull: true });
+    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
     console.log(`[Lore Automatic Lookup] Completed and saved lore for ${keyword}`);
     
     // ロアブック画面が表示されている場合はリアルタイムに再描画
@@ -2462,7 +2509,7 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     placeholder.status = 'failed';
     placeholder.content.summary = `自動検索に失敗しました。Error: ${err.message}`;
     await db.saveLore(placeholder);
-    queueDropboxAutoSync({ storyId: story?.storyId || null, forceFull: true });
+    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
     if (getState().activeScreen === 'lorebook') {
       ui.renderLorebook();
     }

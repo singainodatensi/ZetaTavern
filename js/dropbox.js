@@ -884,6 +884,44 @@ export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
   }
 }
 
+export async function pushLoreDeltaToDropbox({ lores, onProgress }) {
+  const progress = msg => { console.log('[Dropbox Lore Delta]', msg); if (onProgress) onProgress(msg); };
+
+  progress('ロアブック差分同期を開始します...');
+  const lock = await checkLockFile();
+  if (lock) {
+    throw new Error(`他の端末が同期中です (${lock.operation}) 。しばらく待ってから再試行してください。`);
+  }
+
+  await uploadLockFile('delta-push-lores');
+  try {
+    const manifest = await downloadJson(V2_MANIFEST);
+    if (!manifest || manifest.schemaVersion !== 2) {
+      return null;
+    }
+
+    const now = Date.now();
+    await ensureFolderExists('/ZetaTavern');
+    await ensureFolderExists(V2_ROOT);
+
+    progress('ロアブックを差分アップロード中...');
+    await uploadJson(manifest.loresPath || V2_LORES, { lores: Array.isArray(lores) ? lores : [], updatedAt: now });
+    manifest.loresPath = manifest.loresPath || V2_LORES;
+    manifest.updatedAt = now;
+
+    progress('同期目次を更新中...');
+    await uploadJson(V2_MANIFEST, manifest);
+    progress('ロアブック差分同期完了！');
+    return manifest;
+  } finally {
+    try {
+      await deleteLockFile();
+    } catch (error) {
+      console.warn('[Dropbox] ロックファイル削除に失敗しました。期限切れ後に自動解除されます。', error);
+    }
+  }
+}
+
 /**
  * Dropbox → ローカル へのフルプル同期。
  * メタデータをダウンロードし、ローカルに存在しないアセットを取得して返す。
