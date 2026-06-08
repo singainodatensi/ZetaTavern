@@ -95,6 +95,52 @@ async function _saveTokens(tokens) {
   await saveSetting(TOKENS_KEY, tokens);
 }
 
+function _buildDropboxCorsSafeFetch(domain, endpoint, accessToken, options = {}) {
+  const requestUrl = new URL(`https://${domain}.dropboxapi.com/2${endpoint}`);
+  const sourceHeaders = new Headers(options.headers || {});
+  const method = String(options.method || 'POST').toUpperCase();
+  const corsSafeOptions = {
+    ...options,
+    method,
+    mode: 'cors',
+    headers: {},
+  };
+
+  requestUrl.searchParams.set('authorization', `Bearer ${accessToken}`);
+  requestUrl.searchParams.set('reject_cors_preflight', 'true');
+
+  const dropboxArg = sourceHeaders.get('Dropbox-API-Arg');
+  if (dropboxArg) {
+    requestUrl.searchParams.set('arg', dropboxArg);
+  }
+
+  if (endpoint === '/files/download') {
+    corsSafeOptions.method = 'GET';
+    delete corsSafeOptions.body;
+    return { url: requestUrl.toString(), options: corsSafeOptions };
+  }
+
+  corsSafeOptions.headers = {
+    'Content-Type': 'text/plain; charset=dropbox-cors-hack',
+  };
+
+  return { url: requestUrl.toString(), options: corsSafeOptions };
+}
+
+async function _readDropboxErrorResponse(response) {
+  const text = await response.text().catch(() => '');
+  if (!text) {
+    return `Dropbox API エラー (${response.status}): ${response.statusText}`;
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    return parsed.error_summary || JSON.stringify(parsed.error) || text;
+  } catch (_) {
+    return text;
+  }
+}
+
 async function _getClientId() {
   let id = await getSetting(CLIENT_ID_KEY, '');
   if (!id) {
@@ -156,14 +202,10 @@ async function _request(domain, endpoint, options = {}, retryCount = 0) {
     tokens = await _refreshAccessToken(tokens.refresh_token);
   }
 
-  const url = `https://${domain}.dropboxapi.com/2${endpoint}`;
-  const headers = {
-    Authorization: `Bearer ${tokens.access_token}`,
-    ...options.headers,
-  };
+  const request = _buildDropboxCorsSafeFetch(domain, endpoint, tokens.access_token, options);
 
   try {
-    const response = await fetch(url, { ...options, headers });
+    const response = await fetch(request.url, request.options);
 
     if (!response.ok) {
       // 401 → トークンリフレッシュ → 1回だけリトライ
@@ -173,11 +215,7 @@ async function _request(domain, endpoint, options = {}, retryCount = 0) {
         return _request(domain, endpoint, options, 1);
       }
 
-      let errMsg = `Dropbox API エラー (${response.status}): ${response.statusText}`;
-      try {
-        const errJson = await response.json();
-        errMsg = errJson.error_summary || JSON.stringify(errJson.error) || errMsg;
-      } catch (_) { /* ignore */ }
+      const errMsg = await _readDropboxErrorResponse(response);
       throw new Error(errMsg);
     }
 
