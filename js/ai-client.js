@@ -316,7 +316,10 @@ function resolveStoryFranchise(story, characters = []) {
 
 async function applySessionLoreUpdate(args, story) {
   if (!story.session_lore) story.session_lore = { summary: '', key_events: [] };
-  if (args.summary) story.session_lore.summary = args.summary;
+  if (args.summary) {
+    story.session_lore.summary = args.summary;
+    story.session_lore.summary_source = 'ai';
+  }
   if (args.key_events) {
     story.session_lore.key_events = Array.from(new Set([...(story.session_lore.key_events || []), ...args.key_events]));
   }
@@ -801,6 +804,44 @@ export function stripLeakedThinkingText(text) {
   return stripped.length >= 40 ? stripped : working;
 }
 
+function extractLeakedThinkingAndStory(text) {
+  if (!text || typeof text !== 'string') return { thought: null, text };
+
+  const working = text.trim();
+  const lines = working.split('\n');
+  const metaLine =
+    /^(User input:|Context:|Setting:|Goal:|Visuals?:|Action:|Encounter:|Let's |Third[- ]person|Show, don't|Avoid direct|Strict adherence|No meta|Maybe |Actually |Who\?|Describe the|Introduce the|Drafting the scene:|The user wants|Current Situation:|\* )/i;
+
+  let storyStart = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) {
+      if (storyStart === i) storyStart = i + 1;
+      continue;
+    }
+    if (/^---+$/.test(line) || metaLine.test(line)) {
+      storyStart = i + 1;
+      continue;
+    }
+    if (hasSignificantJapanese(line)) {
+      storyStart = i;
+      break;
+    }
+    if (/^[A-Za-z0-9\s,.:;'"!?()[\]\-–—/*]+$/.test(line) && line.length > 12) {
+      storyStart = i + 1;
+      continue;
+    }
+    break;
+  }
+
+  const thought = lines.slice(0, storyStart).join('\n').trim();
+  const storyText = lines.slice(storyStart).join('\n').trim();
+  if (storyText.length >= 40 && thought.length >= 20) {
+    return { thought, text: storyText };
+  }
+  return { thought: null, text: stripLeakedThinkingText(working) };
+}
+
 /**
  * API レスポンスから物語本文だけを取り出す（thought パートを除外）
  */
@@ -825,7 +866,15 @@ export function extractStoryTextAndThoughtFromApiResponse(result) {
   // もしthoughtフラグがなく混ざっているモデル（2.5 Flash等）へのフォールバック
   if (!storyText && thoughtChunks.length === 0) {
     const full = parts.map(p => p.text).filter(Boolean).join('\n\n').trim();
-    return { text: stripLeakedThinkingText(full), thought: null };
+    return extractLeakedThinkingAndStory(full);
+  }
+
+  if (storyText && thoughtChunks.length === 0) {
+    const full = parts.map(p => p.text).filter(Boolean).join('\n\n').trim();
+    const leaked = extractLeakedThinkingAndStory(full);
+    if (leaked.thought && leaked.text) {
+      return leaked;
+    }
   }
 
   return { text: storyText, thought: thoughtChunks.join('\n\n').trim() };
@@ -835,22 +884,40 @@ export function extractStoryTextAndThoughtFromApiResponse(result) {
 function buildThinkingConfig(thinkingLevel, modelName) {
   const m = (modelName || '').toLowerCase();
 
-  // ★ 安全装置：Gemmaシリーズや、Thinkingに非対応な古いモデルの場合は強制的にオフにする
-  if (m.includes('gemma') || m.includes('1.5') || (m.includes('2.0') && !m.includes('thinking'))) {
+  // Gemma 系や古い非対応モデルでは Thinking 要約を要求しない
+  if (!m.includes('gemini') || m.includes('gemma') || m.includes('1.5') || (m.includes('2.0') && !m.includes('thinking'))) {
     return null;
   }
 
-  let budget = 1024; // デフォルトは Standard
-
   if (thinkingLevel === 'none') {
-    return null; // 思考機能をオフ
-  } else if (thinkingLevel === 'minimal') {
+    return null;
+  }
+
+  // Gemini 3 系は thinkingLevel を優先する
+  if (/gemini-3(?:[.-]|$)/.test(m)) {
+    let level = 'medium';
+    if (thinkingLevel === 'minimal') {
+      level = 'minimal';
+    } else if (thinkingLevel === 'high') {
+      level = 'high';
+    }
+    return {
+      includeThoughts: true,
+      thinkingLevel: level
+    };
+  }
+
+  let budget = 1024; // Gemini 2.5 系の標準
+  if (thinkingLevel === 'minimal') {
     budget = 512;
   } else if (thinkingLevel === 'high') {
     budget = 4096;
   }
 
-  return { thinkingBudget: budget };
+  return {
+    includeThoughts: true,
+    thinkingBudget: budget
+  };
 }
 
 /**

@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260608h';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -3031,6 +3031,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     saveSummaryBtn.onclick = async () => {
       if (!activeStory.session_lore) activeStory.session_lore = { summary: '', key_events: [] };
       activeStory.session_lore.summary = summaryInput.value.trim();
+      activeStory.session_lore.summary_source = 'manual';
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };

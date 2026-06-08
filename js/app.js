@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260608e';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js';
+import * as ui from './ui.js?v=20260608h';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260608h';
 import * as dropbox from './dropbox.js';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -1422,7 +1422,7 @@ async function promptForStoryTitle(defaultValue = '新規ストーリー') {
           <h3 style="margin:0; font-size:16px;">新規ストーリー作成</h3>
           <p style="margin:0; font-size:12px; color: var(--text-sub, #666);">タイトルを入力してください。</p>
         </div>
-        <input id="story-title-prompt-input" type="text" value="${defaultValue.replace(/"/g, '&quot;')}" style="width:100%; padding:10px 12px; border-radius:6px; border:1px solid var(--border-color, #ccc); background: var(--bg-input, transparent); color: inherit; box-sizing:border-box;">
+        <input id="story-title-prompt-input" type="text" value="${defaultValue.replace(/"/g, '&quot;')}" style="width:100%; padding:10px 12px; border-radius:6px; border:1px solid var(--border-color, #ccc); background: var(--bg-input, transparent); color: var(--text-color, #fff); caret-color: var(--text-color, #fff); box-sizing:border-box;">
         <div style="display:flex; justify-content:flex-end; gap:8px;">
           <button id="story-title-prompt-cancel" class="secondary-btn" type="button">キャンセル</button>
           <button id="story-title-prompt-ok" class="primary-btn" type="button">作成</button>
@@ -1523,6 +1523,63 @@ async function createNewStory() {
   }
 }
 
+function getSessionLoreSignature(story) {
+  return JSON.stringify({
+    session_lore: story?.session_lore || null,
+    relationshipMemory: story?.relationshipMemory || null
+  });
+}
+
+function extractFallbackSessionSummary(text) {
+  const cleaned = (text || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/\*\*/g, '')
+    .replace(/[`#>*_]/g, '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => !/^(A|B|C)[\.\):：）．、]/.test(line))
+    .filter(line => !/^【[^】]+】$/.test(line))
+    .filter(line => !/^[^\s「【\[]{1,24}(?:（[^）]+）)?[:：]/.test(line))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const sentences = splitJapaneseSentences(cleaned);
+  const picked = sentences.find(sentence => sentence.length >= 12) || cleaned;
+  if (!picked) return '';
+  return picked.length > 120 ? `${picked.slice(0, 117).trim()}...` : picked;
+}
+
+function applyFallbackSessionLoreUpdate(story, userText, aiText) {
+  if (!story.session_lore) {
+    story.session_lore = { summary: '', key_events: [] };
+  }
+
+  const nextSummary = extractFallbackSessionSummary(aiText);
+  const nextEvents = [];
+  const trimmedUserText = (userText || '').trim();
+
+  if (trimmedUserText) {
+    const userEvent = trimmedUserText.length > 90 ? `${trimmedUserText.slice(0, 87).trim()}...` : trimmedUserText;
+    nextEvents.push(`主人公行動: ${userEvent}`);
+  }
+  if (nextSummary) {
+    nextEvents.push(`直近展開: ${nextSummary}`);
+  }
+
+  if (nextEvents.length > 0) {
+    story.session_lore.key_events = Array.from(
+      new Set([...(story.session_lore.key_events || []), ...nextEvents])
+    ).slice(-20);
+  }
+
+  if ((story.session_lore.summary_source || 'auto') !== 'manual' && nextSummary) {
+    story.session_lore.summary = nextSummary;
+    story.session_lore.summary_source = 'auto';
+  }
+}
+
 /**
  * Main turn handler. Sends messages history and states to Gemini API and appends responses.
  * 再生成機能やエラー時のリトライ処理にも対応。
@@ -1580,9 +1637,15 @@ async function submitStoryTurn(mode = 'normal') {
   ui.renderStory();
 
   try {
+    const beforeLoreSignature = getSessionLoreSignature(currentStory);
     const aiResponse = await generateStoryResponse(currentStory); // ★ 変数名を変更
     if (!aiResponse?.text) {
       throw new Error('AIから有効な本文が返されませんでした。');
+    }
+
+    const afterLoreSignature = getSessionLoreSignature(currentStory);
+    if (beforeLoreSignature === afterLoreSignature) {
+      applyFallbackSessionLoreUpdate(currentStory, userText, aiResponse.text);
     }
 
     currentStory.messages.push({
