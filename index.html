@@ -21,7 +21,7 @@
 
   <script>
     (function () {
-      var buildVersion = '20260609d';
+      var buildVersion = '20260609g';
       var url = new URL(window.location.href);
       if (url.searchParams.get('v') !== buildVersion) {
         url.searchParams.set('v', buildVersion);
@@ -32,7 +32,7 @@
   </script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260609d" defer></script>
+  <script type="module" src="js/app.js?v=20260609g" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -162,6 +162,7 @@
                     <span class="material-symbols-outlined">send</span>
                   </button>
                 </div>
+                <div id="api-usage-panel" class="api-usage-panel hidden"></div>
               </div>
             </div>
 
@@ -411,6 +412,14 @@
                 <label for="autoscroll-toggle-checkbox">
                   <strong>メッセージ更新時の自動スクロール</strong>
                   <span>OFFにすると、新しいメッセージが追加されても画面が勝手に一番下へ移動しなくなります。</span>
+                </label>
+              </div>
+
+              <div class="form-group-checkbox" style="margin-top: 12px;">
+                <input type="checkbox" id="prompt-debug-toggle-checkbox">
+                <label for="prompt-debug-toggle-checkbox">
+                  <strong>トークン内訳デバッグ表示</strong>
+                  <span>直近のトークン使用量、入力内訳、メッセージごとの使用量を表示します。普段はOFF推奨です。</span>
                 </label>
               </div>
             </div>

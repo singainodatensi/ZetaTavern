@@ -22,6 +22,9 @@ const state = {
   uiMode: 'novel',       // 'novel' (visual text-focused), 'chat' (standard chat avatars)
   isGenerating: false,
   showChoices: true,     // Option A/B/C toggle
+  lastApiUsage: null,
+  apiUsageHistory: [],
+  promptDebugEnabled: false,
   
   // Participant attendance for current active story
   // e.g., { "char-uuid": "active" | "absent" }

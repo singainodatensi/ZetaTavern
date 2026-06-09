@@ -859,6 +859,99 @@ body {
   align-items: flex-end;
 }
 
+.api-usage-panel {
+  max-width: 800px;
+  margin: 0 auto 10px;
+  width: calc(100% - 64px);
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-sub);
+}
+
+.api-usage-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.api-usage-panel-header strong {
+  color: var(--text-main);
+  font-size: 12px;
+}
+
+.api-usage-panel-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.api-usage-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.api-usage-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(124, 77, 255, 0.14);
+  color: var(--text-main);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.api-usage-debug-details {
+  margin-top: 10px;
+  border-top: 1px dashed var(--color-border);
+  padding-top: 10px;
+}
+
+.api-usage-debug-details summary {
+  cursor: pointer;
+  color: var(--text-main);
+  font-size: 12px;
+}
+
+.api-usage-debug-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.api-usage-debug-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.api-usage-debug-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+}
+
+.api-usage-debug-label {
+  color: var(--text-main);
+  flex: 1;
+  min-width: 0;
+}
+
+.api-usage-debug-value {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 #user-input-field {
   flex: 1;
   background: var(--bg-input);
@@ -938,6 +1031,15 @@ body {
   font-size: 12px;
   color: var(--text-muted);
   font-style: italic;
+}
+
+.message-usage-meta {
+  max-width: 800px;
+  margin: 4px auto 12px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
 }
 
 /* 6. Right Sidebar (Scene State & Character Configs) */

@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260609d';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260608l';
+import * as ui from './ui.js?v=20260609g';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260609g';
 import * as dropbox from './dropbox.js?v=20260609d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -37,6 +37,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'dropbox_sync_frequency',
   'lore_auto_search_enabled',
   'thinking_level',
+  'prompt_debug_enabled',
   'api_timeout',
   'api_retries',
   'font_size',
@@ -621,6 +622,7 @@ async function bootApp() {
   ui.renderStoryList();
   ui.renderCharacterLibrary();
   ui.renderStory();
+  ui.renderApiUsagePanel();
   ui.renderSidebar();
   ui.bindScrollJumpControls();
 
@@ -642,11 +644,13 @@ async function bootApp() {
       // メモリリーク防止のため、古いアバター画像Blob URLキャッシュをクリーンアップ
       ui.clearBlobUrlCache();
       ui.renderStory();
+      ui.renderApiUsagePanel();
       ui.renderSidebar();
       fillStorySettingsForm(state.currentStory);
     } else if (event === 'stateChanged') {
       // Toggle screens
       toggleScreenVisibility(state.activeScreen);
+      ui.renderApiUsagePanel();
       if (state.activeScreen === 'lorebook') {
         ui.renderLorebook();
       }
@@ -691,6 +695,7 @@ async function loadConfigurations() {
   const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
   const loreAutoSearchEnabled = await db.getSetting('lore_auto_search_enabled', false);
   const thinkingLevel = await db.getSetting('thinking_level', 'standard');
+  const promptDebugEnabled = await db.getSetting('prompt_debug_enabled', false);
   
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
   const apiTimeout = await db.getSetting('api_timeout', 60);
@@ -721,7 +726,8 @@ async function loadConfigurations() {
     narrationColor: narrationColor,
     narrationOpacity: narrationOpacity,
     loreAutoSearchEnabled: loreAutoSearchEnabled,
-    thinkingLevel: thinkingLevel // ★ 追加
+    thinkingLevel: thinkingLevel, // ★ 追加
+    promptDebugEnabled
   });
 
   // Prefill settings form
@@ -739,6 +745,7 @@ async function loadConfigurations() {
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
   const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
+  const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
@@ -752,6 +759,7 @@ async function loadConfigurations() {
   if (nColorEl) nColorEl.value = narrationColor;
   if (nOpacityEl) nOpacityEl.value = narrationOpacity;
   if (thinkingEl) thinkingEl.value = thinkingLevel; // ★ 追加
+  if (promptDebugEl) promptDebugEl.checked = promptDebugEnabled;
 
   const normalizedCustomModels = Array.isArray(customModels) ? [...new Set(customModels.filter(Boolean))] : [];
   if (model && !DEFAULT_MODEL_VALUES.includes(model) && !normalizedCustomModels.includes(model)) {
@@ -1083,6 +1091,7 @@ async function bindEvents() {
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
   const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
+  const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
 
   if (provEl) {
     provEl.onchange = (e) => {
@@ -1157,6 +1166,15 @@ async function bindEvents() {
       const val = e.target.value;
       updateState({ thinkingLevel: val });
       db.saveSetting('thinking_level', val);
+    };
+  }
+  if (promptDebugEl) {
+    promptDebugEl.onchange = (e) => {
+      const val = e.target.checked;
+      updateState({ promptDebugEnabled: val });
+      db.saveSetting('prompt_debug_enabled', val);
+      ui.renderApiUsagePanel();
+      ui.renderStory();
     };
   }
   // ナレーション表示設定変更のイベント監視
@@ -1670,6 +1688,7 @@ async function submitStoryTurn(mode = 'normal') {
       role: 'model',
       content: aiResponse.text,         // ★ 本文
       thought: aiResponse.thought || '', // ★ 思考内容を追加保存
+      usage: aiResponse.usage || null,
       timestamp: Date.now()
     });
 

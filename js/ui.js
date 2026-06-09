@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260608l';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260609g';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -76,6 +76,71 @@ function requestDropboxAutoSync(storyId = null, options = {}) {
       syncLores: !!options.syncLores
     }
   }));
+}
+
+function formatUsageNumber(value) {
+  return Number(value || 0).toLocaleString('ja-JP');
+}
+
+function formatUsageTypeLabel(requestType) {
+  const labels = {
+    story: 'ストーリー生成',
+    'character-search': 'キャラクター検索',
+    'lore-search': 'ロア検索'
+  };
+  return labels[requestType] || requestType || 'API';
+}
+
+export function renderApiUsagePanel() {
+  const panel = document.getElementById('api-usage-panel');
+  if (!panel) return;
+
+  const { lastApiUsage, promptDebugEnabled } = getState();
+  if (!promptDebugEnabled || !lastApiUsage) {
+    panel.classList.add('hidden');
+    panel.innerHTML = '';
+    return;
+  }
+
+  const timestampText = new Date(lastApiUsage.timestamp || Date.now()).toLocaleTimeString('ja-JP');
+  const chips = [
+    `入力 ${formatUsageNumber(lastApiUsage.promptTokenCount)}`,
+    `出力 ${formatUsageNumber(lastApiUsage.candidatesTokenCount)}`
+  ];
+  if (lastApiUsage.thoughtsTokenCount > 0) chips.push(`Thinking ${formatUsageNumber(lastApiUsage.thoughtsTokenCount)}`);
+  if (lastApiUsage.totalTokenCount > 0) chips.push(`合計 ${formatUsageNumber(lastApiUsage.totalTokenCount)}`);
+  if (lastApiUsage.requestCount > 1) chips.push(`API往復 ${formatUsageNumber(lastApiUsage.requestCount)}`);
+
+  panel.innerHTML = `
+    <div class="api-usage-panel-header">
+      <span class="material-symbols-outlined">monitoring</span>
+      <strong>直近のトークン使用量</strong>
+      <span class="api-usage-panel-meta">${escapeHTML(formatUsageTypeLabel(lastApiUsage.requestType))} / ${escapeHTML(lastApiUsage.modelName || 'unknown')} / ${escapeHTML(timestampText)}</span>
+    </div>
+    <div class="api-usage-chip-row">
+      ${chips.map(text => `<span class="api-usage-chip">${escapeHTML(text)}</span>`).join('')}
+    </div>
+    ${lastApiUsage.debug?.breakdown?.length ? `
+      <details class="api-usage-debug-details">
+        <summary>入力内訳デバッグ</summary>
+        <div class="api-usage-debug-meta">
+          <span>入力文字数 ${formatUsageNumber(lastApiUsage.debug.promptTotalChars)}</span>
+          <span>System ${formatUsageNumber(lastApiUsage.debug.systemInstructionChars)}</span>
+          <span>会話 ${formatUsageNumber(lastApiUsage.debug.conversationChars)}</span>
+          <span>Schema ${formatUsageNumber(lastApiUsage.debug.toolSchemaChars)}</span>
+        </div>
+        <div class="api-usage-debug-list">
+          ${lastApiUsage.debug.breakdown.slice(0, 12).map(item => `
+            <div class="api-usage-debug-row">
+              <span class="api-usage-debug-label">${escapeHTML(item.label)}</span>
+              <span class="api-usage-debug-value">${formatUsageNumber(item.chars)} chars / 推定 ${formatUsageNumber(item.estimatedPromptTokens)} tokens</span>
+            </div>
+          `).join('')}
+        </div>
+      </details>
+    ` : ''}
+  `;
+  panel.classList.remove('hidden');
 }
 
 export async function getAvatarUrl(assetId) {
@@ -868,6 +933,20 @@ for (let i = 0; i < messages.length; i++) {
       };
     }
     msgWrapper.appendChild(actionsEl);
+
+    if (isModel && msg.usage && getState().promptDebugEnabled) {
+      const usageEl = document.createElement('div');
+      usageEl.className = 'message-usage-meta';
+      const usageParts = [
+        `入力 ${formatUsageNumber(msg.usage.promptTokenCount)}`,
+        `出力 ${formatUsageNumber(msg.usage.candidatesTokenCount)}`
+      ];
+      if (msg.usage.thoughtsTokenCount > 0) usageParts.push(`Thinking ${formatUsageNumber(msg.usage.thoughtsTokenCount)}`);
+      if (msg.usage.totalTokenCount > 0) usageParts.push(`合計 ${formatUsageNumber(msg.usage.totalTokenCount)}`);
+      if (msg.usage.requestCount > 1) usageParts.push(`往復 ${formatUsageNumber(msg.usage.requestCount)}`);
+      usageEl.textContent = `使用量: ${usageParts.join(' / ')}`;
+      msgWrapper.appendChild(usageEl);
+    }
 
     // ★ 画面（container）ではなく、裏側の箱（fragment）に要素を追加する
     fragment.appendChild(msgWrapper);

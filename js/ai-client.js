@@ -44,6 +44,7 @@ function hasCharacterLoreConflict(lore, characters, franchise) {
 }
 
 const DEFAULT_SEARCH_MODEL_NAME = 'gemini-2.5-flash-lite';
+const FULL_CHARACTER_CONTEXT_INTERVAL = 5;
 
 function selectSearchCapableModel(modelName) {
   const requested = (modelName || '').trim();
@@ -61,6 +62,20 @@ function resolveSearchModelName(appState) {
   const preferred = (appState?.searchModelName || '').trim();
   if (preferred) return selectSearchCapableModel(preferred);
   return selectSearchCapableModel(appState?.modelName || DEFAULT_SEARCH_MODEL_NAME);
+}
+
+function buildCompactCharacterHint(character) {
+  const cues = [];
+  if (character?.personality) cues.push(character.personality.trim().replace(/\s+/g, ' ').slice(0, 80));
+  if (character?.description && cues.length === 0) cues.push(character.description.trim().replace(/\s+/g, ' ').slice(0, 60));
+  return cues.filter(Boolean).join(' / ');
+}
+
+function shouldSendFullCharacterProfiles(story) {
+  const completedModelTurns = Array.isArray(story?.messages)
+    ? story.messages.filter(message => message?.role === 'model').length
+    : 0;
+  return completedModelTurns === 0 || completedModelTurns % FULL_CHARACTER_CONTEXT_INTERVAL === 0;
 }
 
 function normalizeLoreType(type) {
@@ -257,6 +272,196 @@ function isSameLoreCandidate(candidate, franchise, type, name) {
   return normalizeLoreKey(candidate?.franchise) === normalizeLoreKey(franchise) &&
     normalizeLoreType(candidate?.type || '') === type &&
     normalizeLoreKey(candidate?.name) === normalizeLoreKey(name);
+}
+
+function createUsageAccumulator(requestType, modelName) {
+  return {
+    requestType,
+    modelName,
+    requestCount: 0,
+    promptTokenCount: 0,
+    candidatesTokenCount: 0,
+    thoughtsTokenCount: 0,
+    toolUsePromptTokenCount: 0,
+    cachedContentTokenCount: 0,
+    totalTokenCount: 0
+  };
+}
+
+function addUsageMetadata(accumulator, usageMetadata) {
+  if (!accumulator || !usageMetadata) return accumulator;
+  accumulator.requestCount += 1;
+  accumulator.promptTokenCount += Number(usageMetadata.promptTokenCount || 0);
+  accumulator.candidatesTokenCount += Number(usageMetadata.candidatesTokenCount || 0);
+  accumulator.thoughtsTokenCount += Number(usageMetadata.thoughtsTokenCount || 0);
+  accumulator.toolUsePromptTokenCount += Number(usageMetadata.toolUsePromptTokenCount || 0);
+  accumulator.cachedContentTokenCount += Number(usageMetadata.cachedContentTokenCount || 0);
+  accumulator.totalTokenCount += Number(usageMetadata.totalTokenCount || 0);
+  return accumulator;
+}
+
+function publishUsageSnapshot(accumulator) {
+  if (!accumulator || accumulator.requestCount <= 0) return null;
+  const promptTotalChars = Number(accumulator.debug?.promptTotalChars || 0);
+  const promptTokenCount = Number(accumulator.promptTokenCount || 0);
+  let debug = null;
+
+  if (accumulator.debug) {
+    const breakdown = Object.entries(accumulator.debug.sections || {})
+      .map(([label, chars]) => ({
+        label,
+        chars,
+        estimatedPromptTokens: promptTotalChars > 0 && promptTokenCount > 0
+          ? Math.round((chars / promptTotalChars) * promptTokenCount)
+          : 0
+      }))
+      .sort((a, b) => b.chars - a.chars);
+
+    debug = {
+      promptTotalChars,
+      systemInstructionChars: accumulator.debug.systemInstructionChars || 0,
+      conversationChars: accumulator.debug.conversationChars || 0,
+      toolSchemaChars: accumulator.debug.toolSchemaChars || 0,
+      userMessageChars: accumulator.debug.userMessageChars || 0,
+      modelMessageChars: accumulator.debug.modelMessageChars || 0,
+      functionResponseChars: accumulator.debug.functionResponseChars || 0,
+      breakdown
+    };
+  }
+
+  const snapshot = {
+    ...accumulator,
+    debug,
+    timestamp: Date.now()
+  };
+  const state = getState();
+  const history = Array.isArray(state.apiUsageHistory) ? state.apiUsageHistory : [];
+  updateState({
+    lastApiUsage: snapshot,
+    apiUsageHistory: [snapshot, ...history].slice(0, 20)
+  });
+  if (state.promptDebugEnabled) {
+    console.log(`[AI Usage][${snapshot.requestType}]`, snapshot);
+  }
+  return snapshot;
+}
+
+function stringifyDebugPart(part) {
+  if (!part) return '';
+  if (typeof part.text === 'string') return part.text;
+  try {
+    return JSON.stringify(part);
+  } catch (_) {
+    return '';
+  }
+}
+
+function collectInstructionSections(text) {
+  const normalized = String(text || '').replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const sections = [];
+  let currentLabel = '導入・基本方針';
+  let buffer = [];
+
+  const flush = () => {
+    const chunk = buffer.join('\n').trim();
+    if (!chunk) return;
+    sections.push({ label: currentLabel, chars: chunk.length });
+    buffer = [];
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const headingMatch = trimmed.match(/^【(.+?)】$/);
+    if (headingMatch) {
+      flush();
+      currentLabel = headingMatch[1];
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  return sections;
+}
+
+function ensureDebugAccumulator(accumulator) {
+  if (!accumulator.debug) {
+    accumulator.debug = {
+      promptTotalChars: 0,
+      systemInstructionChars: 0,
+      conversationChars: 0,
+      toolSchemaChars: 0,
+      userMessageChars: 0,
+      modelMessageChars: 0,
+      functionResponseChars: 0,
+      sections: {}
+    };
+  }
+  return accumulator.debug;
+}
+
+function addDebugSection(debug, label, chars) {
+  if (!chars) return;
+  debug.sections[label] = (debug.sections[label] || 0) + chars;
+}
+
+function accumulatePromptDebug(accumulator, { systemInstruction = '', contents = [], tools = [] } = {}) {
+  const debug = ensureDebugAccumulator(accumulator);
+
+  const systemSections = collectInstructionSections(systemInstruction);
+  let systemChars = 0;
+  for (const section of systemSections) {
+    systemChars += section.chars;
+    addDebugSection(debug, `System: ${section.label}`, section.chars);
+  }
+  debug.systemInstructionChars += systemChars;
+
+  let conversationChars = 0;
+  let userChars = 0;
+  let modelChars = 0;
+  let functionResponseChars = 0;
+  for (const item of contents) {
+    const role = item?.role === 'model' ? 'model' : 'user';
+    const parts = Array.isArray(item?.parts) ? item.parts : [];
+    let itemChars = 0;
+    let containsFunctionResponse = false;
+    for (const part of parts) {
+      const text = stringifyDebugPart(part);
+      const len = text.length;
+      if (part?.functionResponse) containsFunctionResponse = true;
+      itemChars += len;
+    }
+    conversationChars += itemChars;
+    if (containsFunctionResponse) {
+      functionResponseChars += itemChars;
+      addDebugSection(debug, '会話履歴: Function Response', itemChars);
+      continue;
+    }
+    if (role === 'model') {
+      modelChars += itemChars;
+      addDebugSection(debug, '会話履歴: AIメッセージ', itemChars);
+    } else {
+      userChars += itemChars;
+      addDebugSection(debug, '会話履歴: ユーザーメッセージ', itemChars);
+    }
+  }
+  debug.conversationChars += conversationChars;
+  debug.userMessageChars += userChars;
+  debug.modelMessageChars += modelChars;
+  debug.functionResponseChars += functionResponseChars;
+
+  let toolSchemaChars = 0;
+  if (Array.isArray(tools) && tools.length > 0) {
+    try {
+      toolSchemaChars = JSON.stringify(tools).length;
+    } catch (_) {
+      toolSchemaChars = 0;
+    }
+  }
+  debug.toolSchemaChars += toolSchemaChars;
+  addDebugSection(debug, 'Function Schema', toolSchemaChars);
+
+  debug.promptTotalChars += systemChars + conversationChars + toolSchemaChars;
 }
 
 function shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch) {
@@ -609,15 +814,30 @@ export async function buildSystemInstruction(story) {
   }
 
   // 4. Character roster / specifications
+  const includeFullCharacterProfiles = shouldSendFullCharacterProfiles(story);
   instruction += `【登場人物・キャラクター設定】\n`;
   const scopedCharacters = getStoryScopedCharacters(allCharacters, story);
   if (scopedCharacters.length > 0) {
-    for (const char of scopedCharacters) {
-      instruction += `■ ${char.name}\n`;
-      instruction += `・詳細設定・容姿: ${char.description || '特になし'}\n`;
-      instruction += `・性格・特徴: ${char.personality || '特になし'}\n`;
-      if (char.mes_example) {
-        instruction += `・台詞・口調サンプル:\n${char.mes_example}\n`;
+    if (includeFullCharacterProfiles) {
+      instruction += `※ このターンはキャラクター設定のフル更新ターンです。各人物の詳細設定と口調サンプルを再確認してから描写してください。\n\n`;
+      for (const char of scopedCharacters) {
+        instruction += `■ ${char.name}\n`;
+        instruction += `・詳細設定・容姿: ${char.description || '特になし'}\n`;
+        instruction += `・性格・特徴: ${char.personality || '特になし'}\n`;
+        if (char.mes_example) {
+          instruction += `・台詞・口調サンプル:\n${char.mes_example}\n`;
+        }
+        instruction += `\n`;
+      }
+    } else {
+      instruction += `※ このターンは軽量モードです。詳細なキャラクター設定全文は省略し、名前と要点のみを再掲します。口調や関係性は直近の文脈と過去のフル更新ターンを維持してください。\n\n`;
+      for (const char of scopedCharacters) {
+        const compactHint = buildCompactCharacterHint(char);
+        instruction += `・${char.name}`;
+        if (compactHint) {
+          instruction += `: ${compactHint}`;
+        }
+        instruction += `\n`;
       }
       instruction += `\n`;
     }
@@ -980,6 +1200,7 @@ export async function generateStoryResponse(story) {
 
   const modelName = appState.modelName || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  const usageAccumulator = createUsageAccumulator('story', modelName);
 
   const generationConfig = {
     temperature: 0.9,
@@ -1085,6 +1306,11 @@ export async function generateStoryResponse(story) {
 
       // ★ 追加：Function Calling 往復用のループ（AIがメモを更新して本文を書くまで最大3回まで往復する）
       for (let fcTurn = 0; fcTurn < 3; fcTurn++) {
+        accumulatePromptDebug(usageAccumulator, {
+          systemInstruction,
+          contents: currentContents,
+          tools
+        });
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1105,6 +1331,7 @@ export async function generateStoryResponse(story) {
         }
 
         const result = await response.json();
+        addUsageMetadata(usageAccumulator, result?.usageMetadata);
 
         // Function Calling (update_session_lore) の呼び出し判定・実行
         const calls = result?.candidates?.[0]?.content?.parts?.filter(p => p.functionCall) || [];
@@ -1189,7 +1416,8 @@ export async function generateStoryResponse(story) {
       }
 
       updateState({ activeAbortController: null });
-      return extracted;
+      const usage = publishUsageSnapshot(usageAccumulator);
+      return { ...extracted, usage };
 
     } catch (err) {
       clearTimeout(timeoutId);
@@ -1292,6 +1520,7 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
 
   const requestedModelName = appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME;
   const modelName = resolveSearchModelName(appState);
+  const usageAccumulator = createUsageAccumulator('character-search', modelName);
   if (modelName !== requestedModelName) {
     console.log(`[Character Search] Switched model from ${requestedModelName} to ${modelName} for googleSearch support.`);
   }
@@ -1316,6 +1545,7 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
   }
 
   const result = await response.json();
+  addUsageMetadata(usageAccumulator, result?.usageMetadata);
   const parts = result?.candidates?.[0]?.content?.parts;
   if (!parts?.length) throw new Error('APIから有効なテキストが返されませんでした。');
 
@@ -1337,6 +1567,7 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
     throw new Error('AIが正しいJSON形式で出力しませんでした。');
   }
 
+  publishUsageSnapshot(usageAccumulator);
   return parsed;
 }
 
@@ -1391,6 +1622,7 @@ export async function generateLoreProfileFromSearch(name, franchise) {
 
   const requestedModelName = appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME;
   const searchModelName = resolveSearchModelName(appState);
+  const usageAccumulator = createUsageAccumulator('lore-search', searchModelName);
   if (searchModelName !== requestedModelName) {
     console.log(`[Lore Search] Switched model from ${requestedModelName} to ${searchModelName} for googleSearch support.`);
   }
@@ -1413,6 +1645,7 @@ export async function generateLoreProfileFromSearch(name, franchise) {
   }
 
   const result = await response.json();
+  addUsageMetadata(usageAccumulator, result?.usageMetadata);
   const parts = result?.candidates?.[0]?.content?.parts;
   if (!parts?.length) throw new Error('APIから有効なテキストが返されませんでした。');
 
@@ -1431,6 +1664,7 @@ export async function generateLoreProfileFromSearch(name, franchise) {
     throw new Error('AIが正しいJSON形式で出力しませんでした。');
   }
 
+  publishUsageSnapshot(usageAccumulator);
   return {
     shouldRegister: parsed.shouldRegister !== false,
     canonicalName: normalizeLoreEntryName(parsed.canonicalName || name),
