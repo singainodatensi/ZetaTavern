@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260610b';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260610b';
+import * as ui from './ui.js?v=20260610d';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260610d';
 import * as dropbox from './dropbox.js?v=20260609d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -37,7 +37,10 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'dropbox_sync_frequency',
   'lore_auto_search_enabled',
   'thinking_level',
+  'thinking_level_gemini3',
+  'thinking_budget_preset_gemini25',
   'prompt_debug_enabled',
+  'history_compression_enabled',
   'history_turn_limit',
   'api_timeout',
   'api_retries',
@@ -59,6 +62,132 @@ const DEFAULT_MODEL_OPTIONS = [
 ];
 
 const DEFAULT_MODEL_VALUES = DEFAULT_MODEL_OPTIONS.map(option => option.value);
+const GEMINI3_THINKING_OPTIONS = [
+  { value: 'minimal', label: 'Minimal (最小限)' },
+  { value: 'low', label: 'Low (軽め)' },
+  { value: 'medium', label: 'Medium (標準)' },
+  { value: 'high', label: 'High (深め)' }
+];
+const GEMINI25_FLASH_THINKING_OPTIONS = [
+  { value: 'off', label: 'オフ (0)' },
+  { value: 'dynamic', label: '自動 (Dynamic / -1)' },
+  { value: 'minimal', label: '少なめ (512)' },
+  { value: 'balanced', label: '標準 (1024)' },
+  { value: 'high', label: '深め (4096)' }
+];
+const GEMINI25_PRO_THINKING_OPTIONS = [
+  { value: 'dynamic', label: '自動 (Dynamic / -1)' },
+  { value: 'minimal', label: '少なめ (512)' },
+  { value: 'balanced', label: '標準 (1024)' },
+  { value: 'high', label: '深め (4096)' }
+];
+
+function getThinkingSupportForModel(modelName = '') {
+  const normalized = String(modelName || '').trim().toLowerCase();
+  if (!normalized.includes('gemini') || normalized.includes('gemma') || normalized.includes('1.5')) {
+    return { kind: 'unsupported' };
+  }
+  if (/gemini-3(?:[.-]|$)/.test(normalized)) {
+    return { kind: 'gemini3' };
+  }
+  if (/gemini-2\.5(?:[.-]|$)/.test(normalized)) {
+    return {
+      kind: 'gemini25',
+      isPro: normalized.includes('pro')
+    };
+  }
+  return { kind: 'unsupported' };
+}
+
+function normalizeGemini3ThinkingLevel(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'none') return 'minimal';
+  if (normalized === 'standard') return 'medium';
+  if (['minimal', 'low', 'medium', 'high'].includes(normalized)) return normalized;
+  return 'medium';
+}
+
+function normalizeGemini25ThinkingPreset(value, modelName = '') {
+  const support = getThinkingSupportForModel(modelName);
+  const normalized = String(value || '').trim().toLowerCase();
+  let preset = 'balanced';
+
+  if (normalized === 'none') {
+    preset = 'off';
+  } else if (normalized === 'standard' || normalized === 'medium') {
+    preset = 'balanced';
+  } else if (['off', 'dynamic', 'minimal', 'balanced', 'high'].includes(normalized)) {
+    preset = normalized;
+  } else if (normalized === 'low') {
+    preset = 'minimal';
+  }
+
+  if (support.kind === 'gemini25' && support.isPro && preset === 'off') {
+    return 'dynamic';
+  }
+  return preset;
+}
+
+function getActiveThinkingSelection(modelName, stateSnapshot = getState()) {
+  const support = getThinkingSupportForModel(modelName);
+  if (support.kind === 'gemini3') {
+    return normalizeGemini3ThinkingLevel(stateSnapshot.thinkingLevelGemini3);
+  }
+  if (support.kind === 'gemini25') {
+    return normalizeGemini25ThinkingPreset(stateSnapshot.thinkingBudgetPresetGemini25, modelName);
+  }
+  return '';
+}
+
+function populateThinkingSelectForModel(modelName, stateSnapshot = getState()) {
+  const thinkingEl = document.getElementById('thinking-level-select');
+  const thinkingLabelEl = document.getElementById('thinking-level-label');
+  const thinkingHelpEl = document.getElementById('thinking-level-help');
+  if (!thinkingEl) return;
+
+  const support = getThinkingSupportForModel(modelName);
+  let label = 'Thinking設定';
+  let help = '選択中モデルに合わせて設定が切り替わります。';
+  let options = [];
+
+  if (support.kind === 'gemini3') {
+    label = '思考レベル (Thinking Level)';
+    help = 'Gemini 3系は minimal / low / medium / high を使います。完全な思考OFFはできず、minimal が最も軽い設定です。';
+    options = GEMINI3_THINKING_OPTIONS;
+  } else if (support.kind === 'gemini25') {
+    label = 'Thinking Budget';
+    help = support.isPro
+      ? 'Gemini 2.5 Pro は thinkingBudget を使います。思考OFFはできないため、Dynamic か予算値を選びます。'
+      : 'Gemini 2.5 Flash系は thinkingBudget を使います。オフ / Dynamic / 数値予算から選べます。';
+    options = support.isPro ? GEMINI25_PRO_THINKING_OPTIONS : GEMINI25_FLASH_THINKING_OPTIONS;
+  } else {
+    label = 'Thinking設定';
+    help = 'このモデルでは Thinking 設定を使用しません。Gemma系や一部旧モデルは対象外です。';
+  }
+
+  thinkingEl.innerHTML = '';
+  if (options.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '対象外';
+    thinkingEl.appendChild(opt);
+    thinkingEl.disabled = true;
+    thinkingEl.style.opacity = '0.55';
+  } else {
+    options.forEach(option => {
+      const opt = document.createElement('option');
+      opt.value = option.value;
+      opt.textContent = option.label;
+      thinkingEl.appendChild(opt);
+    });
+    thinkingEl.disabled = false;
+    thinkingEl.style.opacity = '1';
+    thinkingEl.value = getActiveThinkingSelection(modelName, stateSnapshot);
+  }
+
+  if (thinkingLabelEl) thinkingLabelEl.textContent = label;
+  if (thinkingHelpEl) thinkingHelpEl.textContent = help;
+}
 
 function populateModelSelect(selectEl, customModels = [], options = {}) {
   if (!selectEl) return;
@@ -154,6 +283,21 @@ function renderCustomModelList(customModels = []) {
     chip.appendChild(removeBtn);
     container.appendChild(chip);
   });
+}
+
+function updateHistoryCompressionControls(enabled) {
+  const historyTurnLimitEl = document.getElementById('history-turn-limit-select');
+  const historyTurnLimitHelpEl = document.getElementById('history-turn-limit-help');
+  if (historyTurnLimitEl) {
+    historyTurnLimitEl.disabled = !enabled;
+    historyTurnLimitEl.title = enabled ? '' : '会話履歴の圧縮がOFFのため無効です。';
+    historyTurnLimitEl.style.opacity = enabled ? '1' : '0.55';
+  }
+  if (historyTurnLimitHelpEl) {
+    historyTurnLimitHelpEl.textContent = enabled
+      ? '古い会話はセッションロア要約に委ね、直近の指定ターン数だけをAIへ送ります。'
+      : '圧縮がOFFの間は、会話履歴ターン数の制限を使わず全履歴をAIへ送ります。';
+  }
 }
 
 async function collectDropboxSettings() {
@@ -695,8 +839,11 @@ async function loadConfigurations() {
   const customModels = await db.getSetting('custom_models', []);
   const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
   const loreAutoSearchEnabled = await db.getSetting('lore_auto_search_enabled', false);
-  const thinkingLevel = await db.getSetting('thinking_level', 'standard');
+  const legacyThinkingLevel = await db.getSetting('thinking_level', 'standard');
+  const thinkingLevelGemini3 = normalizeGemini3ThinkingLevel(await db.getSetting('thinking_level_gemini3', legacyThinkingLevel));
+  const thinkingBudgetPresetGemini25 = normalizeGemini25ThinkingPreset(await db.getSetting('thinking_budget_preset_gemini25', legacyThinkingLevel), model);
   const promptDebugEnabled = await db.getSetting('prompt_debug_enabled', false);
+  const historyCompressionEnabled = await db.getSetting('history_compression_enabled', true);
   const historyTurnLimit = await db.getSetting('history_turn_limit', 10);
   
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
@@ -728,8 +875,10 @@ async function loadConfigurations() {
     narrationColor: narrationColor,
     narrationOpacity: narrationOpacity,
     loreAutoSearchEnabled: loreAutoSearchEnabled,
-    thinkingLevel: thinkingLevel, // ★ 追加
+    thinkingLevelGemini3,
+    thinkingBudgetPresetGemini25,
     promptDebugEnabled,
+    historyCompressionEnabled,
     historyTurnLimit: Number.isFinite(Number(historyTurnLimit)) ? Number(historyTurnLimit) : 10
   });
 
@@ -747,8 +896,8 @@ async function loadConfigurations() {
   const nBgEl = document.getElementById('narration-bg-input');
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
-  const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
   const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
+  const historyCompressionEl = document.getElementById('history-compression-toggle-checkbox');
   const historyTurnLimitEl = document.getElementById('history-turn-limit-select');
 
   if (provEl) provEl.value = provider;
@@ -762,9 +911,10 @@ async function loadConfigurations() {
   if (nBgEl) nBgEl.value = narrationBg;
   if (nColorEl) nColorEl.value = narrationColor;
   if (nOpacityEl) nOpacityEl.value = narrationOpacity;
-  if (thinkingEl) thinkingEl.value = thinkingLevel; // ★ 追加
   if (promptDebugEl) promptDebugEl.checked = promptDebugEnabled;
+  if (historyCompressionEl) historyCompressionEl.checked = historyCompressionEnabled;
   if (historyTurnLimitEl) historyTurnLimitEl.value = String(historyTurnLimit);
+  updateHistoryCompressionControls(historyCompressionEnabled);
 
   const normalizedCustomModels = Array.isArray(customModels) ? [...new Set(customModels.filter(Boolean))] : [];
   if (model && !DEFAULT_MODEL_VALUES.includes(model) && !normalizedCustomModels.includes(model)) {
@@ -783,6 +933,7 @@ async function loadConfigurations() {
     selectedValue: searchModel
   });
   renderCustomModelList(normalizedCustomModels);
+  populateThinkingSelectForModel(model, getState());
 }
 
 async function isLoreAutoSearchEnabled() {
@@ -1095,8 +1246,9 @@ async function bindEvents() {
   const nBgEl = document.getElementById('narration-bg-input');
   const nColorEl = document.getElementById('narration-color-input');
   const nOpacityEl = document.getElementById('narration-opacity-slider');
-  const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
+  const thinkingEl = document.getElementById('thinking-level-select');
   const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
+  const historyCompressionEl = document.getElementById('history-compression-toggle-checkbox');
   const historyTurnLimitEl = document.getElementById('history-turn-limit-select');
 
   if (provEl) {
@@ -1119,6 +1271,7 @@ async function bindEvents() {
       const val = e.target.value;
       updateState({ modelName: val });
       db.saveSetting('model_name', val);
+      populateThinkingSelectForModel(val, getState());
     };
   }
   if (searchModelEl) {
@@ -1170,8 +1323,17 @@ async function bindEvents() {
   if (thinkingEl) {
     thinkingEl.onchange = (e) => {
       const val = e.target.value;
-      updateState({ thinkingLevel: val });
-      db.saveSetting('thinking_level', val);
+      const activeModelName = (getState().modelName || modelEl?.value || '').trim();
+      const support = getThinkingSupportForModel(activeModelName);
+      if (support.kind === 'gemini3') {
+        const nextValue = normalizeGemini3ThinkingLevel(val);
+        updateState({ thinkingLevelGemini3: nextValue });
+        db.saveSetting('thinking_level_gemini3', nextValue);
+      } else if (support.kind === 'gemini25') {
+        const nextValue = normalizeGemini25ThinkingPreset(val, activeModelName);
+        updateState({ thinkingBudgetPresetGemini25: nextValue });
+        db.saveSetting('thinking_budget_preset_gemini25', nextValue);
+      }
     };
   }
   if (promptDebugEl) {
@@ -1181,6 +1343,15 @@ async function bindEvents() {
       db.saveSetting('prompt_debug_enabled', val);
       ui.renderApiUsagePanel();
       ui.renderStory();
+    };
+  }
+  if (historyCompressionEl) {
+    historyCompressionEl.onchange = (e) => {
+      const val = e.target.checked;
+      updateState({ historyCompressionEnabled: val });
+      db.saveSetting('history_compression_enabled', val);
+      updateHistoryCompressionControls(val);
+      ui.renderApiUsagePanel();
     };
   }
   if (historyTurnLimitEl) {

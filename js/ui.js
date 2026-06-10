@@ -128,7 +128,9 @@ export function renderApiUsagePanel() {
           <span>System ${formatUsageNumber(lastApiUsage.debug.systemInstructionChars)}</span>
           <span>会話 ${formatUsageNumber(lastApiUsage.debug.conversationChars)}</span>
           <span>Schema ${formatUsageNumber(lastApiUsage.debug.toolSchemaChars)}</span>
-          <span>履歴制限 ${lastApiUsage.debug.historyTurnLimit === 0 ? '全履歴' : `${formatUsageNumber(lastApiUsage.debug.historyTurnLimit)}ターン`}</span>
+          <span>Thinking ${escapeHTML(lastApiUsage.debug.thinkingConfigLabel || 'なし')}</span>
+          <span>履歴圧縮 ${lastApiUsage.debug.historyCompressionEnabled === false ? 'OFF' : 'ON'}</span>
+          <span>履歴制限 ${lastApiUsage.debug.historyCompressionEnabled === false || lastApiUsage.debug.historyTurnLimit === 0 ? '全履歴' : `${formatUsageNumber(lastApiUsage.debug.historyTurnLimit)}ターン`}</span>
           <span>省略 ${formatUsageNumber(lastApiUsage.debug.omittedTurns || 0)}ターン</span>
         </div>
         <div class="api-usage-debug-list">

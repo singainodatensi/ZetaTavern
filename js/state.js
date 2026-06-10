@@ -24,7 +24,10 @@ const state = {
   showChoices: true,     // Option A/B/C toggle
   lastApiUsage: null,
   apiUsageHistory: [],
+  thinkingLevelGemini3: 'medium',
+  thinkingBudgetPresetGemini25: 'balanced',
   promptDebugEnabled: false,
+  historyCompressionEnabled: true,
   historyTurnLimit: 10,
   
   // Participant attendance for current active story

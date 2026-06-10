@@ -326,6 +326,8 @@ function createUsageAccumulator(requestType, modelName) {
     toolUsePromptTokenCount: 0,
     cachedContentTokenCount: 0,
     totalTokenCount: 0,
+    thinkingConfigLabel: '',
+    historyCompressionEnabled: true,
     historyTurnLimit: null,
     omittedTurns: 0
   };
@@ -368,6 +370,8 @@ function publishUsageSnapshot(accumulator) {
       userMessageChars: accumulator.debug.userMessageChars || 0,
       modelMessageChars: accumulator.debug.modelMessageChars || 0,
       functionResponseChars: accumulator.debug.functionResponseChars || 0,
+      thinkingConfigLabel: accumulator.thinkingConfigLabel || '',
+      historyCompressionEnabled: accumulator.historyCompressionEnabled !== false,
       historyTurnLimit: accumulator.historyTurnLimit,
       omittedTurns: accumulator.omittedTurns || 0,
       breakdown
@@ -1183,37 +1187,75 @@ export function extractStoryTextAndThoughtFromApiResponse(result) {
   return { text: storyText, thought: thoughtChunks.join('\n\n').trim() };
 }
 
-/** UIの思考レベル設定から、API送信用の Thinking Budget 数値を決定する */
-function buildThinkingConfig(thinkingLevel, modelName) {
-  const m = (modelName || '').toLowerCase();
+function getThinkingSupportForModel(modelName = '') {
+  const normalized = String(modelName || '').trim().toLowerCase();
+  if (!normalized.includes('gemini') || normalized.includes('gemma') || normalized.includes('1.5')) {
+    return { kind: 'unsupported' };
+  }
+  if (/gemini-3(?:[.-]|$)/.test(normalized)) {
+    return { kind: 'gemini3' };
+  }
+  if (/gemini-2\.5(?:[.-]|$)/.test(normalized)) {
+    return {
+      kind: 'gemini25',
+      isPro: normalized.includes('pro')
+    };
+  }
+  return { kind: 'unsupported' };
+}
 
-  // Gemma 系や古い非対応モデルでは Thinking 要約を要求しない
-  if (!m.includes('gemini') || m.includes('gemma') || m.includes('1.5') || (m.includes('2.0') && !m.includes('thinking'))) {
+function normalizeGemini3ThinkingLevel(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'none') return 'minimal';
+  if (normalized === 'standard') return 'medium';
+  if (['minimal', 'low', 'medium', 'high'].includes(normalized)) return normalized;
+  return 'medium';
+}
+
+function normalizeGemini25ThinkingPreset(value, modelName = '') {
+  const support = getThinkingSupportForModel(modelName);
+  const normalized = String(value || '').trim().toLowerCase();
+  let preset = 'balanced';
+
+  if (normalized === 'none') {
+    preset = 'off';
+  } else if (normalized === 'standard' || normalized === 'medium') {
+    preset = 'balanced';
+  } else if (['off', 'dynamic', 'minimal', 'balanced', 'high'].includes(normalized)) {
+    preset = normalized;
+  } else if (normalized === 'low') {
+    preset = 'minimal';
+  }
+
+  if (support.kind === 'gemini25' && support.isPro && preset === 'off') {
+    return 'dynamic';
+  }
+  return preset;
+}
+
+function buildThinkingConfig(modelName, appState) {
+  const support = getThinkingSupportForModel(modelName);
+  if (support.kind === 'unsupported') {
     return null;
   }
 
-  if (thinkingLevel === 'none') {
-    return null;
-  }
-
-  // Gemini 3 系は thinkingLevel を優先する
-  if (/gemini-3(?:[.-]|$)/.test(m)) {
-    let level = 'medium';
-    if (thinkingLevel === 'minimal') {
-      level = 'minimal';
-    } else if (thinkingLevel === 'high') {
-      level = 'high';
-    }
+  if (support.kind === 'gemini3') {
+    const level = normalizeGemini3ThinkingLevel(appState.thinkingLevelGemini3 || appState.thinkingLevel);
     return {
       includeThoughts: true,
       thinkingLevel: level
     };
   }
 
-  let budget = 1024; // Gemini 2.5 系の標準
-  if (thinkingLevel === 'minimal') {
+  const preset = normalizeGemini25ThinkingPreset(appState.thinkingBudgetPresetGemini25 || appState.thinkingLevel, modelName);
+  let budget = 1024;
+  if (preset === 'off') {
+    budget = 0;
+  } else if (preset === 'dynamic') {
+    budget = -1;
+  } else if (preset === 'minimal') {
     budget = 512;
-  } else if (thinkingLevel === 'high') {
+  } else if (preset === 'high') {
     budget = 4096;
   }
 
@@ -1221,6 +1263,16 @@ function buildThinkingConfig(thinkingLevel, modelName) {
     includeThoughts: true,
     thinkingBudget: budget
   };
+}
+
+function describeThinkingConfig(config) {
+  if (!config) return 'なし';
+  if (config.thinkingLevel) return `Level: ${config.thinkingLevel}`;
+  if (typeof config.thinkingBudget === 'number') {
+    if (config.thinkingBudget === -1) return 'Budget: Dynamic';
+    return `Budget: ${config.thinkingBudget}`;
+  }
+  return 'あり';
 }
 
 /**
@@ -1244,11 +1296,17 @@ export async function generateStoryResponse(story) {
   const modelName = appState.modelName || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   const usageAccumulator = createUsageAccumulator('story', modelName);
-  const historyTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
-  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], historyTurnLimit);
-  usageAccumulator.historyTurnLimit = historyTurnLimit;
+  const historyCompressionEnabled = appState.historyCompressionEnabled !== false;
+  const configuredHistoryTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
+  const effectiveHistoryTurnLimit = historyCompressionEnabled ? configuredHistoryTurnLimit : 0;
+  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], effectiveHistoryTurnLimit);
+  usageAccumulator.historyCompressionEnabled = historyCompressionEnabled;
+  usageAccumulator.historyTurnLimit = effectiveHistoryTurnLimit;
   usageAccumulator.omittedTurns = omittedTurns;
-  const systemInstruction = await buildSystemInstruction(story, { omittedTurns, historyTurnLimit });
+  const systemInstruction = await buildSystemInstruction(story, {
+    omittedTurns,
+    historyTurnLimit: effectiveHistoryTurnLimit
+  });
 
   // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
   const contents = selectedMessages.map(msg => ({
@@ -1263,8 +1321,8 @@ export async function generateStoryResponse(story) {
   };
 
   // ★ モデル名も一緒に渡して、非対応モデルならエラーを回避する
-  const thinkingLevel = appState.thinkingLevel || 'standard';
-  const thinkingConfig = buildThinkingConfig(thinkingLevel, modelName);
+  const thinkingConfig = buildThinkingConfig(modelName, appState);
+  usageAccumulator.thinkingConfigLabel = describeThinkingConfig(thinkingConfig);
   if (thinkingConfig) {
     generationConfig.thinkingConfig = thinkingConfig;
   }
