@@ -21,7 +21,7 @@
 
   <script>
     (function () {
-      var buildVersion = '20260609g';
+      var buildVersion = '20260610b';
       var url = new URL(window.location.href);
       if (url.searchParams.get('v') !== buildVersion) {
         url.searchParams.set('v', buildVersion);
@@ -32,7 +32,7 @@
   </script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260609g" defer></script>
+  <script type="module" src="js/app.js?v=20260610b" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -421,6 +421,18 @@
                   <strong>トークン内訳デバッグ表示</strong>
                   <span>直近のトークン使用量、入力内訳、メッセージごとの使用量を表示します。普段はOFF推奨です。</span>
                 </label>
+              </div>
+
+              <div class="form-group" style="margin-top: 14px;">
+                <label for="history-turn-limit-select">AIへ送る会話履歴ターン数</label>
+                <select id="history-turn-limit-select">
+                  <option value="5">5ターン</option>
+                  <option value="10">10ターン</option>
+                  <option value="15">15ターン</option>
+                  <option value="20">20ターン</option>
+                  <option value="0">全履歴を送る</option>
+                </select>
+                <small style="color: var(--text-sub); display: block; margin-top: 4px;">古い会話はセッションロア要約に委ね、直近の指定ターン数だけをAIへ送ります。</small>
               </div>
             </div>
 

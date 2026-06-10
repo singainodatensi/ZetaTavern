@@ -25,6 +25,7 @@ const state = {
   lastApiUsage: null,
   apiUsageHistory: [],
   promptDebugEnabled: false,
+  historyTurnLimit: 10,
   
   // Participant attendance for current active story
   // e.g., { "char-uuid": "active" | "absent" }

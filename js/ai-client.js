@@ -78,6 +78,47 @@ function shouldSendFullCharacterProfiles(story) {
   return completedModelTurns === 0 || completedModelTurns % FULL_CHARACTER_CONTEXT_INTERVAL === 0;
 }
 
+function chunkMessagesByUserTurn(messages = []) {
+  const chunks = [];
+  let currentChunk = [];
+
+  for (const message of messages) {
+    if (message?.role === 'user' && currentChunk.length > 0) {
+      chunks.push(currentChunk);
+      currentChunk = [];
+    }
+    currentChunk.push(message);
+  }
+
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+function selectPromptMessages(messages = [], turnLimit = 0) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { selectedMessages: [], omittedTurns: 0 };
+  }
+
+  const normalizedTurnLimit = Number.isFinite(Number(turnLimit)) ? Number(turnLimit) : 0;
+  if (normalizedTurnLimit <= 0) {
+    return { selectedMessages: [...messages], omittedTurns: 0 };
+  }
+
+  const chunks = chunkMessagesByUserTurn(messages);
+  if (chunks.length <= normalizedTurnLimit) {
+    return { selectedMessages: [...messages], omittedTurns: 0 };
+  }
+
+  const keptChunks = chunks.slice(-normalizedTurnLimit);
+  return {
+    selectedMessages: keptChunks.flat(),
+    omittedTurns: chunks.length - keptChunks.length
+  };
+}
+
 function normalizeLoreType(type) {
   const allowed = new Set(['character', 'location', 'organization', 'term', 'event', 'item']);
   return allowed.has(type) ? type : 'term';
@@ -284,7 +325,9 @@ function createUsageAccumulator(requestType, modelName) {
     thoughtsTokenCount: 0,
     toolUsePromptTokenCount: 0,
     cachedContentTokenCount: 0,
-    totalTokenCount: 0
+    totalTokenCount: 0,
+    historyTurnLimit: null,
+    omittedTurns: 0
   };
 }
 
@@ -325,6 +368,8 @@ function publishUsageSnapshot(accumulator) {
       userMessageChars: accumulator.debug.userMessageChars || 0,
       modelMessageChars: accumulator.debug.modelMessageChars || 0,
       functionResponseChars: accumulator.debug.functionResponseChars || 0,
+      historyTurnLimit: accumulator.historyTurnLimit,
+      omittedTurns: accumulator.omittedTurns || 0,
       breakdown
     };
   }
@@ -666,7 +711,7 @@ async function applyWorldLoreUpdate(args, story) {
  * Combines storyteller rules, world prompts, protagonist info, scoped characters,
  * short-term memories, and relationships.
  */
-export async function buildSystemInstruction(story) {
+export async function buildSystemInstruction(story, options = {}) {
   if (!story) return '';
   const allCharacters = await getCharactersList();
 
@@ -890,6 +935,12 @@ export async function buildSystemInstruction(story) {
       });
     }
     instruction += `\n`;
+  }
+
+  if ((options.omittedTurns || 0) > 0) {
+    instruction += `【会話履歴の圧縮】\n`;
+    instruction += `・古い会話 ${options.omittedTurns} ターン分は直接送信していない。必要な前提は上記のセッションロア要約と関係記憶を優先して参照すること。\n`;
+    instruction += `・直近の会話だけを細かく参照し、それ以前の流れは要約ベースで一貫性を維持すること。\n\n`;
   }
 
   instruction += `【ロア分類ルール】\n`;
@@ -1190,17 +1241,20 @@ export async function generateStoryResponse(story) {
   const timeoutSeconds = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 60;
   const maxRetries = Number.isFinite(parsedRetries) && parsedRetries > 0 ? parsedRetries : 1;
 
-  const systemInstruction = await buildSystemInstruction(story);
-
-  // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
-  const contents = story.messages.map(msg => ({
-    role: msg.role === 'user' ? 'user' : 'model',
-    parts: [{ text: msg.aiContent || msg.content }]
-  }));
-
   const modelName = appState.modelName || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   const usageAccumulator = createUsageAccumulator('story', modelName);
+  const historyTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
+  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], historyTurnLimit);
+  usageAccumulator.historyTurnLimit = historyTurnLimit;
+  usageAccumulator.omittedTurns = omittedTurns;
+  const systemInstruction = await buildSystemInstruction(story, { omittedTurns, historyTurnLimit });
+
+  // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
+  const contents = selectedMessages.map(msg => ({
+    role: msg.role === 'user' ? 'user' : 'model',
+    parts: [{ text: msg.aiContent || msg.content }]
+  }));
 
   const generationConfig = {
     temperature: 0.9,

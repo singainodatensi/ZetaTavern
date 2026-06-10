@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260609g';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260609g';
+import * as ui from './ui.js?v=20260610b';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260610b';
 import * as dropbox from './dropbox.js?v=20260609d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -38,6 +38,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'lore_auto_search_enabled',
   'thinking_level',
   'prompt_debug_enabled',
+  'history_turn_limit',
   'api_timeout',
   'api_retries',
   'font_size',
@@ -696,6 +697,7 @@ async function loadConfigurations() {
   const loreAutoSearchEnabled = await db.getSetting('lore_auto_search_enabled', false);
   const thinkingLevel = await db.getSetting('thinking_level', 'standard');
   const promptDebugEnabled = await db.getSetting('prompt_debug_enabled', false);
+  const historyTurnLimit = await db.getSetting('history_turn_limit', 10);
   
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
   const apiTimeout = await db.getSetting('api_timeout', 60);
@@ -727,7 +729,8 @@ async function loadConfigurations() {
     narrationOpacity: narrationOpacity,
     loreAutoSearchEnabled: loreAutoSearchEnabled,
     thinkingLevel: thinkingLevel, // ★ 追加
-    promptDebugEnabled
+    promptDebugEnabled,
+    historyTurnLimit: Number.isFinite(Number(historyTurnLimit)) ? Number(historyTurnLimit) : 10
   });
 
   // Prefill settings form
@@ -746,6 +749,7 @@ async function loadConfigurations() {
   const nOpacityEl = document.getElementById('narration-opacity-slider');
   const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
   const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
+  const historyTurnLimitEl = document.getElementById('history-turn-limit-select');
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
@@ -760,6 +764,7 @@ async function loadConfigurations() {
   if (nOpacityEl) nOpacityEl.value = narrationOpacity;
   if (thinkingEl) thinkingEl.value = thinkingLevel; // ★ 追加
   if (promptDebugEl) promptDebugEl.checked = promptDebugEnabled;
+  if (historyTurnLimitEl) historyTurnLimitEl.value = String(historyTurnLimit);
 
   const normalizedCustomModels = Array.isArray(customModels) ? [...new Set(customModels.filter(Boolean))] : [];
   if (model && !DEFAULT_MODEL_VALUES.includes(model) && !normalizedCustomModels.includes(model)) {
@@ -1092,6 +1097,7 @@ async function bindEvents() {
   const nOpacityEl = document.getElementById('narration-opacity-slider');
   const thinkingEl = document.getElementById('thinking-level-select'); // ★ 追加
   const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
+  const historyTurnLimitEl = document.getElementById('history-turn-limit-select');
 
   if (provEl) {
     provEl.onchange = (e) => {
@@ -1175,6 +1181,14 @@ async function bindEvents() {
       db.saveSetting('prompt_debug_enabled', val);
       ui.renderApiUsagePanel();
       ui.renderStory();
+    };
+  }
+  if (historyTurnLimitEl) {
+    historyTurnLimitEl.onchange = (e) => {
+      const val = parseInt(e.target.value, 10);
+      const nextValue = Number.isFinite(val) ? val : 10;
+      updateState({ historyTurnLimit: nextValue });
+      db.saveSetting('history_turn_limit', nextValue);
     };
   }
   // ナレーション表示設定変更のイベント監視

@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260609g';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260610b';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -128,6 +128,8 @@ export function renderApiUsagePanel() {
           <span>System ${formatUsageNumber(lastApiUsage.debug.systemInstructionChars)}</span>
           <span>会話 ${formatUsageNumber(lastApiUsage.debug.conversationChars)}</span>
           <span>Schema ${formatUsageNumber(lastApiUsage.debug.toolSchemaChars)}</span>
+          <span>履歴制限 ${lastApiUsage.debug.historyTurnLimit === 0 ? '全履歴' : `${formatUsageNumber(lastApiUsage.debug.historyTurnLimit)}ターン`}</span>
+          <span>省略 ${formatUsageNumber(lastApiUsage.debug.omittedTurns || 0)}ターン</span>
         </div>
         <div class="api-usage-debug-list">
           ${lastApiUsage.debug.breakdown.slice(0, 12).map(item => `
