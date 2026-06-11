@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260611a';
+import { getSetting, saveSetting } from './db.js?v=20260611b';
 
 // ============================================================
 // 定数
@@ -99,7 +99,7 @@ async function _saveTokens(tokens) {
 
 function _buildDropboxCorsSafeFetch(domain, endpoint, accessToken, options = {}) {
   const requestUrl = new URL(`https://${domain}.dropboxapi.com/2${endpoint}`);
-  const sourceHeaders = new Headers(options.headers || {});
+  const rawHeaders = options.headers || {};
   const method = String(options.method || 'POST').toUpperCase();
   const corsSafeOptions = {
     ...options,
@@ -111,7 +111,15 @@ function _buildDropboxCorsSafeFetch(domain, endpoint, accessToken, options = {})
   requestUrl.searchParams.set('authorization', `Bearer ${accessToken}`);
   requestUrl.searchParams.set('reject_cors_preflight', 'true');
 
-  const dropboxArg = sourceHeaders.get('Dropbox-API-Arg');
+  let dropboxArg = '';
+  if (typeof rawHeaders?.get === 'function') {
+    dropboxArg = rawHeaders.get('Dropbox-API-Arg') || rawHeaders.get('dropbox-api-arg') || '';
+  } else if (Array.isArray(rawHeaders)) {
+    const match = rawHeaders.find(([key]) => String(key).toLowerCase() === 'dropbox-api-arg');
+    dropboxArg = match?.[1] || '';
+  } else if (rawHeaders && typeof rawHeaders === 'object') {
+    dropboxArg = rawHeaders['Dropbox-API-Arg'] || rawHeaders['dropbox-api-arg'] || '';
+  }
   if (dropboxArg) {
     requestUrl.searchParams.set('arg', dropboxArg);
   }
