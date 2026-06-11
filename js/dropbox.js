@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260611b';
+import { getSetting, saveSetting } from './db.js?v=20260611c';
 
 // ============================================================
 // 定数
@@ -47,6 +47,7 @@ const V2_CHAR_DIR     = `${V2_ROOT}/characters`;
 const V2_STORY_DIR    = `${V2_ROOT}/stories`;
 const MESSAGE_CHUNK_SIZE = 100;
 let lastRemoteManifestInfo = null;
+const ensuredFolderPaths = new Set();
 
 // ============================================================
 // 内部ヘルパー
@@ -419,23 +420,19 @@ export async function getLastRemoteManifestUpdatedAt() {
 }
 
 async function ensureFolderExists(path) {
+  if (!path || ensuredFolderPaths.has(path)) return;
   try {
-    await _request('api', '/files/get_metadata', {
+    await _request('api', '/files/create_folder_v2', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, autorename: false }),
     });
   } catch (error) {
-    if (error.message.includes('path/not_found')) {
-      await _request('api', '/files/create_folder_v2', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path, autorename: false }),
-      });
-      return;
+    if (!error.message.includes('path/conflict')) {
+      throw error;
     }
-    throw error;
   }
+  ensuredFolderPaths.add(path);
 }
 
 function splitStoryForSync(story) {
@@ -582,10 +579,17 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   const now = Date.now();
   const progress = msg => { if (onProgress) onProgress(msg); };
 
-  await ensureFolderExists('/ZetaTavern');
-  await ensureFolderExists(V2_ROOT);
-  await ensureFolderExists(V2_CHAR_DIR);
-  await ensureFolderExists(V2_STORY_DIR);
+  if (!existingManifest) {
+    await ensureFolderExists('/ZetaTavern');
+    await ensureFolderExists(V2_ROOT);
+    await ensureFolderExists(V2_CHAR_DIR);
+    await ensureFolderExists(V2_STORY_DIR);
+  } else {
+    ensuredFolderPaths.add('/ZetaTavern');
+    ensuredFolderPaths.add(V2_ROOT);
+    ensuredFolderPaths.add(V2_CHAR_DIR);
+    ensuredFolderPaths.add(V2_STORY_DIR);
+  }
 
   progress('設定を分割アップロード中...');
   await uploadJson(V2_SETTINGS, { settings, updatedAt: now });
@@ -634,7 +638,11 @@ async function uploadV2Story(story, previousEntry = null, now = Date.now()) {
   const storyDir = previousEntry?.dirPath && previousEntry.dirPath.includes('__')
     ? previousEntry.dirPath
     : `${V2_STORY_DIR}/${buildStoryFolderName(story)}`;
-  await ensureFolderExists(storyDir);
+  if (!previousEntry?.dirPath) {
+    await ensureFolderExists(storyDir);
+  } else {
+    ensuredFolderPaths.add(storyDir);
+  }
 
   const { meta, chunks } = splitStoryForSync(story);
   const metaPath = `${storyDir}/meta.json`;
@@ -667,7 +675,7 @@ async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) 
   const storyDir = previousEntry?.dirPath && previousEntry.dirPath.includes('__')
     ? previousEntry.dirPath
     : `${V2_STORY_DIR}/${buildStoryFolderName(story)}`;
-  await ensureFolderExists(storyDir);
+  ensuredFolderPaths.add(storyDir);
 
   const { meta, chunks } = splitStoryForSync(story);
   const nextMessageCount = Array.isArray(story.messages) ? story.messages.length : 0;
@@ -761,24 +769,19 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
  * アセットフォルダの存在を保証する。なければ作成する。
  */
 export async function ensureAssetsFolderExists() {
+  if (ensuredFolderPaths.has(ASSETS_DIR_PATH)) return;
   try {
-    await _request('api', '/files/get_metadata', {
+    await _request('api', '/files/create_folder_v2', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: ASSETS_DIR_PATH }),
+      body: JSON.stringify({ path: ASSETS_DIR_PATH, autorename: false }),
     });
   } catch (error) {
-    if (error.message.includes('path/not_found')) {
-      console.log(`[Dropbox] アセットフォルダを作成: ${ASSETS_DIR_PATH}`);
-      await _request('api', '/files/create_folder_v2', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: ASSETS_DIR_PATH, autorename: false }),
-      });
-    } else {
+    if (!error.message.includes('path/conflict')) {
       throw error;
     }
   }
+  ensuredFolderPaths.add(ASSETS_DIR_PATH);
 }
 
 /**
