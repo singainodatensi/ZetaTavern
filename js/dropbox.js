@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260611c';
+import { getSetting, saveSetting } from './db.js?v=20260611d';
 
 // ============================================================
 // 定数
@@ -243,7 +243,8 @@ async function _request(domain, endpoint, options = {}, retryCount = 0) {
     return text ? JSON.parse(text) : {};
 
   } catch (error) {
-    if (!error.message.includes('not_found')) {
+    const message = String(error?.message || '');
+    if (!message.includes('not_found') && !message.includes('path/conflict/folder')) {
       console.error(`[Dropbox] リクエストエラー (${endpoint}):`, error);
     }
     throw error;
@@ -1049,9 +1050,9 @@ export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
     }
 
     const now = Date.now();
-    await ensureFolderExists('/ZetaTavern');
-    await ensureFolderExists(V2_ROOT);
-    await ensureFolderExists(V2_STORY_DIR);
+    ensuredFolderPaths.add('/ZetaTavern');
+    ensuredFolderPaths.add(V2_ROOT);
+    ensuredFolderPaths.add(V2_STORY_DIR);
 
     if (settings) {
       progress('設定を差分アップロード中...');
@@ -1098,8 +1099,8 @@ export async function pushLoreDeltaToDropbox({ lores, onProgress }) {
     }
 
     const now = Date.now();
-    await ensureFolderExists('/ZetaTavern');
-    await ensureFolderExists(V2_ROOT);
+    ensuredFolderPaths.add('/ZetaTavern');
+    ensuredFolderPaths.add(V2_ROOT);
 
     progress('ロアブックを差分アップロード中...');
     await uploadJson(manifest.loresPath || V2_LORES, { lores: Array.isArray(lores) ? lores : [], updatedAt: now });

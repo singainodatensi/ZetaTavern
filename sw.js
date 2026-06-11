@@ -1,4 +1,4 @@
-const CACHE_NAME = 'zetatavern-cache-v63';
+const CACHE_NAME = 'zetatavern-cache-v64';
 const urlsToCache = [
   './',
   './index.html',
@@ -46,13 +46,26 @@ self.addEventListener('fetch', event => {
           }
           return networkRes;
         })
-        .catch(() => caches.match(req))
+        .catch(async () => {
+          const cached = await caches.match(req);
+          if (cached) return cached;
+          const fallback = await caches.match('./index.html');
+          if (fallback) return fallback;
+          return new Response('Offline', {
+            status: 503,
+            statusText: 'Offline',
+            headers: { 'Content-Type': 'text/plain; charset=UTF-8' }
+          });
+        })
     );
     return;
   }
 
   event.respondWith(
-    caches.match(req).then(cached => cached || fetch(req))
+    caches.match(req).then(cached => {
+      if (cached) return cached;
+      return fetch(req).catch(() => new Response('', { status: 504, statusText: 'Gateway Timeout' }));
+    })
   );
 });
 
