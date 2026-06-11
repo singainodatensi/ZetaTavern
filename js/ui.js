@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260610b';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260611a';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -76,6 +76,32 @@ function requestDropboxAutoSync(storyId = null, options = {}) {
       syncLores: !!options.syncLores
     }
   }));
+}
+
+function createEmptySyncTombstones() {
+  return {
+    stories: {},
+    characters: {},
+    lores: {},
+    assets: {}
+  };
+}
+
+async function recordSyncTombstone(type, id, meta = {}) {
+  if (!type || !id) return;
+  const current = await db.getSetting('dropbox_sync_tombstones', createEmptySyncTombstones());
+  const next = {
+    stories: current?.stories && typeof current.stories === 'object' ? current.stories : {},
+    characters: current?.characters && typeof current.characters === 'object' ? current.characters : {},
+    lores: current?.lores && typeof current.lores === 'object' ? current.lores : {},
+    assets: current?.assets && typeof current.assets === 'object' ? current.assets : {}
+  };
+  if (!next[type]) next[type] = {};
+  next[type][id] = {
+    deletedAt: Date.now(),
+    ...meta
+  };
+  await db.saveSetting('dropbox_sync_tombstones', next);
 }
 
 function formatUsageNumber(value) {
@@ -1517,9 +1543,13 @@ export async function renderStoryList() {
       if (e.target.closest('.delete-story-btn')) {
         e.stopPropagation();
         if (confirm(`ストーリー「${story.title}」を削除しますか？`)) {
-          db.deleteStory(story.storyId).then(() => {
+          recordSyncTombstone('stories', story.storyId, {
+            title: story.title || '',
+            franchise: story.franchise || ''
+          }).then(() => db.deleteStory(story.storyId)).then(() => {
             if (current && current.storyId === story.storyId) setActiveStory(null);
             renderStoryList();
+            requestDropboxAutoSync(null, { forceFull: true });
           });
         }
         return;
@@ -1635,12 +1665,22 @@ export async function renderCharacterLibrary() {
     card.querySelector('.delete-char-btn').onclick = (e) => {
       e.stopPropagation();
       if (confirm(`キャラクター「${char.name}」を削除しますか？\n(紐付いているアバター画像も削除されます)`)) {
-        db.deleteCharacter(char.characterId).then(async () => {
+        recordSyncTombstone('characters', char.characterId, {
+          name: char.name || '',
+          category: char.category || ''
+        }).then(async () => {
+          if (char.avatarAssetId) {
+            await recordSyncTombstone('assets', char.avatarAssetId, {
+              label: `${char.name || 'character'} avatar`
+            });
+          }
+          return db.deleteCharacter(char.characterId);
+        }).then(async () => {
           const updatedChars = await db.getCharacters();
           updateState({ characters: updatedChars });
           renderCharacterLibrary();
           renderSidebar();
-          requestDropboxAutoSync();
+          requestDropboxAutoSync(null, { forceFull: true });
         });
       }
     };
@@ -3264,9 +3304,10 @@ function _createFranchiseSection(franchise, items) {
       const loreName = deleteBtn.dataset.name;
       const loreId = deleteBtn.dataset.id;
       if (await confirmLoreDeletion(loreName)) {
+        await recordSyncTombstone('lores', loreId, { name: loreName || '' });
         await db.deleteLore(loreId);
         renderLorebook();
-        requestDropboxAutoSync(null, { syncLores: true });
+        requestDropboxAutoSync(null, { forceFull: true, syncLores: true });
       }
     }
   });

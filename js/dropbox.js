@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260606c';
+import { getSetting, saveSetting } from './db.js?v=20260611a';
 
 // ============================================================
 // 定数
@@ -46,6 +46,7 @@ const V2_LORES        = `${V2_ROOT}/world_lore.json`;
 const V2_CHAR_DIR     = `${V2_ROOT}/characters`;
 const V2_STORY_DIR    = `${V2_ROOT}/stories`;
 const MESSAGE_CHUNK_SIZE = 100;
+let lastRemoteManifestInfo = null;
 
 // ============================================================
 // 内部ヘルパー
@@ -392,6 +393,23 @@ async function downloadJson(path) {
   }
 }
 
+export async function getRemoteManifestInfo() {
+  const manifest = await downloadJson(V2_MANIFEST);
+  if (!manifest || Number(manifest.schemaVersion || 0) < 2) {
+    lastRemoteManifestInfo = null;
+    return null;
+  }
+  lastRemoteManifestInfo = {
+    updatedAt: Number(manifest.updatedAt || 0),
+    schemaVersion: Number(manifest.schemaVersion || 0)
+  };
+  return lastRemoteManifestInfo;
+}
+
+export async function getLastRemoteManifestUpdatedAt() {
+  return Number(lastRemoteManifestInfo?.updatedAt || 0);
+}
+
 async function ensureFolderExists(path) {
   try {
     await _request('api', '/files/get_metadata', {
@@ -422,7 +440,137 @@ function splitStoryForSync(story) {
   return { meta, chunks };
 }
 
-async function uploadV2Data({ stories = [], characters = [], lores = [], settings = {}, onProgress }) {
+function sanitizeRemoteNamePart(value, fallback = 'item') {
+  const text = String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const normalized = text
+    .replace(/[. ]+$/g, '')
+    .replace(/\s+/g, '_')
+    .slice(0, 60);
+  return normalized || fallback;
+}
+
+function buildStoryFolderName(story) {
+  const title = sanitizeRemoteNamePart(story?.title || 'story', 'story');
+  const franchise = sanitizeRemoteNamePart(story?.franchise || story?.tags?.[0] || '', '');
+  return franchise ? `${story.storyId}__${title}__${franchise}` : `${story.storyId}__${title}`;
+}
+
+function buildCharacterFileName(character) {
+  const name = sanitizeRemoteNamePart(character?.name || 'character', 'character');
+  return `${character.characterId}__${name}.json`;
+}
+
+function getMimeExtension(mimeType = '') {
+  const normalized = String(mimeType || '').toLowerCase();
+  if (normalized.includes('png')) return '.png';
+  if (normalized.includes('webp')) return '.webp';
+  if (normalized.includes('gif')) return '.gif';
+  if (normalized.includes('avif')) return '.avif';
+  return '.jpg';
+}
+
+function mergeTombstoneMaps(localMap = {}, remoteMap = {}) {
+  const merged = { ...remoteMap };
+  for (const [id, value] of Object.entries(localMap || {})) {
+    const current = merged[id];
+    if (!current || Number(value?.deletedAt || 0) >= Number(current?.deletedAt || 0)) {
+      merged[id] = value;
+    }
+  }
+  return merged;
+}
+
+function mergeSyncTombstones(local = {}, remote = {}) {
+  return {
+    stories: mergeTombstoneMaps(local?.stories, remote?.stories),
+    characters: mergeTombstoneMaps(local?.characters, remote?.characters),
+    lores: mergeTombstoneMaps(local?.lores, remote?.lores),
+    assets: mergeTombstoneMaps(local?.assets, remote?.assets)
+  };
+}
+
+function filterDeletedItems(items, key, tombstones) {
+  if (!Array.isArray(items) || !tombstones || typeof tombstones !== 'object') return items || [];
+  return items.filter(item => item?.[key] && !tombstones[item[key]]);
+}
+
+function buildAssetLabelIndex(stories = [], characters = []) {
+  const labels = {};
+  for (const story of stories || []) {
+    const protagonistId = story?.protagonist?.avatarAssetId;
+    if (protagonistId && !labels[protagonistId]) {
+      const base = story?.protagonist?.name || story?.title || 'protagonist';
+      labels[protagonistId] = `${base}_avatar`;
+    }
+  }
+  for (const character of characters || []) {
+    const assetId = character?.avatarAssetId;
+    if (assetId && !labels[assetId]) {
+      labels[assetId] = `${character?.name || 'character'}_avatar`;
+    }
+  }
+  return labels;
+}
+
+function buildAssetRemotePath(assetId, mimeType, label, previousPath = '') {
+  if (previousPath && previousPath.includes('__')) return previousPath;
+  if (previousPath && !previousPath.endsWith(`/${assetId}`)) return previousPath;
+  const safeLabel = sanitizeRemoteNamePart(label || 'asset', 'asset');
+  return `${ASSETS_DIR_PATH}/${assetId}__${safeLabel}${getMimeExtension(mimeType)}`;
+}
+
+async function buildAssetManifestEntries({ assets = [], stories = [], characters = [], existingManifest = null, onProgress }) {
+  const progress = msg => { if (onProgress) onProgress(msg); };
+  await ensureAssetsFolderExists();
+
+  const existingAssets = existingManifest?.assets && typeof existingManifest.assets === 'object'
+    ? existingManifest.assets
+    : {};
+  const labelIndex = buildAssetLabelIndex(stories, characters);
+  const manifestAssets = {};
+  let remoteLegacyAssetNames = null;
+
+  if (assets.length > 0 && Object.keys(existingAssets).length === 0) {
+    try {
+      progress('クラウド上の既存アセットを確認中...');
+      remoteLegacyAssetNames = new Set((await listRemoteAssets()).map(entry => entry?.name).filter(Boolean));
+    } catch (error) {
+      console.warn('[Dropbox] 既存アセット一覧の取得に失敗しました。必要に応じて再アップロードします。', error);
+      remoteLegacyAssetNames = new Set();
+    }
+  }
+
+  for (let i = 0; i < assets.length; i++) {
+    const item = assets[i];
+    if (!item?.assetId || !item?.blob) continue;
+    const previous = existingAssets[item.assetId] || null;
+    const label = previous?.label || labelIndex[item.assetId] || 'asset';
+    const path = buildAssetRemotePath(item.assetId, item.blob.type, label, previous?.path || '');
+    const existsRemotely = !!previous || !!remoteLegacyAssetNames?.has(item.assetId);
+
+    manifestAssets[item.assetId] = {
+      path: previous?.path || (remoteLegacyAssetNames?.has(item.assetId) ? `${ASSETS_DIR_PATH}/${item.assetId}` : path),
+      label,
+      updatedAt: previous?.updatedAt || Date.now()
+    };
+
+    if (existsRemotely) {
+      continue;
+    }
+
+    progress(`アセット ${i + 1}/${assets.length} をアップロード中...`);
+    await uploadAsset(item.blob, item.assetId, manifestAssets[item.assetId].path);
+    manifestAssets[item.assetId].updatedAt = Date.now();
+  }
+
+  return manifestAssets;
+}
+
+async function uploadV2Data({ stories = [], characters = [], lores = [], settings = {}, assetEntries = {}, existingManifest = null, onProgress }) {
   const now = Date.now();
   const progress = msg => { if (onProgress) onProgress(msg); };
 
@@ -435,10 +583,11 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   await uploadJson(V2_SETTINGS, { settings, updatedAt: now });
 
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     updatedAt: now,
     settingsPath: V2_SETTINGS,
     loresPath: V2_LORES,
+    assets: assetEntries,
     characters: {},
     stories: {}
   };
@@ -449,18 +598,23 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   progress(`キャラクター ${characters.length} 件を同期中...`);
   for (const character of characters) {
     if (!character?.characterId) continue;
-    const path = `${V2_CHAR_DIR}/${character.characterId}.json`;
+    const previousPath = existingManifest?.characters?.[character.characterId]?.path || '';
+    const path = previousPath && previousPath.includes('__')
+      ? previousPath
+      : `${V2_CHAR_DIR}/${buildCharacterFileName(character)}`;
     await uploadJson(path, character);
     manifest.characters[character.characterId] = {
       path,
-      updatedAt: character.timestamp || now
+      updatedAt: character.timestamp || now,
+      name: character.name || '',
+      category: character.category || ''
     };
   }
 
   progress(`ストーリー ${stories.length} 件を同期中...`);
   for (const story of stories) {
     if (!story?.storyId) continue;
-    manifest.stories[story.storyId] = await uploadV2Story(story, now);
+    manifest.stories[story.storyId] = await uploadV2Story(story, existingManifest?.stories?.[story.storyId], now);
   }
 
   progress('同期目次を更新中...');
@@ -468,8 +622,10 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   return manifest;
 }
 
-async function uploadV2Story(story, now = Date.now()) {
-  const storyDir = `${V2_STORY_DIR}/${story.storyId}`;
+async function uploadV2Story(story, previousEntry = null, now = Date.now()) {
+  const storyDir = previousEntry?.dirPath && previousEntry.dirPath.includes('__')
+    ? previousEntry.dirPath
+    : `${V2_STORY_DIR}/${buildStoryFolderName(story)}`;
   await ensureFolderExists(storyDir);
 
   const { meta, chunks } = splitStoryForSync(story);
@@ -485,25 +641,30 @@ async function uploadV2Story(story, now = Date.now()) {
   }
 
   return {
+    dirPath: storyDir,
     metaPath,
     messageChunks,
     messageCount: Array.isArray(story.messages) ? story.messages.length : 0,
-    updatedAt: story.timestamp || now
+    updatedAt: story.timestamp || now,
+    title: story.title || '',
+    franchise: story.franchise || ''
   };
 }
 
 async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) {
   if (!previousEntry || !Number.isFinite(previousEntry.messageCount)) {
-    return uploadV2Story(story, now);
+    return uploadV2Story(story, previousEntry, now);
   }
 
-  const storyDir = `${V2_STORY_DIR}/${story.storyId}`;
+  const storyDir = previousEntry?.dirPath && previousEntry.dirPath.includes('__')
+    ? previousEntry.dirPath
+    : `${V2_STORY_DIR}/${buildStoryFolderName(story)}`;
   await ensureFolderExists(storyDir);
 
   const { meta, chunks } = splitStoryForSync(story);
   const nextMessageCount = Array.isArray(story.messages) ? story.messages.length : 0;
   if (nextMessageCount < previousEntry.messageCount) {
-    return uploadV2Story(story, now);
+    return uploadV2Story(story, previousEntry, now);
   }
 
   const metaPath = `${storyDir}/meta.json`;
@@ -520,17 +681,24 @@ async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) 
   }
 
   return {
+    dirPath: storyDir,
     metaPath,
     messageChunks,
     messageCount: nextMessageCount,
-    updatedAt: story.timestamp || now
+    updatedAt: story.timestamp || now,
+    title: story.title || '',
+    franchise: story.franchise || ''
   };
 }
 
 async function downloadV2Data({ localAssetIds, onProgress }) {
   const progress = msg => { if (onProgress) onProgress(msg); };
   const manifest = await downloadJson(V2_MANIFEST);
-  if (!manifest || manifest.schemaVersion !== 2) return null;
+  if (!manifest || manifest.schemaVersion < 2) return null;
+  lastRemoteManifestInfo = {
+    updatedAt: Number(manifest.updatedAt || 0),
+    schemaVersion: Number(manifest.schemaVersion || 0)
+  };
 
   progress('同期目次を取得しました。差分を復元中...');
   const settingsPayload = await downloadJson(manifest.settingsPath || V2_SETTINGS);
@@ -569,7 +737,7 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
     for (let i = 0; i < missingIds.length; i++) {
       const assetId = missingIds[i];
       progress(`アセット ${i + 1}/${missingIds.length} を取得中...`);
-      const blob = await downloadAsset(assetId);
+      const blob = await downloadAsset(assetId, manifest.assets?.[assetId]?.path || '');
       if (blob) newAssets.push({ assetId, blob });
     }
   }
@@ -608,8 +776,8 @@ export async function ensureAssetsFolderExists() {
 /**
  * 単一のアセット Blob を Dropbox にアップロードする。
  */
-export async function uploadAsset(blob, assetId) {
-  const path = `${ASSETS_DIR_PATH}/${assetId}`;
+export async function uploadAsset(blob, assetId, remotePath = '') {
+  const path = remotePath || `${ASSETS_DIR_PATH}/${assetId}`;
   const args = { path, mode: 'overwrite', mute: true };
   return _request('content', '/files/upload', {
     method: 'POST',
@@ -625,8 +793,8 @@ export async function uploadAsset(blob, assetId) {
  * 単一のアセットを Dropbox からダウンロードし Blob を返す。
  * ファイルが存在しない場合は null を返す。
  */
-export async function downloadAsset(assetId) {
-  const path = `${ASSETS_DIR_PATH}/${assetId}`;
+export async function downloadAsset(assetId, remotePath = '') {
+  const path = remotePath || `${ASSETS_DIR_PATH}/${assetId}`;
   const args = { path };
   try {
     return await _request('content', '/files/download', {
@@ -800,30 +968,44 @@ export async function pushToDropbox({ stories, characters, lores, settings, asse
 
   await uploadLockFile('push');
   try {
+    const existingManifest = await downloadJson(V2_MANIFEST);
+    const remoteSettingsPayload = await downloadJson(existingManifest?.settingsPath || V2_SETTINGS);
+    const mergedTombstones = mergeSyncTombstones(
+      settings?.dropbox_sync_tombstones || {},
+      remoteSettingsPayload?.settings?.dropbox_sync_tombstones || {}
+    );
+    const mergedSettings = {
+      ...(remoteSettingsPayload?.settings || {}),
+      ...(settings || {}),
+      dropbox_sync_tombstones: mergedTombstones
+    };
+    const filteredStories = filterDeletedItems(stories, 'storyId', mergedTombstones.stories);
+    const filteredCharacters = filterDeletedItems(characters, 'characterId', mergedTombstones.characters);
+    const filteredLores = filterDeletedItems(lores, 'id', mergedTombstones.lores);
+    const filteredAssets = (assets || []).filter(item => item?.assetId && !mergedTombstones.assets?.[item.assetId]);
+
+    const assetEntries = await buildAssetManifestEntries({
+      assets: filteredAssets,
+      stories: filteredStories,
+      characters: filteredCharacters,
+      existingManifest,
+      onProgress
+    });
+
     progress('分割メタデータをアップロード中...');
-    await uploadV2Data({ stories, characters, lores, settings, onProgress });
-
-    progress('アセットフォルダを確認中...');
-    await ensureAssetsFolderExists();
-
-    if (assets && assets.length > 0) {
-      progress('クラウド上の既存アセットを確認中...');
-      const remoteEntries = await listRemoteAssets();
-      const remoteAssetIds = new Set(remoteEntries.map(entry => entry?.name).filter(Boolean));
-      const assetsToUpload = assets.filter(item => item?.assetId && !remoteAssetIds.has(item.assetId));
-      const skippedCount = assets.length - assetsToUpload.length;
-
-      if (skippedCount > 0) {
-        progress(`既存アセット ${skippedCount} 件をスキップします...`);
-      }
-
-      if (assetsToUpload.length > 0) {
-        progress(`${assetsToUpload.length}件のアセットをアップロード中...`);
-        await uploadAssetsInBatches(assetsToUpload, (cur, tot) => progress(`アセット ${cur}/${tot} をアップロード中...`));
-      } else {
-        progress('アップロードが必要な新規アセットはありません。');
-      }
-    }
+    const manifest = await uploadV2Data({
+      stories: filteredStories,
+      characters: filteredCharacters,
+      lores: filteredLores,
+      settings: mergedSettings,
+      assetEntries,
+      existingManifest,
+      onProgress
+    });
+    lastRemoteManifestInfo = {
+      updatedAt: Number(manifest?.updatedAt || 0),
+      schemaVersion: Number(manifest?.schemaVersion || 0)
+    };
 
     progress('プッシュ完了！');
   } finally {
@@ -851,7 +1033,7 @@ export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
   await uploadLockFile('delta-push');
   try {
     const manifest = await downloadJson(V2_MANIFEST);
-    if (!manifest || manifest.schemaVersion !== 2) {
+    if (!manifest || manifest.schemaVersion < 2) {
       return null;
     }
 
@@ -873,6 +1055,10 @@ export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
 
     progress('同期目次を更新中...');
     await uploadJson(V2_MANIFEST, manifest);
+    lastRemoteManifestInfo = {
+      updatedAt: Number(manifest.updatedAt || 0),
+      schemaVersion: Number(manifest.schemaVersion || 0)
+    };
     progress('差分同期完了！');
     return manifest;
   } finally {
@@ -896,7 +1082,7 @@ export async function pushLoreDeltaToDropbox({ lores, onProgress }) {
   await uploadLockFile('delta-push-lores');
   try {
     const manifest = await downloadJson(V2_MANIFEST);
-    if (!manifest || manifest.schemaVersion !== 2) {
+    if (!manifest || manifest.schemaVersion < 2) {
       return null;
     }
 
@@ -911,6 +1097,10 @@ export async function pushLoreDeltaToDropbox({ lores, onProgress }) {
 
     progress('同期目次を更新中...');
     await uploadJson(V2_MANIFEST, manifest);
+    lastRemoteManifestInfo = {
+      updatedAt: Number(manifest.updatedAt || 0),
+      schemaVersion: Number(manifest.schemaVersion || 0)
+    };
     progress('ロアブック差分同期完了！');
     return manifest;
   } finally {

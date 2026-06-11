@@ -6,8 +6,10 @@
 const DB_NAME = 'ZetaTavern_PWA_Unique_v1_DB'; // 他のアプリと絶対衝突しない名前に変更
 // Bump when adding stores/indexes so existing users receive schema upgrades.
 const DB_VERSION = 3;
+const LOCAL_CHANGE_MARKER_KEY = 'dropbox_local_change_at';
 
 let dbPromise = null;
+let localChangeTrackingSuspendCount = 0;
 
 /**
  * Initializes and returns the IndexedDB instance.
@@ -146,6 +148,28 @@ export async function saveSetting(key, value) {
   }
 }
 
+async function touchLocalChangeMarker() {
+  if (localChangeTrackingSuspendCount > 0) return;
+  try {
+    await put('settings', { key: LOCAL_CHANGE_MARKER_KEY, value: Date.now() });
+  } catch (err) {
+    console.error('Error updating local change marker:', err);
+  }
+}
+
+export async function getLocalChangeMarker() {
+  return getSetting(LOCAL_CHANGE_MARKER_KEY, 0);
+}
+
+export async function runWithoutLocalChangeTracking(callback) {
+  localChangeTrackingSuspendCount += 1;
+  try {
+    return await callback();
+  } finally {
+    localChangeTrackingSuspendCount = Math.max(0, localChangeTrackingSuspendCount - 1);
+  }
+}
+
 // ==========================================
 // Assets API (Blob Storage)
 // ==========================================
@@ -159,6 +183,7 @@ export async function saveAsset(blob, mimeType) {
       mimeType,
       timestamp: Date.now()
     });
+    await touchLocalChangeMarker();
     return assetId;
   } catch (err) {
     console.error('Error saving asset:', err);
@@ -181,6 +206,7 @@ export async function deleteAsset(assetId) {
   if (!assetId) return;
   try {
     await deleteKey('assets', assetId);
+    await touchLocalChangeMarker();
   } catch (err) {
     console.error(`Error deleting asset ${assetId}:`, err);
   }
@@ -199,6 +225,7 @@ export async function saveAssetWithId(assetId, blob, mimeType) {
       mimeType,
       timestamp: Date.now()
     });
+    await touchLocalChangeMarker();
   } catch (err) {
     console.error(`Error saving asset with id ${assetId}:`, err);
     throw err;
@@ -259,6 +286,7 @@ export async function saveCharacter(character) {
   character.timestamp = Date.now();
   try {
     await put('characters', character);
+    await touchLocalChangeMarker();
     return character.characterId;
   } catch (err) {
     console.error('Error saving character:', err);
@@ -273,6 +301,7 @@ export async function deleteCharacter(characterId) {
       await deleteAsset(char.avatarAssetId);
     }
     await deleteKey('characters', characterId);
+    await touchLocalChangeMarker();
   } catch (err) {
     console.error(`Error deleting character ${characterId}:`, err);
     throw err;
@@ -308,6 +337,7 @@ export async function saveStory(story) {
   story.timestamp = Date.now();
   try {
     await put('stories', story);
+    await touchLocalChangeMarker();
     return story.storyId;
   } catch (err) {
     console.error('Error saving story:', err);
@@ -318,6 +348,7 @@ export async function saveStory(story) {
 export async function deleteStory(storyId) {
   try {
     await deleteKey('stories', storyId);
+    await touchLocalChangeMarker();
   } catch (err) {
     console.error(`Error deleting story ${storyId}:`, err);
     throw err;
@@ -352,6 +383,7 @@ export async function saveLore(lore) {
   }
   try {
     await put('world_lore', lore);
+    await touchLocalChangeMarker();
     return lore.id;
   } catch (err) {
     console.error('Error saving world lore:', err);
@@ -362,6 +394,7 @@ export async function saveLore(lore) {
 export async function deleteLore(loreId) {
   try {
     await deleteKey('world_lore', loreId);
+    await touchLocalChangeMarker();
   } catch (err) {
     console.error(`Error deleting world lore ${loreId}:`, err);
     throw err;

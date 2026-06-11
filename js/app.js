@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260610d';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260610d';
-import * as dropbox from './dropbox.js?v=20260609d';
+import * as ui from './ui.js?v=20260611a';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260611a';
+import * as dropbox from './dropbox.js?v=20260611a';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -35,6 +35,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'custom_models',
   'dropbox_app_key',
   'dropbox_sync_frequency',
+  'dropbox_sync_tombstones',
   'lore_auto_search_enabled',
   'thinking_level',
   'thinking_level_gemini3',
@@ -2205,6 +2206,10 @@ async function performDropboxPush() {
 
     const now = Date.now();
     await db.saveSetting('dropbox_last_sync', now);
+    const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+    if (remoteManifestUpdatedAt) {
+      await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+    }
     updateLastSyncText(now);
     setDropboxProgress(null);
     alert('クラウドへの保存が完了しました！');
@@ -2245,28 +2250,34 @@ async function performDropboxPull() {
 
     setDropboxProgress('ローカルデータを更新中...');
 
-    await restoreDropboxSettings(settings);
+    await db.runWithoutLocalChangeTracking(async () => {
+      await restoreDropboxSettings(settings);
 
-    for (const { assetId, blob } of newAssets) {
-      await db.saveAssetWithId(assetId, blob, blob.type);
-    }
+      for (const { assetId, blob } of newAssets) {
+        await db.saveAssetWithId(assetId, blob, blob.type);
+      }
 
-    await db.clearStore('stories');
-    await db.clearStore('characters');
-    await db.clearStore('world_lore');
+      await db.clearStore('stories');
+      await db.clearStore('characters');
+      await db.clearStore('world_lore');
 
-    for (const story of stories) {
-      await db.saveStory(story);
-    }
-    for (const char of characters) {
-      await db.saveCharacter(char);
-    }
-    for (const lore of (lores || [])) {
-      await db.saveLore(lore);
-    }
+      for (const story of stories) {
+        await db.saveStory(story);
+      }
+      for (const char of characters) {
+        await db.saveCharacter(char);
+      }
+      for (const lore of (lores || [])) {
+        await db.saveLore(lore);
+      }
+    });
 
     const now = Date.now();
     await db.saveSetting('dropbox_last_sync', now);
+    const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+    if (remoteManifestUpdatedAt) {
+      await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+    }
     updateLastSyncText(now);
     setDropboxProgress(null);
 
@@ -2359,6 +2370,10 @@ async function performAutoDropboxSync({ storyId = null, forceFull = false, syncS
       }
       const now = Date.now();
       await db.saveSetting('dropbox_last_sync', now);
+      const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+      if (remoteManifestUpdatedAt) {
+        await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+      }
       updateLastSyncText(now);
       updateSyncStatusIndicator('success');
     } catch (e) {
@@ -2493,13 +2508,8 @@ function updateSyncStatusIndicator(status) {
  */
 async function hasNewerLocalChanges() {
   const lastSync = parseInt(await db.getSetting('dropbox_last_sync', '0'), 10) || 0;
-  const stories = await db.getStories();
-  const characters = await db.getCharacters();
-
-  const hasNewStory = stories.some(s => (s.timestamp || 0) > lastSync);
-  const hasNewChar = characters.some(c => (c.timestamp || 0) > lastSync);
-
-  return hasNewStory || hasNewChar;
+  const localChangeAt = parseInt(await db.getLocalChangeMarker(), 10) || 0;
+  return localChangeAt > lastSync;
 }
 
 /** Auto-pull on app startup if connected and frequency > 0 */
@@ -2523,7 +2533,19 @@ async function performStartupSync() {
       await performDropboxPushSilent();
       const now = Date.now();
       await db.saveSetting('dropbox_last_sync', now);
+      const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+      if (remoteManifestUpdatedAt) {
+        await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+      }
       updateLastSyncText(now);
+      updateSyncStatusIndicator('success');
+      return;
+    }
+
+    const knownRemoteManifestUpdatedAt = parseInt(await db.getSetting('dropbox_remote_manifest_updated_at', '0'), 10) || 0;
+    const remoteManifestInfo = await dropbox.getRemoteManifestInfo();
+    if (remoteManifestInfo?.updatedAt && remoteManifestInfo.updatedAt === knownRemoteManifestUpdatedAt) {
+      console.log('[Dropbox StartupSync] クラウド側の manifest に変更がないため、重いプルをスキップします。');
       updateSyncStatusIndicator('success');
       return;
     }
@@ -2537,17 +2559,19 @@ async function performStartupSync() {
     });
 
     if (stories) {
-      await restoreDropboxSettings(settings);
+      await db.runWithoutLocalChangeTracking(async () => {
+        await restoreDropboxSettings(settings);
 
-      for (const { assetId, blob } of newAssets) {
-        await db.saveAssetWithId(assetId, blob, blob.type);
-      }
-      await db.clearStore('stories');
-      await db.clearStore('characters');
-      await db.clearStore('world_lore');
-      for (const story of stories) await db.saveStory(story);
-      for (const char of characters) await db.saveCharacter(char);
-      for (const lore of (lores || [])) await db.saveLore(lore);
+        for (const { assetId, blob } of newAssets) {
+          await db.saveAssetWithId(assetId, blob, blob.type);
+        }
+        await db.clearStore('stories');
+        await db.clearStore('characters');
+        await db.clearStore('world_lore');
+        for (const story of stories) await db.saveStory(story);
+        for (const char of characters) await db.saveCharacter(char);
+        for (const lore of (lores || [])) await db.saveLore(lore);
+      });
 
       const updatedStories = await db.getStories();
       const updatedChars   = await db.getCharacters();
@@ -2568,6 +2592,10 @@ async function performStartupSync() {
 
     const now = Date.now();
     await db.saveSetting('dropbox_last_sync', now);
+    const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+    if (remoteManifestUpdatedAt) {
+      await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+    }
     updateLastSyncText(now);
     updateSyncStatusIndicator('success');
   } catch (e) {
