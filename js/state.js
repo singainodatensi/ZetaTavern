@@ -9,6 +9,7 @@ const state = {
   apiKey: '',
   modelName: 'gemini-2.5-flash',
   searchModelName: '',
+  webSearchProvider: 'auto',
   availableModels: [],
   lastUsedModel: '',
   
@@ -26,6 +27,7 @@ const state = {
   apiUsageHistory: [],
   thinkingLevelGemini3: 'medium',
   thinkingBudgetPresetGemini25: 'balanced',
+  gemmaThinkingEnabled: true,
   promptDebugEnabled: false,
   historyCompressionEnabled: true,
   historyTurnLimit: 10,

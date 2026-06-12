@@ -4,7 +4,7 @@
  */
 
 import { getState, updateState } from './state.js'; // ★ updateState のインポートを追加
-import { getCharacter, getLoreByNameAndFranchise, saveLore, getCharacters } from './db.js';
+import { getCharacter, getLore, getLoreByNameAndFranchise, getWorldLores, saveLore, getCharacters } from './db.js';
 import { getStoryScopedCharacters } from './story-characters.js';
 
 async function getCharactersList() {
@@ -44,7 +44,9 @@ function hasCharacterLoreConflict(lore, characters, franchise) {
 }
 
 const DEFAULT_SEARCH_MODEL_NAME = 'gemini-2.5-flash-lite';
-const FULL_CHARACTER_CONTEXT_INTERVAL = 5;
+const MAX_SEARCH_WEB_CALLS_PER_TURN = 1;
+let webSearchCooldownUntil = 0;
+const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['auto', 'google', 'duckduckgo', 'off']);
 
 function selectSearchCapableModel(modelName) {
   const requested = (modelName || '').trim();
@@ -64,6 +66,19 @@ function resolveSearchModelName(appState) {
   return selectSearchCapableModel(appState?.modelName || DEFAULT_SEARCH_MODEL_NAME);
 }
 
+function normalizeWebSearchProvider(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return WEB_SEARCH_PROVIDER_OPTIONS.has(normalized) ? normalized : 'auto';
+}
+
+function getWebSearchProviderLabel(value) {
+  const normalized = normalizeWebSearchProvider(value);
+  if (normalized === 'google') return 'Google';
+  if (normalized === 'duckduckgo') return 'DuckDuckGo';
+  if (normalized === 'off') return 'OFF';
+  return 'Auto';
+}
+
 function buildCompactCharacterHint(character) {
   const cues = [];
   if (character?.personality) cues.push(character.personality.trim().replace(/\s+/g, ' ').slice(0, 80));
@@ -75,7 +90,7 @@ function shouldSendFullCharacterProfiles(story) {
   const completedModelTurns = Array.isArray(story?.messages)
     ? story.messages.filter(message => message?.role === 'model').length
     : 0;
-  return completedModelTurns === 0 || completedModelTurns % FULL_CHARACTER_CONTEXT_INTERVAL === 0;
+  return completedModelTurns === 0;
 }
 
 function chunkMessagesByUserTurn(messages = []) {
@@ -118,6 +133,54 @@ function selectPromptMessages(messages = [], turnLimit = 0) {
     omittedTurns: chunks.length - keptChunks.length
   };
 }
+
+function normalizeSearchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function uniqueNonEmpty(values = []) {
+  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function tokenizeSearchQuery(query) {
+  const raw = String(query || '').trim();
+  if (!raw) return [];
+
+  const parts = raw
+    .split(/[\s,、。・/\\|!！?？"'`]+/)
+    .map(part => part.trim())
+    .filter(part => part.length >= 2);
+
+  return uniqueNonEmpty([raw, ...parts]);
+}
+
+function scoreSearchableText(text, tokens) {
+  const haystack = normalizeSearchText(text);
+  if (!haystack || !Array.isArray(tokens) || tokens.length === 0) return 0;
+
+  let score = 0;
+  for (const token of tokens) {
+    const needle = normalizeSearchText(token);
+    if (!needle) continue;
+    if (haystack === needle) {
+      score += 120;
+    } else if (haystack.startsWith(needle)) {
+      score += 60;
+    } else if (haystack.includes(needle)) {
+      score += 24;
+    }
+  }
+  return score;
+}
+
+const PROACTIVE_REFERENCE_STOPWORDS = new Set([
+  '主人公', '世界', '物語', '会話', '状況', '設定', '関係', '人物', 'キャラクター',
+  '場所', '情報', '内容', '話', '今回', '次', '今', 'さっき', '感じ', 'ところ',
+  '相手', '自分', '普通', '一般', '説明', '詳細', '名前', '存在', '仲間'
+]);
 
 function normalizeLoreType(type) {
   const allowed = new Set(['character', 'location', 'organization', 'term', 'event', 'item']);
@@ -329,7 +392,12 @@ function createUsageAccumulator(requestType, modelName) {
     thinkingConfigLabel: '',
     historyCompressionEnabled: true,
     historyTurnLimit: null,
-    omittedTurns: 0
+    omittedTurns: 0,
+      toolCalls: [],
+      groundingQueries: [],
+      googleSearchAvailable: false,
+      serverToolRoundTrips: 0,
+      searchProviderLabel: ''
   };
 }
 
@@ -374,6 +442,11 @@ function publishUsageSnapshot(accumulator) {
       historyCompressionEnabled: accumulator.historyCompressionEnabled !== false,
       historyTurnLimit: accumulator.historyTurnLimit,
       omittedTurns: accumulator.omittedTurns || 0,
+      toolCalls: Array.isArray(accumulator.toolCalls) ? accumulator.toolCalls : [],
+      groundingQueries: Array.isArray(accumulator.groundingQueries) ? accumulator.groundingQueries : [],
+      googleSearchAvailable: accumulator.googleSearchAvailable === true,
+      serverToolRoundTrips: Number(accumulator.serverToolRoundTrips || 0),
+      searchProviderLabel: accumulator.searchProviderLabel || '',
       breakdown
     };
   }
@@ -393,6 +466,66 @@ function publishUsageSnapshot(accumulator) {
     console.log(`[AI Usage][${snapshot.requestType}]`, snapshot);
   }
   return snapshot;
+}
+
+function buildToolCallPreview(args = {}) {
+  const candidates = [
+    args?.query,
+    args?.name,
+    args?.characterName,
+    args?.franchise,
+    args?.type,
+    args?.characterId,
+    args?.loreId
+  ];
+  const preview = candidates.find(value => typeof value === 'string' && value.trim());
+  return preview ? preview.trim().slice(0, 60) : '';
+}
+
+function recordToolCall(accumulator, name, args = {}) {
+  if (!accumulator || !name) return;
+  if (!Array.isArray(accumulator.toolCalls)) {
+    accumulator.toolCalls = [];
+  }
+
+  const existing = accumulator.toolCalls.find(item =>
+    item?.name === name && item?.preview === buildToolCallPreview(args)
+  );
+  if (existing) {
+    existing.count = Number(existing.count || 0) + 1;
+    return;
+  }
+
+  accumulator.toolCalls.push({
+    name,
+    preview: buildToolCallPreview(args),
+    count: 1
+  });
+}
+
+function recordGroundingMetadata(accumulator, groundingMetadata) {
+  if (!accumulator || !groundingMetadata) return;
+  if (!Array.isArray(accumulator.groundingQueries)) {
+    accumulator.groundingQueries = [];
+  }
+
+  const queries = Array.isArray(groundingMetadata?.webSearchQueries)
+    ? groundingMetadata.webSearchQueries
+    : [];
+
+  for (const rawQuery of queries) {
+    const query = String(rawQuery || '').trim();
+    if (!query) continue;
+    if (!accumulator.groundingQueries.includes(query)) {
+      accumulator.groundingQueries.push(query);
+    }
+  }
+}
+
+function hasServerToolParts(result) {
+  const parts = result?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return false;
+  return parts.some(part => part?.toolCall || part?.toolResponse);
 }
 
 function stringifyDebugPart(part) {
@@ -568,6 +701,372 @@ function resolveStoryFranchise(story, characters = []) {
   return best;
 }
 
+function buildCharacterSearchCorpus(character) {
+  return [
+    character?.name,
+    character?.category,
+    ...(Array.isArray(character?.tags) ? character.tags : []),
+    character?.description,
+    character?.personality,
+    character?.mes_example
+  ].filter(Boolean).join('\n');
+}
+
+function buildLoreSearchCorpus(lore) {
+  return [
+    lore?.name,
+    lore?.type,
+    lore?.franchise,
+    lore?.searchContext,
+    lore?.content?.summary,
+    lore?.content?.profile,
+    lore?.content?.speech,
+    lore?.content?.relationships
+  ].filter(Boolean).join('\n');
+}
+
+function toCharacterSearchResult(character, score = 0) {
+  return {
+    characterId: character.characterId,
+    name: character.name || '',
+    category: character.category || '',
+    tags: Array.isArray(character.tags) ? character.tags : [],
+    summary: buildCompactCharacterHint(character),
+    score
+  };
+}
+
+function toLoreSearchResult(lore, score = 0) {
+  return {
+    loreId: lore.id,
+    name: lore.name || '',
+    type: lore.type || 'term',
+    franchise: lore.franchise || '',
+    summary: lore?.content?.summary || '',
+    score
+  };
+}
+
+async function searchCharacterLibraryForStory(story, args = {}) {
+  const query = String(args?.query || args?.characterName || '').trim();
+  if (!query) {
+    return { found: false, query: '', results: [], message: 'query is required' };
+  }
+
+  const allCharacters = await getCharactersList();
+  const scopedCharacters = getStoryScopedCharacters(allCharacters, story);
+  const primaryPool = scopedCharacters.length > 0 ? scopedCharacters : allCharacters;
+  const fallbackPool = scopedCharacters.length > 0 ? allCharacters.filter(character => !primaryPool.some(item => item.characterId === character.characterId)) : [];
+  const tokens = tokenizeSearchQuery(query);
+
+  const rankCharacter = character => {
+    const score =
+      scoreSearchableText(character?.name, tokens) * 2 +
+      scoreSearchableText(character?.category, tokens) +
+      scoreSearchableText((character?.tags || []).join(' '), tokens) +
+      scoreSearchableText(buildCharacterSearchCorpus(character), tokens);
+    return { character, score };
+  };
+
+  const primaryMatches = primaryPool
+    .map(rankCharacter)
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const fallbackMatches = fallbackPool
+    .map(rankCharacter)
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const ranked = uniqueNonEmpty([
+    ...primaryMatches.map(item => item.character.characterId),
+    ...fallbackMatches.map(item => item.character.characterId)
+  ]).map(characterId => {
+    const hit = primaryMatches.find(item => item.character.characterId === characterId)
+      || fallbackMatches.find(item => item.character.characterId === characterId);
+    return hit;
+  }).filter(Boolean);
+
+  return {
+    found: ranked.length > 0,
+    query,
+    scope: scopedCharacters.length > 0 ? 'story-first' : 'global',
+    results: ranked.slice(0, 5).map(item => toCharacterSearchResult(item.character, item.score))
+  };
+}
+
+async function getCharacterProfileForStory(story, args = {}) {
+  const characterId = String(args?.characterId || '').trim();
+  const characterName = String(args?.characterName || args?.name || '').trim();
+
+  let character = characterId ? await getCharacter(characterId) : null;
+  if (!character && characterName) {
+    const searchResult = await searchCharacterLibraryForStory(story, { query: characterName });
+    character = searchResult.results?.[0]?.characterId ? await getCharacter(searchResult.results[0].characterId) : null;
+  }
+
+  if (!character) {
+    return {
+      found: false,
+      query: characterName || characterId,
+      character: null
+    };
+  }
+
+  return {
+    found: true,
+    character: {
+      characterId: character.characterId,
+      name: character.name || '',
+      category: character.category || '',
+      tags: Array.isArray(character.tags) ? character.tags : [],
+      description: character.description || '',
+      personality: character.personality || '',
+      mes_example: character.mes_example || ''
+    }
+  };
+}
+
+function getLoreFranchiseBonus(lore, franchise) {
+  const normalizedLoreFranchise = normalizeLoreKey(lore?.franchise);
+  const normalizedFranchise = normalizeLoreKey(franchise);
+  if (!normalizedLoreFranchise || !normalizedFranchise) return 0;
+  return normalizedLoreFranchise === normalizedFranchise ? 80 : 0;
+}
+
+async function searchLorebookForStory(story, args = {}) {
+  const query = String(args?.query || args?.name || '').trim();
+  if (!query) {
+    return { found: false, query: '', results: [], message: 'query is required' };
+  }
+
+  const requestedType = String(args?.type || '').trim().toLowerCase();
+  const allLores = (await getWorldLores()).filter(lore => lore && lore.status === 'completed');
+  const storyFranchise = String(args?.franchise || story?.franchise || '').trim();
+  const tokens = tokenizeSearchQuery(query);
+
+  let ranked = allLores
+    .filter(lore => !requestedType || normalizeLoreType(lore.type) === normalizeLoreType(requestedType))
+    .map(lore => {
+      const score =
+        scoreSearchableText(lore?.name, tokens) * 3 +
+        scoreSearchableText(buildLoreSearchCorpus(lore), tokens) +
+        getLoreFranchiseBonus(lore, storyFranchise);
+      return { lore, score };
+    })
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (storyFranchise && ranked.length === 0) {
+    ranked = allLores
+      .map(lore => ({
+        lore,
+        score:
+          scoreSearchableText(lore?.name, tokens) * 3 +
+          scoreSearchableText(buildLoreSearchCorpus(lore), tokens)
+      }))
+      .filter(item => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+  }
+
+  return {
+    found: ranked.length > 0,
+    query,
+    franchise: storyFranchise,
+    results: ranked.slice(0, 5).map(item => toLoreSearchResult(item.lore, item.score))
+  };
+}
+
+async function getLoreEntryForStory(story, args = {}) {
+  const loreId = String(args?.loreId || '').trim();
+  const name = String(args?.name || args?.query || '').trim();
+  const franchise = String(args?.franchise || story?.franchise || '').trim();
+
+  let lore = loreId ? await getLore(loreId) : null;
+  if (!lore && name) {
+    lore = await getLoreByNameAndFranchise(name, franchise);
+  }
+  if (!lore && name) {
+    const searchResult = await searchLorebookForStory(story, { query: name, franchise });
+    lore = searchResult.results?.[0]?.loreId ? await getLore(searchResult.results[0].loreId) : null;
+  }
+
+  if (!lore) {
+    return {
+      found: false,
+      query: name || loreId,
+      lore: null
+    };
+  }
+
+  return {
+    found: true,
+    lore: {
+      loreId: lore.id,
+      name: lore.name || '',
+      type: lore.type || 'term',
+      franchise: lore.franchise || '',
+      searchContext: lore.searchContext || '',
+      summary: lore?.content?.summary || '',
+      profile: lore?.content?.profile || '',
+      speech: lore?.content?.speech || '',
+      relationships: lore?.content?.relationships || ''
+    }
+  };
+}
+
+function extractReferenceCandidatesFromText(text) {
+  const words = new Set();
+  const source = String(text || '');
+  if (!source.trim()) return [];
+
+  const katakana = source.match(/[\u30a0-\u30ffー]{2,20}/g) || [];
+  const kanji = source.match(/[\u4e00-\u9faf]{2,12}/g) || [];
+  const english = source.match(/[A-Z][a-zA-Z0-9:_-]{2,20}/g) || [];
+
+  for (const rawWord of [...katakana, ...kanji, ...english]) {
+    const word = normalizeLoreEntryName(rawWord).trim();
+    if (!word || word.length < 2) continue;
+    if (PROACTIVE_REFERENCE_STOPWORDS.has(word)) continue;
+    words.add(word);
+  }
+
+  return Array.from(words);
+}
+
+function collectStoryReferenceCandidates(story, scopedCharacters = []) {
+  const candidates = new Set();
+  const messages = Array.isArray(story?.messages) ? story.messages : [];
+  const recentMessages = messages.slice(-3);
+
+  for (const message of recentMessages) {
+    for (const term of extractReferenceCandidatesFromText(message?.content || message?.aiContent || '')) {
+      candidates.add(term);
+    }
+  }
+
+  const recentText = recentMessages
+    .map(message => `${message?.content || ''}\n${message?.aiContent || ''}`)
+    .join('\n');
+
+  for (const character of scopedCharacters) {
+    const name = String(character?.name || '').trim();
+    if (!name) continue;
+    if (recentText.includes(name)) {
+      candidates.add(name);
+    }
+  }
+
+  return Array.from(candidates).slice(0, 8);
+}
+
+function shouldEnableGoogleSearchForStory(story, systemInstruction, googleSearchEnabled) {
+  if (!googleSearchEnabled) return false;
+  if (/ローカル未解決候補:/.test(systemInstruction)) return true;
+
+  const franchise = String(story?.franchise || '').trim();
+  if (franchise) return true;
+
+  const tags = Array.isArray(story?.tags)
+    ? story.tags.map(tag => String(tag || '').trim()).filter(Boolean)
+    : [];
+  if (tags.length > 0) return true;
+
+  return false;
+}
+
+function isStrongCharacterHit(searchResult, query) {
+  const top = searchResult?.results?.[0];
+  if (!top) return false;
+  const normalizedQuery = normalizeLoreKey(query);
+  const normalizedName = normalizeLoreKey(top.name);
+  return normalizedName === normalizedQuery || Number(top.score || 0) >= 120;
+}
+
+function isStrongLoreHit(searchResult, query) {
+  const top = searchResult?.results?.[0];
+  if (!top) return false;
+  const normalizedQuery = normalizeLoreKey(query);
+  const normalizedName = normalizeLoreKey(top.name);
+  return normalizedName === normalizedQuery || Number(top.score || 0) >= 120;
+}
+
+async function buildProactiveReferenceMemo(story, scopedCharacters, allCharacters, options = {}) {
+  const referenceTerms = collectStoryReferenceCandidates(story, scopedCharacters);
+  if (referenceTerms.length === 0) {
+    return '';
+  }
+
+  const prefetchedCharacters = [];
+  const prefetchedLores = [];
+  const unresolvedTerms = [];
+
+  for (const term of referenceTerms) {
+    const characterSearch = await searchCharacterLibraryForStory(story, { query: term });
+    if (isStrongCharacterHit(characterSearch, term)) {
+      const characterId = characterSearch.results?.[0]?.characterId;
+      const character = characterId ? await getCharacter(characterId) : null;
+      if (character && !prefetchedCharacters.some(item => item.characterId === character.characterId)) {
+        prefetchedCharacters.push(character);
+        continue;
+      }
+    }
+
+    const loreSearch = await searchLorebookForStory(story, { query: term });
+    if (isStrongLoreHit(loreSearch, term)) {
+      const loreId = loreSearch.results?.[0]?.loreId;
+      const lore = loreId ? await getLore(loreId) : null;
+      if (lore && !prefetchedLores.some(item => item.id === lore.id)) {
+        prefetchedLores.push(lore);
+        continue;
+      }
+    }
+
+    unresolvedTerms.push(term);
+  }
+
+  if (prefetchedCharacters.length === 0 && prefetchedLores.length === 0 && unresolvedTerms.length === 0) {
+    return '';
+  }
+
+  let block = `【事前参照メモ】\n`;
+  block += `- 直近の会話から、次の固有名詞候補が見えている: ${referenceTerms.join(' / ')}\n`;
+  block += `- これらは本文を書き始める前に確認すべき候補であり、周辺人物・所属・拠点・陣営の取りこぼしを減らすために使うこと。\n`;
+
+  if (prefetchedCharacters.length > 0) {
+    block += `- 事前取得できた人物:\n`;
+    for (const character of prefetchedCharacters.slice(0, 3)) {
+      const compactHint = buildCompactCharacterHint(character);
+      block += `  ・${character.name}`;
+      if (character.category) block += ` [${character.category}]`;
+      if (compactHint) block += `: ${compactHint}`;
+      block += `\n`;
+    }
+  }
+
+  if (prefetchedLores.length > 0) {
+    block += `- 事前取得できたロア:\n`;
+    for (const lore of prefetchedLores.slice(0, 4)) {
+      const hasConflict = lore.type === 'character' && hasCharacterLoreConflict(lore, allCharacters, story?.franchise || '');
+      block += `  ・${lore.name} (${lore.type || '設定'})`;
+      if (lore.content?.summary) block += `: ${lore.content.summary}`;
+      if (hasConflict) block += ` ※演技はキャラクターライブラリ優先`;
+      block += `\n`;
+    }
+  }
+
+  if (unresolvedTerms.length > 0) {
+    block += `- ローカル未解決候補: ${unresolvedTerms.join(' / ')}\n`;
+    if (options.googleSearchEnabled) {
+      block += `- ローカル未解決候補が原作キャラ・組織・地名・種族・陣営に関わる場合、本文を書く前に Google Search で確認すること。\n`;
+      block += `- 特に原作キャラを出す場合は、同行者・陣営・拠点・代表的な関係者を確認し、場面に必要なら自然に同席させること。\n`;
+    }
+  }
+
+  block += `\n`;
+  return block;
+}
+
 function normalizeSessionLoreEvent(event) {
   if (typeof event === 'string') return event.trim();
   if (event == null) return '';
@@ -718,6 +1217,8 @@ async function applyWorldLoreUpdate(args, story) {
 export async function buildSystemInstruction(story, options = {}) {
   if (!story) return '';
   const allCharacters = await getCharactersList();
+  const webSearchEnabled = options.googleSearchEnabled === true;
+  const gemmaThinkEnabled = options.gemmaThinkEnabled === true;
 
   // ★ momentum と worldTone を取り出すように追加
   const { storytellerPrompt, worldPrompt, protagonist, characterMemory, relationshipMemory, momentum, worldTone } = story;
@@ -762,10 +1263,22 @@ export async function buildSystemInstruction(story, options = {}) {
   // ★ ここに追加
   instruction += `5. **主人公の不可侵性（アンタッチャブル）**: 主人公の「セリフ」「行動」「思考」「感情」はすべてユーザーが決定する。AIが主人公の言動や判断を勝手に捏造・代行することは絶対に禁止する。\n`;
   instruction += `6. **ナレーターの視点制限（カメラ視点）**: 地の文は、外から観測可能な事実（情景、NPCの表情や行動など）のみを描写するカメラに徹すること。主人公の内心（何を考え、何を感じ、何を理解したか）を勝手に代弁・描写してはならない。「主人公は〇〇と理解した」「不快感はなかった」等の心理解釈は固く禁ずる。\n\n`;
-  // ★ 追加：検索ツールの強制使用ルール
-  instruction += `【重要：世界観の正確な描写と検索ツールの使用】\n`;
+  instruction += `【重要：世界観の正確な描写と参照ツールの使い分け】\n`;
   instruction += `実在の作品名（アニメ、漫画等）をベースにした世界観の場合、安易にオリジナルの敵、魔法、地名、設定を捏造してはいけません。\n`;
-  instruction += `登場人物、モンスター、専門用語などを物語に出す際は、**必ずGoogle検索ツールを使用して原作の正確な情報を取得・参照**し、原作に忠実な展開を行ってください。\n\n`;
+  instruction += `キャラクターライブラリやロアブックに登録済みの内容は、必要になった時に参照ツールで検索・取得してから使ってください。\n`;
+  instruction += `- 人物情報は search_character_library / get_character_profile を優先して使うこと。\n`;
+  instruction += `- 世界設定や用語は search_lorebook / get_lore_entry を優先して使うこと。\n`;
+  instruction += `- ローカル参照で不足する場合は search_web を使い、原作設定や周辺人物、所属、拠点、制度を確認すること。\n`;
+  instruction += `- search_web がクォータ制限や一時エラーで失敗した場合、その内部事情をユーザーへ説明せず、分かる範囲だけで保守的に描写を続けること。\n`;
+  instruction += `- ローカル参照で見つからない内容だけ、モデル自身の既知知識を慎重に使うこと。\n`;
+  instruction += `- 不確かな固有設定を断定せず、確証のない場合は曖昧な言い切りを避けること。\n\n`;
+  if (webSearchEnabled) {
+    instruction += `【Web検索の使用ルール】\n`;
+    instruction += `- このターンでは Web検索を利用できます。必要なら search_web を使ってください。\n`;
+    instruction += `- 現在のストーリーで原作キャラ・組織・地名・種族・制度を扱う際、ローカル参照だけで不足するなら Web検索で補完すること。\n`;
+    instruction += `- 特に「ある人物を場に出した時に、通常なら同席・同行・所属している関係者がいるか」を確認し、必要なら自然に描写へ反映すること。\n`;
+    instruction += `- ユーザーが明示的に聞いていなくても、場面の整合性に必要なら検索してよい。\n\n`;
+  }
   // === 新設：AIディレクターモジュール（パラメータの翻訳） ===
   const curSettings = story.directorSettings || { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 };
 
@@ -879,7 +1392,7 @@ export async function buildSystemInstruction(story, options = {}) {
         instruction += `\n`;
       }
     } else {
-      instruction += `※ このターンは軽量モードです。詳細なキャラクター設定全文は省略し、名前と要点のみを再掲します。口調や関係性は直近の文脈と過去のフル更新ターンを維持してください。\n\n`;
+      instruction += `※ このターンは軽量モードです。詳細なキャラクター設定全文は省略し、名前と要点のみを再掲します。必要な人物の詳細は search_character_library / get_character_profile で取得してから描写してください。\n\n`;
       for (const char of scopedCharacters) {
         const compactHint = buildCompactCharacterHint(char);
         instruction += `・${char.name}`;
@@ -978,7 +1491,7 @@ export async function buildSystemInstruction(story, options = {}) {
       }
     }
 
-    if (matchedLores.length > 0) {
+  if (matchedLores.length > 0) {
       // 関連度スコアリング (簡易的にキーワード一致数または順序で評価)
       // 制限：最大5件、かつ合計最大4000文字
       const MAX_LORE_ITEMS = 5;
@@ -1024,6 +1537,16 @@ export async function buildSystemInstruction(story, options = {}) {
     }
   }
 
+  const proactiveReferenceMemo = await buildProactiveReferenceMemo(story, scopedCharacters, allCharacters, {
+    googleSearchEnabled: webSearchEnabled
+  });
+  if (proactiveReferenceMemo) {
+    instruction += `\n${proactiveReferenceMemo}`;
+  }
+
+  if (gemmaThinkEnabled) {
+    return `<|think|>\n${instruction}`;
+  }
   return instruction;
 }
 
@@ -1189,6 +1712,9 @@ export function extractStoryTextAndThoughtFromApiResponse(result) {
 
 function getThinkingSupportForModel(modelName = '') {
   const normalized = String(modelName || '').trim().toLowerCase();
+  if (normalized.includes('gemma-4')) {
+    return { kind: 'gemma4' };
+  }
   if (!normalized.includes('gemini') || normalized.includes('gemma') || normalized.includes('1.5')) {
     return { kind: 'unsupported' };
   }
@@ -1202,6 +1728,410 @@ function getThinkingSupportForModel(modelName = '') {
     };
   }
   return { kind: 'unsupported' };
+}
+
+function supportsCombinedGoogleSearch(modelName = '') {
+  const normalized = String(modelName || '').trim().toLowerCase();
+  return normalized.includes('gemini-3');
+}
+
+function shouldUseServerSideGoogleSearchForStory() {
+  // Story generation currently prefers the explicit search_web function.
+  // This keeps search traffic predictable and avoids stacking:
+  // prepass search + server-side tool circulation + client-side search_web.
+  return false;
+}
+
+function collectUnresolvedReferenceTerms(systemInstruction = '') {
+  const match = String(systemInstruction || '').match(/ローカル未解決候補:\s*([^\n]+)/);
+  if (!match) return [];
+  return match[1]
+    .split('/')
+    .map(term => normalizeLoreEntryName(term))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function buildGoogleSearchGroundingPrompt(story, unresolvedTerms = [], recentMessages = []) {
+  const franchise = String(story?.franchise || '').trim();
+  const tags = Array.isArray(story?.tags)
+    ? story.tags.map(tag => String(tag || '').trim()).filter(Boolean)
+    : [];
+  const latestUserMessage = [...recentMessages].reverse().find(message => message?.role === 'user');
+  const latestText = String(latestUserMessage?.content || '').trim();
+
+  let prompt = `あなたは物語生成の前に事実確認を行う下調べ担当です。\n`;
+  prompt += `Google Search を使い、日本語で短い確認メモだけを返してください。\n`;
+  prompt += `推測で埋めず、検索で裏を取れた内容だけを書くこと。\n`;
+  prompt += `会話本文は書かず、箇条書きのみで返すこと。\n`;
+  prompt += `キャラクターを確認した場合は、必要に応じて同行者・所属陣営・拠点・関係者も補ってください。\n`;
+  if (franchise) {
+    prompt += `作品タグ: ${franchise}\n`;
+  }
+  if (tags.length > 0) {
+    prompt += `補助タグ: ${tags.join(', ')}\n`;
+  }
+  if (unresolvedTerms.length > 0) {
+    prompt += `優先確認対象: ${unresolvedTerms.join(' / ')}\n`;
+  }
+  if (latestText) {
+    prompt += `直近のユーザー入力: ${latestText}\n`;
+  }
+  prompt += `\n出力形式:\n`;
+  prompt += `- 確認メモ1\n`;
+  prompt += `- 確認メモ2\n`;
+  return prompt;
+}
+
+async function fetchGoogleSearchGroundingMemo({
+  url,
+  story,
+  systemInstruction,
+  selectedMessages,
+  generationConfig,
+  attemptController,
+  usageAccumulator
+}) {
+  const unresolvedTerms = collectUnresolvedReferenceTerms(systemInstruction);
+  if (unresolvedTerms.length === 0) {
+    return '';
+  }
+
+  const prompt = buildGoogleSearchGroundingPrompt(story, unresolvedTerms, selectedMessages);
+  const searchGenerationConfig = {
+    ...generationConfig,
+    temperature: 0.2,
+    maxOutputTokens: 1024
+  };
+
+  accumulatePromptDebug(usageAccumulator, {
+    systemInstruction: '',
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    tools: [{ googleSearch: {} }]
+  });
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: searchGenerationConfig,
+      tools: [{ googleSearch: {} }],
+      toolConfig: {
+        includeServerSideToolInvocations: true
+      }
+    }),
+    signal: attemptController.signal
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
+    throw new Error(`Google Search grounding failed: ${errMsg}`);
+  }
+
+  const result = await response.json();
+  addUsageMetadata(usageAccumulator, result?.usageMetadata);
+  recordGroundingMetadata(usageAccumulator, result?.candidates?.[0]?.groundingMetadata);
+  if (hasServerToolParts(result)) {
+    usageAccumulator.serverToolRoundTrips = Number(usageAccumulator.serverToolRoundTrips || 0) + 1;
+  }
+
+  const extracted = extractStoryTextAndThoughtFromApiResponse(result);
+  const memo = String(extracted?.text || '').trim();
+  if (!memo) {
+    return '';
+  }
+
+  return `【Google Search 事前確認メモ】\n${memo}\n\n`;
+}
+
+function isServerSideGoogleSearchEnabledForTurn(story, systemInstruction, modelName) {
+  if (!shouldUseServerSideGoogleSearchForStory()) return false;
+  if (!supportsCombinedGoogleSearch(modelName)) return false;
+  return shouldEnableGoogleSearchForStory(story, systemInstruction, true);
+}
+
+function buildStructuredSearchMemoPrompt(providerLabel, query, purpose, franchise) {
+  let prompt = `あなたは物語生成を支援する検索アシスタントです。\n`;
+  prompt += `${providerLabel} を使い、日本語で簡潔な事実確認メモを返してください。\n`;
+  prompt += `推測は禁止。検索で裏が取れた内容だけを書くこと。\n`;
+  prompt += `説明口調ではなく、設定資料メモの文体で返すこと。\n`;
+  prompt += `対象語: ${query}\n`;
+  if (franchise) {
+    prompt += `作品・文脈: ${franchise}\n`;
+  }
+  if (purpose) {
+    prompt += `確認目的: ${purpose}\n`;
+  }
+  prompt += `\n出力形式:\n`;
+  prompt += `概要: 1〜3文\n`;
+  prompt += `補足:\n- 箇条書き1\n- 箇条書き2\n`;
+  return prompt;
+}
+
+async function runGoogleSearchLookup({
+  apiKey,
+  modelName,
+  query,
+  purpose,
+  franchise,
+  usageAccumulator
+}) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  const prompt = buildStructuredSearchMemoPrompt('Google Search', query, purpose, franchise);
+
+  if (usageAccumulator) {
+    accumulatePromptDebug(usageAccumulator, {
+      systemInstruction: '',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      tools: [{ googleSearch: {} }]
+    });
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        topP: 0.8,
+        maxOutputTokens: 1024
+      },
+      tools: [{ googleSearch: {} }]
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const message = errorData.error?.message || `HTTP status ${response.status}`;
+    const quotaLike = isQuotaLikeApiError(response.status, message);
+    if (quotaLike) {
+      webSearchCooldownUntil = Date.now() + 5 * 60 * 1000;
+    }
+    return {
+      provider: 'google',
+      found: false,
+      rateLimited: quotaLike,
+      message
+    };
+  }
+
+  const result = await response.json();
+  if (usageAccumulator) {
+    addUsageMetadata(usageAccumulator, result?.usageMetadata);
+    recordGroundingMetadata(usageAccumulator, result?.candidates?.[0]?.groundingMetadata);
+    if (hasServerToolParts(result)) {
+      usageAccumulator.serverToolRoundTrips = Number(usageAccumulator.serverToolRoundTrips || 0) + 1;
+    }
+  }
+
+  const extracted = extractStoryTextAndThoughtFromApiResponse(result);
+  const text = String(extracted?.text || '').trim();
+  return {
+    provider: 'google',
+    found: Boolean(text),
+    modelName,
+    text,
+    groundingQueries: Array.isArray(result?.candidates?.[0]?.groundingMetadata?.webSearchQueries)
+      ? result.candidates[0].groundingMetadata.webSearchQueries
+      : [],
+    message: text ? '' : 'Google Search から有効な本文を取得できませんでした。'
+  };
+}
+
+function flattenDuckDuckGoRelatedTopics(relatedTopics = []) {
+  const flat = [];
+  for (const topic of Array.isArray(relatedTopics) ? relatedTopics : []) {
+    if (Array.isArray(topic?.Topics)) {
+      for (const nested of topic.Topics) {
+        flat.push(nested);
+      }
+    } else {
+      flat.push(topic);
+    }
+  }
+  return flat;
+}
+
+function buildDuckDuckGoSummary(payload, query, franchise) {
+  const heading = String(payload?.Heading || query || '').trim();
+  const abstractText = String(payload?.AbstractText || '').trim();
+  const definition = String(payload?.Definition || '').trim();
+  const answer = String(payload?.Answer || '').trim();
+  const related = flattenDuckDuckGoRelatedTopics(payload?.RelatedTopics).slice(0, 3);
+
+  const lines = [];
+  if (heading || franchise) {
+    lines.push(`概要: ${[heading, franchise].filter(Boolean).join(' / ')}`);
+  }
+  if (abstractText) {
+    lines.push(abstractText);
+  } else if (definition) {
+    lines.push(definition);
+  } else if (answer) {
+    lines.push(answer);
+  }
+
+  if (related.length > 0) {
+    lines.push('補足:');
+    for (const topic of related) {
+      const text = String(topic?.Text || '').trim();
+      if (text) {
+        lines.push(`- ${text}`);
+      }
+    }
+  }
+
+  return lines.join('\n').trim();
+}
+
+async function runDuckDuckGoLookup({ query, franchise }) {
+  const searchQuery = [query, franchise].filter(Boolean).join(' ');
+  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(searchQuery)}&format=json&no_html=1&skip_disambig=1&t=ZetaTavern`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    return {
+      provider: 'duckduckgo',
+      found: false,
+      message: `HTTP status ${response.status}`
+    };
+  }
+
+  const payload = await response.json();
+  const text = buildDuckDuckGoSummary(payload, query, franchise);
+  return {
+    provider: 'duckduckgo',
+    found: Boolean(text),
+    text,
+    modelName: '',
+    groundingQueries: [],
+    message: text ? '' : 'DuckDuckGo から十分な要約を取得できませんでした。'
+  };
+}
+
+async function searchWebForStory(story, args = {}, usageAccumulator = null, searchState = null) {
+  const appState = getState();
+  const apiKey = appState.apiKey || await getApiKeyFromStorage();
+  const query = String(args?.query || '').trim();
+  const purpose = String(args?.purpose || '').trim();
+  const franchise = String(args?.franchise || story?.franchise || '').trim();
+  const provider = normalizeWebSearchProvider(appState.webSearchProvider);
+  const cacheKey = JSON.stringify({
+    provider,
+    query: normalizeLoreEntryName(query),
+    purpose: normalizeLoreEntryName(purpose),
+    franchise: normalizeLoreEntryName(franchise)
+  });
+
+  if (!apiKey) {
+    return { found: false, query, message: 'APIキーが設定されていません。' };
+  }
+  if (!query) {
+    return { found: false, query: '', message: 'query is required' };
+  }
+  if (provider === 'off') {
+    return {
+      found: false,
+      query,
+      purpose,
+      franchise,
+      provider,
+      message: 'Web検索は設定でOFFになっています。'
+    };
+  }
+  if (provider === 'google' && Date.now() < webSearchCooldownUntil) {
+    return {
+      found: false,
+      query,
+      purpose,
+      franchise,
+      provider,
+      rateLimited: true,
+      retryAfterMs: webSearchCooldownUntil - Date.now(),
+      message: 'Web検索は一時的にクォータ制限中です。'
+    };
+  }
+  if (searchState?.cache?.has(cacheKey)) {
+    return searchState.cache.get(cacheKey);
+  }
+  if (searchState) {
+    const usedCalls = Number(searchState.usedCalls || 0);
+    if (usedCalls >= MAX_SEARCH_WEB_CALLS_PER_TURN) {
+      return {
+        found: false,
+        query,
+        purpose,
+        franchise,
+        deferred: true,
+        message: `このターンの Web検索は ${MAX_SEARCH_WEB_CALLS_PER_TURN} 回までに制限されています。`
+      };
+    }
+    searchState.usedCalls = usedCalls + 1;
+  }
+
+  const modelName = resolveSearchModelName(appState);
+  let result = null;
+  if (provider === 'duckduckgo') {
+    result = await runDuckDuckGoLookup({ query, franchise });
+  } else if (provider === 'google') {
+    result = await runGoogleSearchLookup({
+      apiKey,
+      modelName,
+      query,
+      purpose,
+      franchise,
+      usageAccumulator
+    });
+  } else {
+    if (Date.now() < webSearchCooldownUntil) {
+      result = await runDuckDuckGoLookup({ query, franchise });
+    } else {
+      const googleResult = await runGoogleSearchLookup({
+        apiKey,
+        modelName,
+        query,
+        purpose,
+        franchise,
+        usageAccumulator
+      });
+      if (googleResult.found || !googleResult.rateLimited) {
+        result = googleResult;
+      } else {
+        const ddgResult = await runDuckDuckGoLookup({ query, franchise });
+        result = ddgResult.found ? ddgResult : googleResult;
+      }
+    }
+  }
+
+  const normalizedResult = {
+    ...result,
+    found: result?.found === true,
+    query,
+    purpose,
+    franchise,
+    provider: result?.provider || provider
+  };
+  if (searchState?.cache) {
+    searchState.cache.set(cacheKey, normalizedResult);
+  }
+  return normalizedResult;
+}
+
+function isQuotaLikeApiError(status, message = '') {
+  const normalized = String(message || '').toLowerCase();
+  if (status === 429) return true;
+  return normalized.includes('quota') ||
+    normalized.includes('rate limit') ||
+    normalized.includes('resource exhausted') ||
+    normalized.includes('resource_exhausted');
 }
 
 function normalizeGemini3ThinkingLevel(value) {
@@ -1233,10 +2163,22 @@ function normalizeGemini25ThinkingPreset(value, modelName = '') {
   return preset;
 }
 
+function normalizeGemmaThinkingEnabled(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['off', 'false', '0', 'disabled'].includes(normalized)) return false;
+  return Boolean(value === '' ? true : value);
+}
+
 function buildThinkingConfig(modelName, appState) {
   const support = getThinkingSupportForModel(modelName);
   if (support.kind === 'unsupported') {
     return null;
+  }
+
+  if (support.kind === 'gemma4') {
+    return {
+      gemmaThinkEnabled: normalizeGemmaThinkingEnabled(appState.gemmaThinkingEnabled)
+    };
   }
 
   if (support.kind === 'gemini3') {
@@ -1267,6 +2209,9 @@ function buildThinkingConfig(modelName, appState) {
 
 function describeThinkingConfig(config) {
   if (!config) return 'なし';
+  if (typeof config.gemmaThinkEnabled === 'boolean') {
+    return config.gemmaThinkEnabled ? 'Gemma <|think|>: ON' : 'Gemma <|think|>: OFF';
+  }
   if (config.thinkingLevel) return `Level: ${config.thinkingLevel}`;
   if (typeof config.thinkingBudget === 'number') {
     if (config.thinkingBudget === -1) return 'Budget: Dynamic';
@@ -1296,6 +2241,9 @@ export async function generateStoryResponse(story) {
   const modelName = appState.modelName || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   const usageAccumulator = createUsageAccumulator('story', modelName);
+  const webSearchProvider = normalizeWebSearchProvider(appState.webSearchProvider);
+  const googleSearchEnabled = webSearchProvider !== 'off';
+  usageAccumulator.searchProviderLabel = getWebSearchProviderLabel(webSearchProvider);
   const historyCompressionEnabled = appState.historyCompressionEnabled !== false;
   const configuredHistoryTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
   const effectiveHistoryTurnLimit = historyCompressionEnabled ? configuredHistoryTurnLimit : 0;
@@ -1305,8 +2253,13 @@ export async function generateStoryResponse(story) {
   usageAccumulator.omittedTurns = omittedTurns;
   const systemInstruction = await buildSystemInstruction(story, {
     omittedTurns,
-    historyTurnLimit: effectiveHistoryTurnLimit
+    historyTurnLimit: effectiveHistoryTurnLimit,
+    googleSearchEnabled,
+    gemmaThinkEnabled: normalizeGemmaThinkingEnabled(appState.gemmaThinkingEnabled)
   });
+  const shouldOfferGoogleSearchForTurn = isServerSideGoogleSearchEnabledForTurn(story, systemInstruction, modelName);
+  usageAccumulator.googleSearchAvailable = googleSearchEnabled;
+  let runtimeSystemInstruction = systemInstruction;
 
   // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
   const contents = selectedMessages.map(msg => ({
@@ -1323,7 +2276,7 @@ export async function generateStoryResponse(story) {
   // ★ モデル名も一緒に渡して、非対応モデルならエラーを回避する
   const thinkingConfig = buildThinkingConfig(modelName, appState);
   usageAccumulator.thinkingConfigLabel = describeThinkingConfig(thinkingConfig);
-  if (thinkingConfig) {
+  if (thinkingConfig && typeof thinkingConfig.gemmaThinkEnabled !== 'boolean') {
     generationConfig.thinkingConfig = thinkingConfig;
   }
 
@@ -1346,104 +2299,251 @@ export async function generateStoryResponse(story) {
     }, timeoutSeconds * 1000);
 
   try {
-      // ★ 変更：Google検索ツールを外し、Function Calling専用にする
-      const tools = [];
-
-      // update_session_lore ツールを追加定義 (AIがセッション情報を更新するためのツール)
-      tools.push({
-        functionDeclarations: [{
-          name: 'update_session_lore',
-          description: 'このセッション固有の進行記録を更新します。現在の状況、進行中のイベント、主人公との関係変化、今回の行動でのみ意味を持つ出来事、セッションで新しく生まれたオリジナルキャラクターや即興設定だけを記録してください。地名・組織名・作品世界の安定設定はここに入れません。',
-          parameters: {
-            type: 'OBJECT',
-            properties: {
-              summary: {
-                type: 'STRING',
-                description: '今までのストーリーのあらすじ、進行状況、または重要なマイルストーンの更新。'
-              },
-              affinity_updates: {
-                type: 'ARRAY',
-                description: '登場人物と主人公の関係性の変更・好感度の更新リスト。',
-                items: {
-                  type: 'OBJECT',
-                  properties: {
-                    characterName: { type: 'STRING', description: '登場人物の名前（例: エミリア）' },
-                    affinity: { type: 'INTEGER', description: '新しい好感度スコア (0-100)' },
-                    notes: { type: 'STRING', description: '関係性の特徴や特記事項。' }
-                  },
-                  required: ['characterName', 'affinity']
-                }
-              },
-              key_events: {
-                type: 'ARRAY',
-                description: '発生した重要な事件や獲得したフラグ、オリジナルアイテム。',
-                items: { type: 'STRING' }
-              }
+      // ローカル参照と更新用の Function Calling 定義群
+      const functionDeclarations = [{
+        name: 'search_character_library',
+        description: '現在のストーリーに関連するキャラクターライブラリを検索し、候補一覧を返します。人物名、呼び方、作品タグ、特徴語から検索できます。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            query: {
+              type: 'STRING',
+              description: '調べたい人物名または特徴語。例: エミリア, ロズワール邸のメイド'
+            }
+          },
+          required: ['query']
+        }
+      }, {
+        name: 'get_character_profile',
+        description: 'キャラクターライブラリから特定人物の詳細設定を取得します。search_character_library の結果を受けて使ってください。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            characterId: {
+              type: 'STRING',
+              description: 'キャラクターID。search_character_library の結果から渡します。'
+            },
+            characterName: {
+              type: 'STRING',
+              description: '人物名。IDがない場合の補助。'
             }
           }
-        }]
-      });
-
-      tools.push({
-        functionDeclarations: [{
-          name: 'update_world_lore',
-          description: '作品世界で安定している設定をワールドロア候補として提案します。地名、学校名、組織名、家名、居住地、制度、世界ルール、陣営、固有用語など、セッションをまたいでも有効な情報だけを扱います。名称は日本語の代表表記だけを使い、英語併記や括弧つき併記は避けてください。',
-          parameters: {
-            type: 'OBJECT',
-            properties: {
-              entries: {
-                type: 'ARRAY',
-                description: '安定設定として保存したいワールドロア項目の一覧。',
-                items: {
-                  type: 'OBJECT',
-                  properties: {
-                    name: { type: 'STRING', description: 'ロア項目名。例: 旭高校、ペンタゴン、王選、集英組' },
-                    type: { type: 'STRING', description: 'character, location, organization, term, event, item のいずれか。' },
-                    summary: { type: 'STRING', description: '一言で分かる概要。短く具体的に。' },
-                    details: { type: 'STRING', description: '必要なら補足説明。任意。' },
-                    speech: { type: 'STRING', description: '人物や組織の口調・特徴など。任意。' },
-                    relationships: { type: 'STRING', description: '他項目との恒常的な関係。任意。' }
-                  },
-                  required: ['name', 'type', 'summary']
-                }
+        }
+      }, {
+        name: 'search_lorebook',
+        description: 'ワールドロアを検索し、該当しそうな設定候補を返します。地名、組織、制度、用語、事件、人物設定補助などに使えます。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            query: {
+              type: 'STRING',
+              description: '調べたい用語。例: 白鯨, 王選, ロズワール邸'
+            },
+            type: {
+              type: 'STRING',
+              description: '必要なら絞り込み。character, location, organization, term, event, item のいずれか。'
+            },
+            franchise: {
+              type: 'STRING',
+              description: '作品タグ。省略時は現在のストーリーの franchise を優先します。'
+            }
+          },
+          required: ['query']
+        }
+      }, {
+        name: 'get_lore_entry',
+        description: 'ワールドロアから特定項目の詳細本文を取得します。search_lorebook の候補を受けて使ってください。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            loreId: {
+              type: 'STRING',
+              description: 'ロアID。search_lorebook の結果から渡します。'
+            },
+            name: {
+              type: 'STRING',
+              description: 'ロア名。IDがない場合の補助。'
+            },
+            franchise: {
+              type: 'STRING',
+              description: '作品タグ。省略時は現在のストーリーの franchise を優先します。'
+            }
+          }
+        }
+      }, {
+        name: 'search_web',
+        description: 'Google Search を使って外部情報を確認します。ローカルのキャラクターライブラリやロアブックで不足する原作設定、周辺人物、所属、拠点、制度、時事的な事実確認に使ってください。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            query: {
+              type: 'STRING',
+              description: '検索クエリ。人物名や用語名だけで曖昧なら作品名も含める。例: エミリア Re:ゼロから始める異世界生活 陣営'
+            },
+            purpose: {
+              type: 'STRING',
+              description: '何を確認したいか。例: 同行者、所属陣営、拠点、制度の要点'
+            },
+            franchise: {
+              type: 'STRING',
+              description: '作品タグ。省略時は現在のストーリーの franchise を優先します。'
+            }
+          },
+          required: ['query']
+        }
+      }, {
+        name: 'update_session_lore',
+        description: 'このセッション固有の進行記録を更新します。現在の状況、進行中のイベント、主人公との関係変化、今回の行動でのみ意味を持つ出来事、セッションで新しく生まれたオリジナルキャラクターや即興設定だけを記録してください。地名・組織名・作品世界の安定設定はここに入れません。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            summary: {
+              type: 'STRING',
+              description: '今までのストーリーのあらすじ、進行状況、または重要なマイルストーンの更新。'
+            },
+            affinity_updates: {
+              type: 'ARRAY',
+              description: '登場人物と主人公の関係性の変更・好感度の更新リスト。',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  characterName: { type: 'STRING', description: '登場人物の名前（例: エミリア）' },
+                  affinity: { type: 'INTEGER', description: '新しい好感度スコア (0-100)' },
+                  notes: { type: 'STRING', description: '関係性の特徴や特記事項。' }
+                },
+                required: ['characterName', 'affinity']
               }
             },
-            required: ['entries']
+            key_events: {
+              type: 'ARRAY',
+              description: '発生した重要な事件や獲得したフラグ、オリジナルアイテム。',
+              items: { type: 'STRING' }
+            }
           }
-        }]
-      });
+        }
+      }, {
+        name: 'update_world_lore',
+        description: '作品世界で安定している設定をワールドロア候補として提案します。地名、学校名、組織名、家名、居住地、制度、世界ルール、陣営、固有用語など、セッションをまたいでも有効な情報だけを扱います。名称は日本語の代表表記だけを使い、英語併記や括弧つき併記は避けてください。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            entries: {
+              type: 'ARRAY',
+              description: '安定設定として保存したいワールドロア項目の一覧。',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  name: { type: 'STRING', description: 'ロア項目名。例: 旭高校、ペンタゴン、王選、集英組' },
+                  type: { type: 'STRING', description: 'character, location, organization, term, event, item のいずれか。' },
+                  summary: { type: 'STRING', description: '一言で分かる概要。短く具体的に。' },
+                  details: { type: 'STRING', description: '必要なら補足説明。任意。' },
+                  speech: { type: 'STRING', description: '人物や組織の口調・特徴など。任意。' },
+                  relationships: { type: 'STRING', description: '他項目との恒常的な関係。任意。' }
+                },
+                required: ['name', 'type', 'summary']
+              }
+            }
+          },
+          required: ['entries']
+        }
+      }];
+
+      const tools = [];
+      if (shouldOfferGoogleSearchForTurn) {
+        tools.push({ googleSearch: {} });
+      }
+      if (functionDeclarations.length > 0) {
+        tools.push({ functionDeclarations });
+      }
+
+      if (shouldOfferGoogleSearchForTurn) {
+        try {
+          const groundingMemo = await fetchGoogleSearchGroundingMemo({
+            url,
+            story,
+            systemInstruction: runtimeSystemInstruction,
+            selectedMessages,
+            generationConfig,
+            attemptController,
+            usageAccumulator
+          });
+          if (groundingMemo) {
+            runtimeSystemInstruction += `\n${groundingMemo}`;
+          }
+        } catch (groundingErr) {
+          console.warn('[AI] Google Search grounding prepass failed. Continuing without injected memo.', groundingErr);
+        }
+      }
 
       let currentContents = [...contents];
       let extracted = { text: null, thought: null };
+      const searchState = {
+        usedCalls: 0,
+        cache: new Map()
+      };
 
       // ★ 追加：Function Calling 往復用のループ（AIがメモを更新して本文を書くまで最大3回まで往復する）
       for (let fcTurn = 0; fcTurn < 3; fcTurn++) {
-        accumulatePromptDebug(usageAccumulator, {
-          systemInstruction,
-          contents: currentContents,
-          tools
-        });
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: currentContents,
-            systemInstruction: { parts: [{ text: systemInstruction }] },
-            generationConfig,
-            tools,
-            toolConfig: { functionCallingConfig: { mode: 'AUTO' } }
-          }),
-          signal: attemptController.signal
-        });
+        let googleSearchAllowedForRequest = shouldOfferGoogleSearchForTurn;
+        let result = null;
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
-          throw new Error(`Gemini API Error: ${errMsg}`);
+        for (let requestVariant = 0; requestVariant < 2; requestVariant++) {
+          const activeTools = googleSearchAllowedForRequest
+            ? tools
+            : tools.filter(tool => !tool.googleSearch);
+
+          accumulatePromptDebug(usageAccumulator, {
+            systemInstruction: runtimeSystemInstruction,
+            contents: currentContents,
+            tools: activeTools
+          });
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: currentContents,
+              systemInstruction: { parts: [{ text: runtimeSystemInstruction }] },
+              generationConfig,
+              tools: activeTools,
+              toolConfig: googleSearchAllowedForRequest
+                ? {
+                  functionCallingConfig: { mode: 'VALIDATED' },
+                  includeServerSideToolInvocations: true
+                }
+                : {
+                  functionCallingConfig: { mode: 'AUTO' }
+                }
+            }),
+            signal: attemptController.signal
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
+
+            if (googleSearchAllowedForRequest && isQuotaLikeApiError(response.status, errMsg)) {
+              console.warn('[AI] Google Search tool request hit quota-like error. Retrying without googleSearch.', errMsg);
+              googleSearchAllowedForRequest = false;
+              continue;
+            }
+
+            throw new Error(`Gemini API Error: ${errMsg}`);
+          }
+
+          result = await response.json();
+          break;
         }
 
-        const result = await response.json();
+        if (!result) {
+          throw new Error('Gemini API Error: response was empty after retry.');
+        }
+
         addUsageMetadata(usageAccumulator, result?.usageMetadata);
+        recordGroundingMetadata(usageAccumulator, result?.candidates?.[0]?.groundingMetadata);
+        const hasBuiltInToolActivity = hasServerToolParts(result);
+        if (hasBuiltInToolActivity) {
+          usageAccumulator.serverToolRoundTrips = Number(usageAccumulator.serverToolRoundTrips || 0) + 1;
+        }
 
         // Function Calling (update_session_lore) の呼び出し判定・実行
         const calls = result?.candidates?.[0]?.content?.parts?.filter(p => p.functionCall) || [];
@@ -1455,14 +2555,62 @@ export async function generateStoryResponse(story) {
             for (const call of calls) {
               const name = call.functionCall.name;
               const args = call.functionCall.args || {};
+              const functionCallId = call.functionCall.id;
               console.log(`[Function Call: ${name}]`, args);
+              recordToolCall(usageAccumulator, name, args);
 
-              if (name === 'update_session_lore') {
+              if (name === 'search_character_library') {
+                const result = await searchCharacterLibraryForStory(story, args);
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    id: functionCallId,
+                    response: result
+                  }
+                });
+              } else if (name === 'get_character_profile') {
+                const result = await getCharacterProfileForStory(story, args);
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    id: functionCallId,
+                    response: result
+                  }
+                });
+              } else if (name === 'search_lorebook') {
+                const result = await searchLorebookForStory(story, args);
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    id: functionCallId,
+                    response: result
+                  }
+                });
+              } else if (name === 'get_lore_entry') {
+                const result = await getLoreEntryForStory(story, args);
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    id: functionCallId,
+                    response: result
+                  }
+                });
+              } else if (name === 'search_web') {
+                const result = await searchWebForStory(story, args, usageAccumulator, searchState);
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    id: functionCallId,
+                    response: result
+                  }
+                });
+              } else if (name === 'update_session_lore') {
                 await applySessionLoreUpdate(args, story);
                 storyChanged = true;
                 functionResponses.push({
                   functionResponse: {
                     name,
+                    id: functionCallId,
                     response: { result: 'success' }
                   }
                 });
@@ -1474,10 +2622,22 @@ export async function generateStoryResponse(story) {
                 functionResponses.push({
                   functionResponse: {
                     name,
+                    id: functionCallId,
                     response: {
                       result: 'success',
                       queuedCount: worldLoreResult.queuedCount,
                       reroutedCount: worldLoreResult.reroutedCount
+                    }
+                  }
+                });
+              } else {
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    id: functionCallId,
+                    response: {
+                      result: 'error',
+                      message: `Unknown function: ${name}`
                     }
                   }
                 });
@@ -1500,16 +2660,16 @@ export async function generateStoryResponse(story) {
 
             const tmpExtracted = extractStoryTextAndThoughtFromApiResponse(result);
             if (tmpExtracted.text) {
-               extracted = tmpExtracted;
-               break;
-            } else {
-               currentContents.push(result.candidates[0].content);
-               currentContents.push({
-                 role: 'user',
-                 parts: functionResponses
-               });
-               continue;
+              extracted = tmpExtracted;
+              break;
             }
+
+            currentContents.push(result.candidates[0].content);
+            currentContents.push({
+              role: 'user',
+              parts: functionResponses
+            });
+            continue;
           } catch (fcErr) {
             console.warn('[Function Call] Failed to execute lore update:', fcErr);
           }
@@ -1517,6 +2677,10 @@ export async function generateStoryResponse(story) {
 
         // 関数呼び出しがない場合は通常通り本文を抽出して終了
         extracted = extractStoryTextAndThoughtFromApiResponse(result);
+        if (!extracted.text && hasBuiltInToolActivity && result?.candidates?.[0]?.content) {
+          currentContents.push(result.candidates[0].content);
+          continue;
+        }
         break; 
       } // for loop end
 

@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260611d';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260613d';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -117,6 +117,27 @@ function formatUsageTypeLabel(requestType) {
   return labels[requestType] || requestType || 'API';
 }
 
+function formatToolCallLabel(name) {
+  const labels = {
+    search_character_library: 'キャラ検索',
+    get_character_profile: 'キャラ詳細',
+    search_lorebook: 'ロア検索',
+    get_lore_entry: 'ロア詳細',
+    search_web: 'Web検索',
+    update_session_lore: 'セッション更新',
+    update_world_lore: 'ワールド候補'
+  };
+  return labels[name] || name || 'tool';
+}
+
+function formatSearchProviderLabel(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'google') return 'Google';
+  if (normalized === 'duckduckgo') return 'DuckDuckGo';
+  if (normalized === 'off') return 'OFF';
+  return 'Auto';
+}
+
 export function renderApiUsagePanel() {
   const panel = document.getElementById('api-usage-panel');
   if (!panel) return;
@@ -155,10 +176,40 @@ export function renderApiUsagePanel() {
           <span>会話 ${formatUsageNumber(lastApiUsage.debug.conversationChars)}</span>
           <span>Schema ${formatUsageNumber(lastApiUsage.debug.toolSchemaChars)}</span>
           <span>Thinking ${escapeHTML(lastApiUsage.debug.thinkingConfigLabel || 'なし')}</span>
+          <span>Web検索 ${escapeHTML(formatSearchProviderLabel(lastApiUsage.debug.searchProviderLabel || 'auto'))}</span>
+          <span>Web検索 利用可能 ${lastApiUsage.debug.googleSearchAvailable ? 'ON' : 'OFF'}</span>
+          <span>サーバーツール往復 ${formatUsageNumber(lastApiUsage.debug.serverToolRoundTrips || 0)}</span>
           <span>履歴圧縮 ${lastApiUsage.debug.historyCompressionEnabled === false ? 'OFF' : 'ON'}</span>
           <span>履歴制限 ${lastApiUsage.debug.historyCompressionEnabled === false || lastApiUsage.debug.historyTurnLimit === 0 ? '全履歴' : `${formatUsageNumber(lastApiUsage.debug.historyTurnLimit)}ターン`}</span>
           <span>省略 ${formatUsageNumber(lastApiUsage.debug.omittedTurns || 0)}ターン</span>
         </div>
+        ${lastApiUsage.debug.toolCalls?.length ? `
+          <div class="api-usage-debug-meta">
+            <span>参照/更新ツール ${formatUsageNumber(lastApiUsage.debug.toolCalls.reduce((sum, item) => sum + Number(item.count || 0), 0))}回</span>
+          </div>
+          <div class="api-usage-chip-row">
+            ${lastApiUsage.debug.toolCalls.map(item => {
+              const label = formatToolCallLabel(item.name);
+              const preview = item.preview ? `: ${item.preview}` : '';
+              const count = Number(item.count || 0) > 1 ? ` x${formatUsageNumber(item.count)}` : '';
+              return `<span class="api-usage-chip">${escapeHTML(`${label}${preview}${count}`)}</span>`;
+            }).join('')}
+          </div>
+        ` : `
+          <div class="api-usage-debug-meta">
+            <span>参照/更新ツール 0回</span>
+          </div>
+        `}
+        ${lastApiUsage.debug.groundingQueries?.length ? `
+          <div class="api-usage-debug-meta">
+            <span>Google検索クエリ ${formatUsageNumber(lastApiUsage.debug.groundingQueries.length)}件</span>
+          </div>
+          <div class="api-usage-chip-row">
+            ${lastApiUsage.debug.groundingQueries.map(query => `
+              <span class="api-usage-chip">${escapeHTML(`検索: ${query}`)}</span>
+            `).join('')}
+          </div>
+        ` : ''}
         <div class="api-usage-debug-list">
           ${lastApiUsage.debug.breakdown.slice(0, 12).map(item => `
             <div class="api-usage-debug-row">
@@ -974,7 +1025,17 @@ for (let i = 0; i < messages.length; i++) {
       if (msg.usage.thoughtsTokenCount > 0) usageParts.push(`Thinking ${formatUsageNumber(msg.usage.thoughtsTokenCount)}`);
       if (msg.usage.totalTokenCount > 0) usageParts.push(`合計 ${formatUsageNumber(msg.usage.totalTokenCount)}`);
       if (msg.usage.requestCount > 1) usageParts.push(`往復 ${formatUsageNumber(msg.usage.requestCount)}`);
-      usageEl.textContent = `使用量: ${usageParts.join(' / ')}`;
+      const toolCallSummary = Array.isArray(msg.usage.debug?.toolCalls) && msg.usage.debug.toolCalls.length > 0
+        ? ` / 参照 ${msg.usage.debug.toolCalls.map(item => {
+          const label = formatToolCallLabel(item.name);
+          const count = Number(item.count || 0) > 1 ? `x${formatUsageNumber(item.count)}` : '';
+          return `${label}${count}`;
+        }).join(', ')}`
+        : '';
+      const groundingSummary = Array.isArray(msg.usage.debug?.groundingQueries) && msg.usage.debug.groundingQueries.length > 0
+        ? ` / Google検索 ${formatUsageNumber(msg.usage.debug.groundingQueries.length)}件`
+        : '';
+      usageEl.textContent = `使用量: ${usageParts.join(' / ')}${toolCallSummary}${groundingSummary}`;
       msgWrapper.appendChild(usageEl);
     }
 

@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260611d';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260611d';
+import * as ui from './ui.js?v=20260613d';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613d';
 import * as dropbox from './dropbox.js?v=20260611d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -30,6 +30,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'api_key',
   'model_name',
   'search_model_name',
+  'web_search_provider',
   'show_choices',
   'autoscroll_enabled',
   'custom_models',
@@ -82,9 +83,16 @@ const GEMINI25_PRO_THINKING_OPTIONS = [
   { value: 'balanced', label: '標準 (1024)' },
   { value: 'high', label: '深め (4096)' }
 ];
+const GEMMA4_THINKING_OPTIONS = [
+  { value: 'on', label: 'オン (<|think|>)' },
+  { value: 'off', label: 'オフ' }
+];
 
 function getThinkingSupportForModel(modelName = '') {
   const normalized = String(modelName || '').trim().toLowerCase();
+  if (normalized.includes('gemma-4')) {
+    return { kind: 'gemma4' };
+  }
   if (!normalized.includes('gemini') || normalized.includes('gemma') || normalized.includes('1.5')) {
     return { kind: 'unsupported' };
   }
@@ -129,8 +137,17 @@ function normalizeGemini25ThinkingPreset(value, modelName = '') {
   return preset;
 }
 
+function normalizeGemmaThinkingEnabled(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['off', 'false', '0', 'disabled'].includes(normalized)) return false;
+  return Boolean(value === '' ? true : value);
+}
+
 function getActiveThinkingSelection(modelName, stateSnapshot = getState()) {
   const support = getThinkingSupportForModel(modelName);
+  if (support.kind === 'gemma4') {
+    return normalizeGemmaThinkingEnabled(stateSnapshot.gemmaThinkingEnabled) ? 'on' : 'off';
+  }
   if (support.kind === 'gemini3') {
     return normalizeGemini3ThinkingLevel(stateSnapshot.thinkingLevelGemini3);
   }
@@ -155,6 +172,10 @@ function populateThinkingSelectForModel(modelName, stateSnapshot = getState()) {
     label = '思考レベル (Thinking Level)';
     help = 'Gemini 3系は minimal / low / medium / high を使います。完全な思考OFFはできず、minimal が最も軽い設定です。';
     options = GEMINI3_THINKING_OPTIONS;
+  } else if (support.kind === 'gemma4') {
+    label = 'Gemma Thinking';
+    help = 'Gemma 4 は <|think|> 制御トークンの有無で思考モードを切り替えます。ON でシステムプロンプト先頭に <|think|> を付与します。';
+    options = GEMMA4_THINKING_OPTIONS;
   } else if (support.kind === 'gemini25') {
     label = 'Thinking Budget';
     help = support.isPro
@@ -835,6 +856,7 @@ async function loadConfigurations() {
   const key = await db.getSetting('api_key', '');
   const model = await db.getSetting('model_name', 'gemini-2.5-flash');
   const searchModel = await db.getSetting('search_model_name', '');
+  const webSearchProvider = await db.getSetting('web_search_provider', 'auto');
   const choices = await db.getSetting('show_choices', true);
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
@@ -843,6 +865,7 @@ async function loadConfigurations() {
   const legacyThinkingLevel = await db.getSetting('thinking_level', 'standard');
   const thinkingLevelGemini3 = normalizeGemini3ThinkingLevel(await db.getSetting('thinking_level_gemini3', legacyThinkingLevel));
   const thinkingBudgetPresetGemini25 = normalizeGemini25ThinkingPreset(await db.getSetting('thinking_budget_preset_gemini25', legacyThinkingLevel), model);
+  const gemmaThinkingEnabled = normalizeGemmaThinkingEnabled(await db.getSetting('gemma_thinking_enabled', true));
   const promptDebugEnabled = await db.getSetting('prompt_debug_enabled', false);
   const historyCompressionEnabled = await db.getSetting('history_compression_enabled', true);
   const historyTurnLimit = await db.getSetting('history_turn_limit', 10);
@@ -867,6 +890,7 @@ async function loadConfigurations() {
     apiKey: key,
     modelName: model,
     searchModelName: searchModel,
+    webSearchProvider,
     showChoices: choices,
     autoscrollEnabled: autoscroll, // ★Stateに反映
     apiTimeout: apiTimeout,
@@ -878,6 +902,7 @@ async function loadConfigurations() {
     loreAutoSearchEnabled: loreAutoSearchEnabled,
     thinkingLevelGemini3,
     thinkingBudgetPresetGemini25,
+    gemmaThinkingEnabled,
     promptDebugEnabled,
     historyCompressionEnabled,
     historyTurnLimit: Number.isFinite(Number(historyTurnLimit)) ? Number(historyTurnLimit) : 10
@@ -888,6 +913,7 @@ async function loadConfigurations() {
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
+  const webSearchProviderEl = document.getElementById('web-search-provider-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★DOM取得
   const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
@@ -915,6 +941,7 @@ async function loadConfigurations() {
   if (promptDebugEl) promptDebugEl.checked = promptDebugEnabled;
   if (historyCompressionEl) historyCompressionEl.checked = historyCompressionEnabled;
   if (historyTurnLimitEl) historyTurnLimitEl.value = String(historyTurnLimit);
+  if (webSearchProviderEl) webSearchProviderEl.value = webSearchProvider || 'auto';
   updateHistoryCompressionControls(historyCompressionEnabled);
 
   const normalizedCustomModels = Array.isArray(customModels) ? [...new Set(customModels.filter(Boolean))] : [];
@@ -1236,6 +1263,7 @@ async function bindEvents() {
   const keyEl = document.getElementById('api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
+  const webSearchProviderEl = document.getElementById('web-search-provider-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★自動スクロールDOM
   const customModelInput = document.getElementById('custom-model-input');
@@ -1282,6 +1310,13 @@ async function bindEvents() {
       db.saveSetting('search_model_name', val);
     };
   }
+  if (webSearchProviderEl) {
+    webSearchProviderEl.onchange = (e) => {
+      const val = String(e.target.value || 'auto').trim() || 'auto';
+      updateState({ webSearchProvider: val });
+      db.saveSetting('web_search_provider', val);
+    };
+  }
   if (choicesEl) {
     choicesEl.onchange = (e) => {
       const val = e.target.checked;
@@ -1326,7 +1361,11 @@ async function bindEvents() {
       const val = e.target.value;
       const activeModelName = (getState().modelName || modelEl?.value || '').trim();
       const support = getThinkingSupportForModel(activeModelName);
-      if (support.kind === 'gemini3') {
+      if (support.kind === 'gemma4') {
+        const nextValue = val !== 'off';
+        updateState({ gemmaThinkingEnabled: nextValue });
+        db.saveSetting('gemma_thinking_enabled', nextValue);
+      } else if (support.kind === 'gemini3') {
         const nextValue = normalizeGemini3ThinkingLevel(val);
         updateState({ thinkingLevelGemini3: nextValue });
         db.saveSetting('thinking_level_gemini3', nextValue);
