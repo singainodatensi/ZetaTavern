@@ -302,7 +302,14 @@ function scoreSearchableText(text, tokens) {
 const PROACTIVE_REFERENCE_STOPWORDS = new Set([
   '主人公', '世界', '物語', '会話', '状況', '設定', '関係', '人物', 'キャラクター',
   '場所', '情報', '内容', '話', '今回', '次', '今', 'さっき', '感じ', 'ところ',
-  '相手', '自分', '普通', '一般', '説明', '詳細', '名前', '存在', '仲間'
+  '相手', '自分', '普通', '一般', '説明', '詳細', '名前', '存在', '仲間',
+  '講義', '授業', '自宅', '家', '部屋', '学校', '先生', '好き', '恋愛', '放課後',
+  '時間', '今日', '明日', '昨日', '仕事', '生活', '会場', '現場'
+]);
+
+const KNOWN_WORLD_SEARCH_TERMS = new Set([
+  'ギルド', '王選', '白鯨', '魔女教', '騎士団', '商会', '陣営', '精霊', '加護',
+  '屋敷', '学園', '学院', '教会', '王都', '王国', '依頼', '討伐', '護衛'
 ]);
 
 function normalizeLoreType(type) {
@@ -1093,6 +1100,31 @@ function extractReferenceCandidatesFromText(text) {
   return Array.from(words);
 }
 
+function isLikelyGenericSearchTerm(term) {
+  const value = normalizeLoreEntryName(term);
+  if (!value) return true;
+  if (PROACTIVE_REFERENCE_STOPWORDS.has(value)) return true;
+  if (/^[\u3040-\u309fー]+$/.test(value)) return true;
+  if (/^(それ|これ|あれ|どれ|ここ|そこ|あそこ|誰|何|どこ|いつ|なに|みんな|お前ら)$/.test(value)) return true;
+  if (/^[\u4e00-\u9faf]{1,2}$/.test(value) && !KNOWN_WORLD_SEARCH_TERMS.has(value)) return true;
+  return false;
+}
+
+function collectKnownWorldSearchTerms(text) {
+  const source = String(text || '');
+  const hits = [];
+  for (const term of KNOWN_WORLD_SEARCH_TERMS) {
+    if (source.includes(term)) {
+      hits.push(term);
+    }
+  }
+  return hits;
+}
+
+function filterSearchPlanningTerms(terms = []) {
+  return uniqueNonEmpty(terms).filter(term => !isLikelyGenericSearchTerm(term));
+}
+
 function collectStoryReferenceCandidates(story, scopedCharacters = []) {
   const candidates = new Set();
   const messages = Array.isArray(story?.messages) ? story.messages : [];
@@ -1417,11 +1449,10 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `【GMとしての基本哲学（絶対ルール）】\n`;
   instruction += `1. **行動の尊重と世界の抵抗**: ユーザーの行動（試み）は肯定し見せ場を作るが、成功や結果は安易に保証しない。世界や敵は自らの法則で抵抗する。\n`;
   instruction += `2. **NPCの生気と群像劇**: 世界は停止しない。NPCは自律し、主人公の指示待ち人形にならず、自らの感情と行動原理で動く。NPC同士の会話や対立も描くこと。\n`;
-  instruction += `3. **誘導（ナッジ）によるテンポ管理**: 会話や場面の区切りでは、強制的なシーン切り替えではなく「窓の外は夕闇に染まっていた――」のように情景や空気感の変化を描写し、次へ進むべきタイミングをユーザーに誘導（提案）すること。\n`;
-  instruction += `4. **判断の余白**: 一度の出力で事態を勝手に解決・完結させず、主人公が次のターンで介入・選択できる明確な「余白」を残した時点で出力を止める（ターンの制御）。\n\n`;
-  // ★ ここに追加
-  instruction += `5. **主人公の不可侵性（アンタッチャブル）**: 主人公の「セリフ」「行動」「思考」「感情」はすべてユーザーが決定する。AIが主人公の言動や判断を勝手に捏造・代行することは絶対に禁止する。\n`;
-  instruction += `6. **ナレーターの視点制限（カメラ視点）**: 地の文は、外から観測可能な事実（情景、NPCの表情や行動など）のみを描写するカメラに徹すること。主人公の内心（何を考え、何を感じ、何を理解したか）を勝手に代弁・描写してはならない。「主人公は〇〇と理解した」「不快感はなかった」等の心理解釈は固く禁ずる。\n\n`;
+  instruction += `3. **世界の自律進行**: NPC、周囲の状況、外部イベント、場面の空気は、主人公の入力待ちで不自然に停止させず、自然な流れとして進行させてよい。毎ターン「どうしますか？」と確認して止めるより、状況を半歩前へ動かした状態で出力を終えることを優先する。\n`;
+  instruction += `4. **主人公の主導権**: 主人公の重要な選択、明確なセリフ、感情や意思決定の断定はユーザーを優先し、AIが勝手に確定しないこと。ただし、場面を成立させるための受動的な流れや周囲の進行まで過剰に停止しないこと。\n`;
+  instruction += `5. **テンポ優先の進行**: 毎ターン確認や催促で終えるのではなく、NPCの反応、場面の変化、出来事の進行を通じて、物語が自然に前へ進む出力を優先すること。主人公の介入余地は残してよいが、それを理由に世界全体を停止させてはならない。\n`;
+  instruction += `6. **ナレーターの視点制限（カメラ視点）**: 地の文は、外から観測可能な事実（情景、NPCの表情や行動など）を中心に描写すること。主人公の内心（何を考え、何を感じ、何を理解したか）を勝手に代弁・描写してはならない。「主人公は〇〇と理解した」「不快感はなかった」等の心理解釈は固く禁ずる。\n\n`;
   instruction += `【重要：世界観の正確な描写と参照ツールの使い分け】\n`;
   instruction += `実在の作品名（アニメ、漫画等）をベースにした世界観の場合、安易にオリジナルの敵、魔法、地名、設定を捏造してはいけません。\n`;
   instruction += `キャラクターライブラリやロアブックに登録済みの内容は、必要になった時に参照ツールで検索・取得してから使ってください。\n`;
@@ -2117,14 +2148,19 @@ function buildExternalProviderSearchPlan(story, selectedMessages = []) {
   const searchContext = franchiseContext || franchise;
   if (!searchContext) return null;
 
-  const candidateTerms = extractReferenceCandidatesFromText(latestText).filter(Boolean);
+  const candidateTerms = filterSearchPlanningTerms([
+    ...extractReferenceCandidatesFromText(latestText).filter(Boolean),
+    ...collectKnownWorldSearchTerms(latestText)
+  ]);
   const searchHintPattern = /(教えて|とは|って|誰|どこ|何|なに|どういう|詳細|説明|調べ|検索|依頼|護衛|討伐|商会|騎士団|屋敷|学園|学校|王都|王選|陣営|魔女教|精霊|加護|白鯨|ギルド)/;
-  const shouldSearch = candidateTerms.length > 0 || searchHintPattern.test(latestText);
+  const shouldSearch = candidateTerms.length > 0 && searchHintPattern.test(latestText)
+    || candidateTerms.some(term => KNOWN_WORLD_SEARCH_TERMS.has(term));
   if (!shouldSearch) return null;
 
-  const topicKey = normalizeLoreEntryName(candidateTerms[0] || latestText).slice(0, 60);
+  const topicKey = normalizeLoreEntryName(candidateTerms[0] || '').slice(0, 60);
   const queryHead = candidateTerms.slice(0, 2).join(' ');
-  const query = [queryHead || latestText, searchContext].filter(Boolean).join(' ').trim();
+  if (!queryHead) return null;
+  const query = [queryHead, searchContext].filter(Boolean).join(' ').trim();
   if (!query) return null;
 
   const isQuestion = /(教えて|とは|って|誰|どこ|何|なに|どういう|詳細|説明|調べ|検索)/.test(latestText);
