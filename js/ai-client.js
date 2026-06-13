@@ -4,7 +4,7 @@
  */
 
 import { getState, updateState } from './state.js'; // ★ updateState のインポートを追加
-import { getCharacter, getLore, getLoreByNameAndFranchise, getWorldLores, saveLore, getCharacters } from './db.js';
+import { getCharacter, getLore, getLoreByNameAndFranchise, getWorldLores, saveLore, saveStory, getCharacters } from './db.js';
 import { getStoryScopedCharacters } from './story-characters.js';
 
 async function getCharactersList() {
@@ -45,8 +45,11 @@ function hasCharacterLoreConflict(lore, characters, franchise) {
 
 const DEFAULT_SEARCH_MODEL_NAME = 'gemini-2.5-flash-lite';
 const MAX_SEARCH_WEB_CALLS_PER_TURN = 1;
-let webSearchCooldownUntil = 0;
-const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['auto', 'google', 'duckduckgo', 'off']);
+const webSearchCooldownUntilByProvider = {
+  google: 0,
+  tavily: 0
+};
+const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['auto', 'tavily', 'google', 'duckduckgo', 'off']);
 
 function selectSearchCapableModel(modelName) {
   const requested = (modelName || '').trim();
@@ -73,10 +76,130 @@ function normalizeWebSearchProvider(value) {
 
 function getWebSearchProviderLabel(value) {
   const normalized = normalizeWebSearchProvider(value);
+  if (normalized === 'tavily') return 'Tavily';
   if (normalized === 'google') return 'Google';
   if (normalized === 'duckduckgo') return 'DuckDuckGo';
   if (normalized === 'off') return 'OFF';
   return 'Auto';
+}
+
+function getWebSearchCooldownRemainingMs(provider) {
+  const until = Number(webSearchCooldownUntilByProvider?.[provider] || 0);
+  return Math.max(0, until - Date.now());
+}
+
+function setWebSearchCooldown(provider, durationMs = 5 * 60 * 1000) {
+  if (!provider || !Number.isFinite(durationMs) || durationMs <= 0) return;
+  webSearchCooldownUntilByProvider[provider] = Date.now() + durationMs;
+}
+
+function parseJsonObjectFromModelText(text) {
+  const source = String(text || '').trim();
+  if (!source) return null;
+  const jsonMatch = source.match(/\`\`\`json\s*(\{[\s\S]*?\})\s*\`\`\`/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[1]);
+    } catch (_) {
+      return null;
+    }
+  }
+  try {
+    return JSON.parse(source);
+  } catch (_) {
+    return null;
+  }
+}
+
+function ensureSearchMemory(story) {
+  if (!story || !Array.isArray(story.search_memory)) {
+    if (story) story.search_memory = [];
+    return story?.search_memory || [];
+  }
+  return story.search_memory;
+}
+
+function normalizeSearchTopicKey(value) {
+  return normalizeLoreEntryName(String(value || '').trim()).toLowerCase();
+}
+
+function buildSearchMemoryIdentity(entry = {}) {
+  return JSON.stringify({
+    topicKey: normalizeSearchTopicKey(entry.topicKey || ''),
+    query: normalizeSearchText(entry.query || ''),
+    franchise: normalizeLoreKey(entry.franchise || '')
+  });
+}
+
+function findSearchMemoryMatch(story, { topicKey = '', query = '', franchise = '' } = {}) {
+  const normalizedTopicKey = normalizeSearchTopicKey(topicKey);
+  const normalizedQuery = normalizeSearchText(query);
+  const normalizedFranchise = normalizeLoreKey(franchise);
+  const memory = ensureSearchMemory(story);
+
+  return memory.find(entry => {
+    const sameFranchise = !normalizedFranchise || normalizeLoreKey(entry.franchise || '') === normalizedFranchise;
+    if (!sameFranchise) return false;
+    if (normalizedTopicKey && normalizeSearchTopicKey(entry.topicKey || '') === normalizedTopicKey) return true;
+    if (normalizedQuery && normalizeSearchText(entry.query || '') === normalizedQuery) return true;
+    return false;
+  }) || null;
+}
+
+function upsertSearchMemoryEntry(story, entry = {}) {
+  const memory = ensureSearchMemory(story);
+  const normalizedEntry = {
+    id: entry.id || crypto.randomUUID(),
+    topicKey: normalizeLoreEntryName(entry.topicKey || entry.query || ''),
+    query: String(entry.query || '').trim(),
+    purpose: String(entry.purpose || '').trim(),
+    franchise: String(entry.franchise || '').trim(),
+    provider: String(entry.provider || '').trim(),
+    sceneGoal: String(entry.sceneGoal || '').trim(),
+    summary: String(entry.summary || entry.text || '').trim().slice(0, 1400),
+    source: String(entry.source || 'search_web').trim() || 'search_web',
+    createdAt: Number(entry.createdAt || Date.now()),
+    updatedAt: Date.now()
+  };
+
+  const existingIndex = memory.findIndex(item =>
+    buildSearchMemoryIdentity(item) === buildSearchMemoryIdentity(normalizedEntry)
+  );
+
+  if (existingIndex >= 0) {
+    memory[existingIndex] = {
+      ...memory[existingIndex],
+      ...normalizedEntry,
+      id: memory[existingIndex].id || normalizedEntry.id,
+      createdAt: memory[existingIndex].createdAt || normalizedEntry.createdAt
+    };
+  } else {
+    memory.unshift(normalizedEntry);
+  }
+
+  story.search_memory = memory
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+    .slice(0, 12);
+  return story.search_memory[0];
+}
+
+function buildSearchMemoryInstructionBlock(story) {
+  const memory = ensureSearchMemory(story);
+  if (memory.length === 0) return '';
+
+  let block = `【検索メモ (Search Memory)】\n`;
+  block += `- 既に確認済みの外部情報。まずここを参照し、同じ主題をむやみに再検索しないこと。\n`;
+  for (const entry of memory.slice(0, 5)) {
+    block += `・${entry.topicKey || entry.query}`;
+    if (entry.franchise) block += ` [${entry.franchise}]`;
+    if (entry.sceneGoal) block += ` <用途: ${entry.sceneGoal}>`;
+    block += `\n`;
+    if (entry.summary) {
+      block += `  ${entry.summary}\n`;
+    }
+  }
+  block += `\n`;
+  return block;
 }
 
 function buildCompactCharacterHint(character) {
@@ -397,7 +520,8 @@ function createUsageAccumulator(requestType, modelName) {
       groundingQueries: [],
       googleSearchAvailable: false,
       serverToolRoundTrips: 0,
-      searchProviderLabel: ''
+      searchProviderLabel: '',
+      searchErrors: []
   };
 }
 
@@ -444,6 +568,7 @@ function publishUsageSnapshot(accumulator) {
       omittedTurns: accumulator.omittedTurns || 0,
       toolCalls: Array.isArray(accumulator.toolCalls) ? accumulator.toolCalls : [],
       groundingQueries: Array.isArray(accumulator.groundingQueries) ? accumulator.groundingQueries : [],
+      searchErrors: Array.isArray(accumulator.searchErrors) ? accumulator.searchErrors : [],
       googleSearchAvailable: accumulator.googleSearchAvailable === true,
       serverToolRoundTrips: Number(accumulator.serverToolRoundTrips || 0),
       searchProviderLabel: accumulator.searchProviderLabel || '',
@@ -499,6 +624,40 @@ function recordToolCall(accumulator, name, args = {}) {
   accumulator.toolCalls.push({
     name,
     preview: buildToolCallPreview(args),
+    count: 1
+  });
+}
+
+function recordSearchError(accumulator, {
+  provider = '',
+  query = '',
+  message = '',
+  code = ''
+} = {}) {
+  if (!accumulator || !message) return;
+  if (!Array.isArray(accumulator.searchErrors)) {
+    accumulator.searchErrors = [];
+  }
+
+  const normalizedProvider = normalizeWebSearchProvider(provider || 'auto');
+  const normalizedQuery = String(query || '').trim().slice(0, 80);
+  const normalizedMessage = String(message || '').trim().slice(0, 180);
+  const normalizedCode = String(code || '').trim().slice(0, 40);
+  const existing = accumulator.searchErrors.find(item =>
+    item?.provider === normalizedProvider &&
+    item?.query === normalizedQuery &&
+    item?.message === normalizedMessage
+  );
+  if (existing) {
+    existing.count = Number(existing.count || 0) + 1;
+    return;
+  }
+
+  accumulator.searchErrors.push({
+    provider: normalizedProvider,
+    query: normalizedQuery,
+    message: normalizedMessage,
+    code: normalizedCode,
     count: 1
   });
 }
@@ -1460,6 +1619,11 @@ export async function buildSystemInstruction(story, options = {}) {
     instruction += `・直近の会話だけを細かく参照し、それ以前の流れは要約ベースで一貫性を維持すること。\n\n`;
   }
 
+  const searchMemoryBlock = buildSearchMemoryInstructionBlock(story);
+  if (searchMemoryBlock) {
+    instruction += searchMemoryBlock;
+  }
+
   instruction += `【ロア分類ルール】\n`;
   instruction += `- セッションロア: このセッションで起きた出来事、現在の進行状況、主人公との関係変化、今回の行動でのみ意味を持つ情報。\n`;
   instruction += `- セッションで新しく生まれたオリジナルキャラクター、今回限りの役職、即興の設定はセッションロア側に入れること。\n`;
@@ -1470,6 +1634,12 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- 大きな出来事、関係性の変化、新規オリジナル人物の登場があったターンでは、本文を書く前に update_session_lore を優先して呼ぶこと。\n`;
   instruction += `- update_world_lore は安定設定だけに使い、セッション情報の代用にしないこと。\n`;
   instruction += `- update_world_lore は「確定登録」ではなく「ワールドロア候補の提案」として扱われる。安定設定だと強く判断できるものだけを提案すること。\n\n`;
+  instruction += `【検索と展開設計のルール】\n`;
+  instruction += `- 原作世界を舞台にする場合、本文を書く前に「この場面を作品固有の展開にするために何を確認すべきか」を1〜2歩先まで考えること。\n`;
+  instruction += `- ユーザーが明示的に検索を要求していなくても、組織、制度、拠点、同行者、商会、依頼、敵対勢力、進行中事件、地元の常識などが場面に関わるなら自発的に参照・検索してよい。\n`;
+  instruction += `- まずキャラクターライブラリ、ロアブック、検索メモを確認し、足りない時だけ search_web を使うこと。\n`;
+  instruction += `- 汎用ファンタジーの代用品で埋めず、作品固有の候補を優先すること。例: 商会、屋敷、陣営、魔獣、学校、騎士団、地域勢力。\n`;
+  instruction += `- すでに検索メモにある主題は再検索せず、その情報を使って場面を肉付けすること。\n\n`;
 
   // ==========================================
   // RAG: 固有名詞の抽出とロアブックの注入
@@ -1870,6 +2040,260 @@ function buildStructuredSearchMemoPrompt(providerLabel, query, purpose, franchis
   return prompt;
 }
 
+function buildSearchPlanningPrompt(story, selectedMessages = []) {
+  const franchise = String(story?.franchise || '').trim();
+  const franchiseContext = String(story?.franchiseContext || '').trim();
+  const latestUserMessage = [...selectedMessages].reverse().find(message => message?.role === 'user');
+  const latestText = String(latestUserMessage?.content || '').trim();
+  const recentDialogue = selectedMessages
+    .slice(-6)
+    .map(message => `${message?.role === 'user' ? 'USER' : 'MODEL'}: ${String(message?.aiContent || message?.content || '').trim()}`)
+    .join('\n')
+    .slice(-2200);
+  const searchMemory = ensureSearchMemory(story)
+    .slice(0, 6)
+    .map(entry => `- ${entry.topicKey || entry.query}${entry.sceneGoal ? ` <${entry.sceneGoal}>` : ''}`)
+    .join('\n');
+
+  return `
+あなたはユーザー体感型ストーリーのための「検索計画プランナー」です。
+次の本文を書く前に、原作ならではの世界観・組織・同行者・拠点・制度・事件進行を自然に反映させるため、外部Web検索が必要かを判定してください。
+検索が不要なら無理に探さず、必要な場合だけ1件に絞ってください。
+
+作品タグ: ${franchise || '未設定'}
+検索用別名: ${franchiseContext || 'なし'}
+最新のユーザー入力: ${latestText || 'なし'}
+
+直近の会話:
+${recentDialogue || 'なし'}
+
+既存の検索メモ:
+${searchMemory || 'なし'}
+
+判断ルール:
+- 作品固有の制度・組織・拠点・依頼文化・陣営・同行者・敵対勢力・原作イベント進行を描くと場面が豊かになるなら検索候補にする。
+- ユーザーが明示的に質問していなくても、次の展開に必要なら検索してよい。
+- ただし、既存の検索メモで十分なら needsSearch を false にする。
+- 一般名詞だけをそのまま調べるのではなく、作品名と目的を含む具体的な検索語にする。
+- 人物なら「同行者」「所属」「拠点」、制度なら「依頼」「商会」「騎士団」など、次の場面に必要な観点を query に含める。
+
+JSONのみを返してください:
+{
+  "needsSearch": true,
+  "topicKey": "エミリア陣営",
+  "query": "エミリア Re:ゼロから始める異世界生活 同行者 陣営 拠点",
+  "purpose": "場面に自然に同席しうる人物と拠点を把握する",
+  "sceneGoal": "次の場面を原作らしい人間関係で肉付けする",
+  "reason": "ユーザーは人物紹介ではなく場面進行をしているが、同行者を知らないと原作らしさが弱くなる"
+}
+
+検索が不要なら次を返してください:
+{
+  "needsSearch": false,
+  "topicKey": "",
+  "query": "",
+  "purpose": "",
+  "sceneGoal": "",
+  "reason": "既存メモとローカル情報で十分"
+}
+`.trim();
+}
+
+async function planProactiveStorySearch(story, selectedMessages = [], usageAccumulator = null) {
+  const appState = getState();
+  const apiKey = appState.apiKey || await getApiKeyFromStorage();
+  const provider = normalizeWebSearchProvider(appState.webSearchProvider);
+  if (!apiKey || provider === 'off') return null;
+
+  const hasFranchiseContext = Boolean(
+    String(story?.franchise || '').trim() ||
+    String(story?.franchiseContext || '').trim() ||
+    (Array.isArray(story?.tags) && story.tags.some(tag => String(tag || '').trim()))
+  );
+  if (!hasFranchiseContext) return null;
+
+  const latestUserMessage = [...selectedMessages].reverse().find(message => message?.role === 'user');
+  if (!latestUserMessage?.content) return null;
+
+  const modelName = resolveSearchModelName(appState);
+  const prompt = buildSearchPlanningPrompt(story, selectedMessages);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  if (usageAccumulator) {
+    accumulatePromptDebug(usageAccumulator, {
+      systemInstruction: '',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      tools: []
+    });
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        topP: 0.8,
+        maxOutputTokens: 512
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    recordSearchError(usageAccumulator, {
+      provider,
+      query: latestUserMessage?.content || '',
+      code: `planner:${response.status}`,
+      message: errorData.error?.message || `検索計画の生成に失敗しました (${response.status})`
+    });
+    return null;
+  }
+
+  const result = await response.json().catch(() => null);
+  if (usageAccumulator && result) {
+    addUsageMetadata(usageAccumulator, result?.usageMetadata);
+  }
+  const parts = result?.candidates?.[0]?.content?.parts;
+  if (!parts?.length) return null;
+  const text = parts.filter(part => !part?.thought).map(part => part?.text || '').join('\n').trim();
+  const parsed = parseJsonObjectFromModelText(text);
+  if (!parsed || parsed.needsSearch !== true) return null;
+
+  return {
+    topicKey: normalizeLoreEntryName(parsed.topicKey || parsed.query || ''),
+    query: String(parsed.query || '').trim(),
+    purpose: String(parsed.purpose || '').trim(),
+    sceneGoal: String(parsed.sceneGoal || '').trim(),
+    reason: String(parsed.reason || '').trim(),
+    franchise: String(story?.franchise || '').trim() || String(story?.franchiseContext || '').trim()
+  };
+}
+
+async function maybePrimeStorySearchMemory(story, selectedMessages = [], usageAccumulator = null) {
+  const plan = await planProactiveStorySearch(story, selectedMessages, usageAccumulator);
+  if (!plan?.query) return null;
+
+  if (findSearchMemoryMatch(story, plan)) {
+    return { reused: true, plan };
+  }
+
+  const characterSearch = await searchCharacterLibraryForStory(story, { query: plan.topicKey || plan.query });
+  if (isStrongCharacterHit(characterSearch, plan.topicKey || plan.query)) {
+    return { reused: true, local: 'character', plan };
+  }
+
+  const loreSearch = await searchLorebookForStory(story, { query: plan.topicKey || plan.query, franchise: plan.franchise || story?.franchise || '' });
+  if (isStrongLoreHit(loreSearch, plan.topicKey || plan.query)) {
+    return { reused: true, local: 'lore', plan };
+  }
+
+  recordToolCall(usageAccumulator, 'search_web', {
+    query: plan.query,
+    franchise: plan.franchise,
+    purpose: plan.purpose
+  });
+  const result = await searchWebForStory(story, {
+    query: plan.query,
+    purpose: plan.purpose,
+    franchise: plan.franchise,
+    topicKey: plan.topicKey,
+    sceneGoal: plan.sceneGoal,
+    source: 'planner'
+  }, usageAccumulator, null);
+
+  if (result?.found) {
+    await saveStory(story);
+  }
+  return { result, plan };
+}
+
+function buildTavilySummary(payload, query, franchise) {
+  const answer = String(payload?.answer || '').trim();
+  const results = Array.isArray(payload?.results) ? payload.results.slice(0, 3) : [];
+  const lines = [];
+
+  if (answer) {
+    lines.push(`概要: ${answer}`);
+  } else if (results.length > 0) {
+    const lead = [String(results[0]?.title || '').trim(), String(results[0]?.content || '').trim()]
+      .filter(Boolean)
+      .join(' - ')
+      .slice(0, 220);
+    if (lead) {
+      lines.push(`概要: ${lead}`);
+    }
+  } else {
+    lines.push(`概要: ${[query, franchise].filter(Boolean).join(' / ')}`);
+  }
+
+  if (results.length > 0) {
+    lines.push('補足:');
+    for (const item of results) {
+      const snippet = [String(item?.title || '').trim(), String(item?.content || '').trim()]
+        .filter(Boolean)
+        .join(' - ')
+        .replace(/\s+/g, ' ')
+        .slice(0, 220);
+      if (snippet) {
+        lines.push(`- ${snippet}`);
+      }
+    }
+  }
+
+  return lines.join('\n').trim().slice(0, 1400);
+}
+
+async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
+  const searchQuery = [query, franchise].filter(Boolean).join(' ');
+  const response = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      query: searchQuery,
+      topic: 'general',
+      search_depth: 'basic',
+      max_results: 5,
+      include_answer: true,
+      include_usage: true
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const message = errorData?.detail ||
+      errorData?.message ||
+      errorData?.error ||
+      `HTTP status ${response.status}`;
+    const quotaLike = isQuotaLikeApiError(response.status, message);
+    if (quotaLike) {
+      setWebSearchCooldown('tavily');
+    }
+    return {
+      provider: 'tavily',
+      found: false,
+      rateLimited: quotaLike,
+      message
+    };
+  }
+
+  const payload = await response.json().catch(() => null);
+  const text = buildTavilySummary(payload, query, franchise);
+  return {
+    provider: 'tavily',
+    found: Boolean(text),
+    modelName: '',
+    text,
+    groundingQueries: [],
+    usageCredits: Number(payload?.usage?.credits || 0),
+    message: text ? '' : 'Tavily から十分な要約を取得できませんでした。'
+  };
+}
+
 async function runGoogleSearchLookup({
   apiKey,
   modelName,
@@ -1908,7 +2332,7 @@ async function runGoogleSearchLookup({
     const message = errorData.error?.message || `HTTP status ${response.status}`;
     const quotaLike = isQuotaLikeApiError(response.status, message);
     if (quotaLike) {
-      webSearchCooldownUntil = Date.now() + 5 * 60 * 1000;
+      setWebSearchCooldown('google');
     }
     return {
       provider: 'google',
@@ -2020,6 +2444,7 @@ async function runDuckDuckGoLookup({ query, franchise }) {
 async function searchWebForStory(story, args = {}, usageAccumulator = null, searchState = null) {
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
+  const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
   const query = String(args?.query || '').trim();
   const purpose = String(args?.purpose || '').trim();
   const franchise = String(args?.franchise || story?.franchise || '').trim();
@@ -2047,18 +2472,6 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
       message: 'Web検索は設定でOFFになっています。'
     };
   }
-  if (provider === 'google' && Date.now() < webSearchCooldownUntil) {
-    return {
-      found: false,
-      query,
-      purpose,
-      franchise,
-      provider,
-      rateLimited: true,
-      retryAfterMs: webSearchCooldownUntil - Date.now(),
-      message: 'Web検索は一時的にクォータ制限中です。'
-    };
-  }
   if (searchState?.cache?.has(cacheKey)) {
     return searchState.cache.get(cacheKey);
   }
@@ -2078,23 +2491,44 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
   }
 
   const modelName = resolveSearchModelName(appState);
-  let result = null;
-  if (provider === 'duckduckgo') {
-    result = await runDuckDuckGoLookup({ query, franchise });
-  } else if (provider === 'google') {
-    result = await runGoogleSearchLookup({
-      apiKey,
-      modelName,
-      query,
-      purpose,
-      franchise,
-      usageAccumulator
-    });
-  } else {
-    if (Date.now() < webSearchCooldownUntil) {
-      result = await runDuckDuckGoLookup({ query, franchise });
-    } else {
-      const googleResult = await runGoogleSearchLookup({
+  const runProviderLookup = async (providerName) => {
+    if (providerName === 'tavily') {
+      if (!tavilyApiKey) {
+        return {
+          provider: 'tavily',
+          found: false,
+          message: 'Tavily APIキーが未設定です。'
+        };
+      }
+      const cooldownMs = getWebSearchCooldownRemainingMs('tavily');
+      if (cooldownMs > 0) {
+        return {
+          provider: 'tavily',
+          found: false,
+          rateLimited: true,
+          retryAfterMs: cooldownMs,
+          message: 'Tavily は一時的にクォータ制限中です。'
+        };
+      }
+      return runTavilyLookup({
+        apiKey: tavilyApiKey,
+        query,
+        purpose,
+        franchise
+      });
+    }
+    if (providerName === 'google') {
+      const cooldownMs = getWebSearchCooldownRemainingMs('google');
+      if (cooldownMs > 0) {
+        return {
+          provider: 'google',
+          found: false,
+          rateLimited: true,
+          retryAfterMs: cooldownMs,
+          message: 'Google Search は一時的にクォータ制限中です。'
+        };
+      }
+      return runGoogleSearchLookup({
         apiKey,
         modelName,
         query,
@@ -2102,12 +2536,32 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
         franchise,
         usageAccumulator
       });
-      if (googleResult.found || !googleResult.rateLimited) {
-        result = googleResult;
-      } else {
-        const ddgResult = await runDuckDuckGoLookup({ query, franchise });
-        result = ddgResult.found ? ddgResult : googleResult;
-      }
+    }
+    return runDuckDuckGoLookup({ query, franchise });
+  };
+
+  const providerOrder = provider === 'auto'
+    ? [tavilyApiKey ? 'tavily' : '', 'google', 'duckduckgo'].filter(Boolean)
+    : [provider];
+  let result = null;
+
+  for (const providerName of providerOrder) {
+    const attempt = await runProviderLookup(providerName);
+    if (attempt?.found) {
+      result = attempt;
+      break;
+    }
+    if (attempt?.message) {
+      recordSearchError(usageAccumulator, {
+        provider: providerName,
+        query,
+        code: attempt?.rateLimited ? 'rate_limited' : '',
+        message: attempt.message
+      });
+    }
+    result = attempt;
+    if (provider !== 'auto') {
+      break;
     }
   }
 
@@ -2119,6 +2573,18 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
     franchise,
     provider: result?.provider || provider
   };
+  if (story && normalizedResult.found && normalizedResult.text) {
+    upsertSearchMemoryEntry(story, {
+      topicKey: args?.topicKey || query,
+      query,
+      purpose,
+      franchise,
+      provider: normalizedResult.provider,
+      sceneGoal: args?.sceneGoal || '',
+      summary: normalizedResult.text,
+      source: args?.source || 'search_web'
+    });
+  }
   if (searchState?.cache) {
     searchState.cache.set(cacheKey, normalizedResult);
   }
@@ -2251,6 +2717,9 @@ export async function generateStoryResponse(story) {
   usageAccumulator.historyCompressionEnabled = historyCompressionEnabled;
   usageAccumulator.historyTurnLimit = effectiveHistoryTurnLimit;
   usageAccumulator.omittedTurns = omittedTurns;
+
+  await maybePrimeStorySearchMemory(story, selectedMessages, usageAccumulator);
+
   const systemInstruction = await buildSystemInstruction(story, {
     omittedTurns,
     historyTurnLimit: effectiveHistoryTurnLimit,

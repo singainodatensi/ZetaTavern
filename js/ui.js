@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260613d';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260613f';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -133,6 +133,7 @@ function formatToolCallLabel(name) {
 function formatSearchProviderLabel(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'google') return 'Google';
+  if (normalized === 'tavily') return 'Tavily';
   if (normalized === 'duckduckgo') return 'DuckDuckGo';
   if (normalized === 'off') return 'OFF';
   return 'Auto';
@@ -208,6 +209,19 @@ export function renderApiUsagePanel() {
             ${lastApiUsage.debug.groundingQueries.map(query => `
               <span class="api-usage-chip">${escapeHTML(`検索: ${query}`)}</span>
             `).join('')}
+          </div>
+        ` : ''}
+        ${lastApiUsage.debug.searchErrors?.length ? `
+          <div class="api-usage-debug-meta">
+            <span>検索失敗 ${formatUsageNumber(lastApiUsage.debug.searchErrors.reduce((sum, item) => sum + Number(item.count || 0), 0))}件</span>
+          </div>
+          <div class="api-usage-chip-row">
+            ${lastApiUsage.debug.searchErrors.map(item => {
+              const providerLabel = formatSearchProviderLabel(item.provider || 'auto');
+              const preview = item.query ? `: ${item.query}` : '';
+              const count = Number(item.count || 0) > 1 ? ` x${formatUsageNumber(item.count)}` : '';
+              return `<span class="api-usage-chip">${escapeHTML(`${providerLabel}${preview} - ${item.message || '検索失敗'}${count}`)}</span>`;
+            }).join('')}
           </div>
         ` : ''}
         <div class="api-usage-debug-list">

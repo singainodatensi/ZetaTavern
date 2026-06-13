@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260613d';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613d';
+import * as ui from './ui.js?v=20260613f';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613f';
 import * as dropbox from './dropbox.js?v=20260611d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -854,6 +854,7 @@ if (document.readyState === 'loading') {
 async function loadConfigurations() {
   const provider = await db.getSetting('api_provider', 'gemini');
   const key = await db.getSetting('api_key', '');
+  const tavilyApiKey = await db.getSetting('tavily_api_key', '');
   const model = await db.getSetting('model_name', 'gemini-2.5-flash');
   const searchModel = await db.getSetting('search_model_name', '');
   const webSearchProvider = await db.getSetting('web_search_provider', 'auto');
@@ -888,6 +889,7 @@ async function loadConfigurations() {
   updateState({
     apiProvider: provider,
     apiKey: key,
+    tavilyApiKey,
     modelName: model,
     searchModelName: searchModel,
     webSearchProvider,
@@ -911,6 +913,7 @@ async function loadConfigurations() {
   // Prefill settings form
   const provEl = document.getElementById('api-provider-select');
   const keyEl = document.getElementById('api-key-input');
+  const tavilyKeyEl = document.getElementById('tavily-api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
@@ -929,6 +932,7 @@ async function loadConfigurations() {
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
+  if (tavilyKeyEl) tavilyKeyEl.value = tavilyApiKey || '';
   if (choicesEl) choicesEl.checked = choices;
   if (autoscrollEl) autoscrollEl.checked = autoscroll;
   if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
@@ -1261,6 +1265,7 @@ async function bindEvents() {
   // 4. Save Settings Changes
   const provEl = document.getElementById('api-provider-select');
   const keyEl = document.getElementById('api-key-input');
+  const tavilyKeyEl = document.getElementById('tavily-api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
@@ -1293,6 +1298,13 @@ async function bindEvents() {
       updateState({ apiKey: val });
       db.saveSetting('api_key', val);
       localStorage.setItem('zetatavern_api_key', val);
+    };
+  }
+  if (tavilyKeyEl) {
+    tavilyKeyEl.oninput = (e) => {
+      const val = String(e.target.value || '').trim();
+      updateState({ tavilyApiKey: val });
+      db.saveSetting('tavily_api_key', val);
     };
   }
   if (modelEl) {
@@ -1759,7 +1771,8 @@ async function createNewStory() {
     ],
     characterMemory: {},
     relationshipMemory: {},
-    lore_candidates: []
+    lore_candidates: [],
+    search_memory: []
   };
 
   try {
