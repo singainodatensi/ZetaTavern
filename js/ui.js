@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260613i';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260613l';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -618,12 +618,18 @@ async function buildUserNarrationMessageElement({
   return msgEl;
 }
 
-function matchCharacterByName(speakerName, characters) {
-  if (!speakerName || !characters || characters.length === 0) return null;
+function matchCharacterByName(speakerName, primaryCharacters = [], fallbackCharacters = []) {
+  const characters = Array.isArray(primaryCharacters) ? primaryCharacters : [];
+  const fallback = Array.isArray(fallbackCharacters) ? fallbackCharacters : [];
+  if (!speakerName || (characters.length === 0 && fallback.length === 0)) return null;
   const normalised = speakerName.trim();
   let match = characters.find(c => c.name === normalised);
   if (match) return match;
   match = characters.find(c => c.name.includes(normalised) || normalised.includes(c.name));
+  if (match) return match;
+  match = fallback.find(c => c.name === normalised);
+  if (match) return match;
+  match = fallback.find(c => c.name.includes(normalised) || normalised.includes(c.name));
   if (match) return match;
   return null;
 }
@@ -779,7 +785,8 @@ export async function renderStory() {
     parsedLast = parseChoices(lastMsg.content);
   }
 
-  const characters = uiMode === 'chat' ? await db.getCharacters() : [];
+  const allCharacters = uiMode === 'chat' ? await db.getCharacters() : [];
+  const storyScopedCharacters = uiMode === 'chat' ? getStoryScopedCharacters(allCharacters, currentStory) : [];
 
 for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -856,7 +863,7 @@ for (let i = 0; i < messages.length; i++) {
               roleClass = 'user-role';
               avatarUrl = await getAvatarUrl(currentStory.protagonist?.avatarAssetId);
             } else {
-              const charMatch = matchCharacterByName(seg.speaker, characters);
+              const charMatch = matchCharacterByName(seg.speaker, storyScopedCharacters, allCharacters);
               if (charMatch) {
                 avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
               }
@@ -920,7 +927,7 @@ for (let i = 0; i < messages.length; i++) {
 
         for (const seg of userSegments) {
           if (seg.type === 'character') {
-            const charMatch = matchCharacterByName(seg.speaker, characters);
+            const charMatch = matchCharacterByName(seg.speaker, storyScopedCharacters, allCharacters);
             let avatarUrl = 'assets/default-silhouette.png';
             if (charMatch) {
               avatarUrl = await getAvatarUrl(charMatch.avatarAssetId);
@@ -3408,7 +3415,15 @@ async function _renderSessionLore(container, renderVersion = 0) {
     return;
   }
 
-  const sessionLore = activeStory.session_lore || {};
+  const sessionLore = {
+    summary: '',
+    summary_source: '',
+    current_state: '',
+    open_threads: [],
+    recent_turning_points: [],
+    key_events: [],
+    ...(activeStory.session_lore || {})
+  };
   const relationshipMemory = activeStory.relationshipMemory || {};
 
   // キャラクター名を取得するためにDBを参照
@@ -3439,6 +3454,89 @@ async function _renderSessionLore(container, renderVersion = 0) {
           <button id="session-lore-save-summary-btn" class="sidebar-session-link-btn" type="button">
             <span class="material-symbols-outlined">save</span>
             <span>要約を保存</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">my_location</span>
+        <h4>現在の場面</h4>
+      </div>
+      <div class="session-lore-block-body">
+        <textarea id="session-lore-editor-current-state" class="session-lore-textarea" rows="4" placeholder="主人公が今どこで、誰と、何をしている最中かを整理します。">${escapeHTML(sessionLore.current_state || '')}</textarea>
+        <div class="session-lore-actions">
+          <button id="session-lore-save-current-state-btn" class="sidebar-session-link-btn" type="button">
+            <span class="material-symbols-outlined">save</span>
+            <span>現在状況を保存</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  const openThreads = Array.isArray(sessionLore.open_threads)
+    ? sessionLore.open_threads.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
+    : [];
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">priority_high</span>
+        <h4>未解決の懸案 (${openThreads.length}件)</h4>
+      </div>
+      <div class="session-lore-block-body">`;
+  if (openThreads.length > 0) {
+    html += `<ul class="session-event-list">${openThreads.map((e, index) => `
+      <li>
+        <span class="session-event-text">${escapeHTML(e)}</span>
+        <button class="session-open-thread-delete-btn" type="button" data-index="${index}" title="懸案を削除">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </li>
+    `).join('')}</ul>`;
+  } else {
+    html += `<p style="opacity:0.5;">現在、明示的な懸案はありません。</p>`;
+  }
+  html += `
+        <div class="session-lore-add-row">
+          <input id="session-lore-new-open-thread-input" class="session-lore-input" type="text" placeholder="例: ロズワールの真意が不明">
+          <button id="session-lore-add-open-thread-btn" class="sidebar-session-link-btn" type="button">
+            <span class="material-symbols-outlined">add</span>
+            <span>追加</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  const turningPoints = Array.isArray(sessionLore.recent_turning_points)
+    ? sessionLore.recent_turning_points.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
+    : [];
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">fork_right</span>
+        <h4>最近の転換点 (${turningPoints.length}件)</h4>
+      </div>
+      <div class="session-lore-block-body">`;
+  if (turningPoints.length > 0) {
+    html += `<ul class="session-event-list">${turningPoints.map((e, index) => `
+      <li>
+        <span class="session-event-text">${escapeHTML(e)}</span>
+        <button class="session-turning-point-delete-btn" type="button" data-index="${index}" title="転換点を削除">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </li>
+    `).join('')}</ul>`;
+  } else {
+    html += `<p style="opacity:0.5;">まだ転換点は記録されていません。</p>`;
+  }
+  html += `
+        <div class="session-lore-add-row">
+          <input id="session-lore-new-turning-point-input" class="session-lore-input" type="text" placeholder="例: エミリア陣営と合流した">
+          <button id="session-lore-add-turning-point-btn" class="sidebar-session-link-btn" type="button">
+            <span class="material-symbols-outlined">add</span>
+            <span>追加</span>
           </button>
         </div>
       </div>
@@ -3525,9 +3623,20 @@ async function _renderSessionLore(container, renderVersion = 0) {
   const saveSummaryBtn = container.querySelector('#session-lore-save-summary-btn');
   if (saveSummaryBtn && summaryInput) {
     saveSummaryBtn.onclick = async () => {
-      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', key_events: [] };
+      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
       activeStory.session_lore.summary = summaryInput.value.trim();
       activeStory.session_lore.summary_source = 'manual';
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  }
+
+  const currentStateInput = container.querySelector('#session-lore-editor-current-state');
+  const saveCurrentStateBtn = container.querySelector('#session-lore-save-current-state-btn');
+  if (saveCurrentStateBtn && currentStateInput) {
+    saveCurrentStateBtn.onclick = async () => {
+      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
+      activeStory.session_lore.current_state = currentStateInput.value.trim();
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };
@@ -3539,9 +3648,37 @@ async function _renderSessionLore(container, renderVersion = 0) {
     addEventBtn.onclick = async () => {
       const value = newEventInput.value.trim();
       if (!value) return;
-      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', key_events: [] };
+      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
       const existingEvents = Array.isArray(activeStory.session_lore.key_events) ? activeStory.session_lore.key_events : [];
       activeStory.session_lore.key_events = Array.from(new Set([...existingEvents, value]));
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  }
+
+  const newOpenThreadInput = container.querySelector('#session-lore-new-open-thread-input');
+  const addOpenThreadBtn = container.querySelector('#session-lore-add-open-thread-btn');
+  if (addOpenThreadBtn && newOpenThreadInput) {
+    addOpenThreadBtn.onclick = async () => {
+      const value = newOpenThreadInput.value.trim();
+      if (!value) return;
+      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
+      const existingItems = Array.isArray(activeStory.session_lore.open_threads) ? activeStory.session_lore.open_threads : [];
+      activeStory.session_lore.open_threads = Array.from(new Set([...existingItems, value])).slice(0, 10);
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  }
+
+  const newTurningPointInput = container.querySelector('#session-lore-new-turning-point-input');
+  const addTurningPointBtn = container.querySelector('#session-lore-add-turning-point-btn');
+  if (addTurningPointBtn && newTurningPointInput) {
+    addTurningPointBtn.onclick = async () => {
+      const value = newTurningPointInput.value.trim();
+      if (!value) return;
+      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
+      const existingItems = Array.isArray(activeStory.session_lore.recent_turning_points) ? activeStory.session_lore.recent_turning_points : [];
+      activeStory.session_lore.recent_turning_points = Array.from(new Set([value, ...existingItems])).slice(0, 8);
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };
@@ -3553,6 +3690,28 @@ async function _renderSessionLore(container, renderVersion = 0) {
       if (!Number.isInteger(index) || index < 0) return;
       if (!activeStory.session_lore || !Array.isArray(activeStory.session_lore.key_events)) return;
       activeStory.session_lore.key_events.splice(index, 1);
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  });
+
+  container.querySelectorAll('.session-open-thread-delete-btn').forEach(button => {
+    button.onclick = async () => {
+      const index = Number(button.dataset.index);
+      if (!Number.isInteger(index) || index < 0) return;
+      if (!activeStory.session_lore || !Array.isArray(activeStory.session_lore.open_threads)) return;
+      activeStory.session_lore.open_threads.splice(index, 1);
+      await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  });
+
+  container.querySelectorAll('.session-turning-point-delete-btn').forEach(button => {
+    button.onclick = async () => {
+      const index = Number(button.dataset.index);
+      if (!Number.isInteger(index) || index < 0) return;
+      if (!activeStory.session_lore || !Array.isArray(activeStory.session_lore.recent_turning_points)) return;
+      activeStory.session_lore.recent_turning_points.splice(index, 1);
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };

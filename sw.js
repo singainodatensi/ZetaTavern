@@ -1,4 +1,4 @@
-const CACHE_NAME = 'zetatavern-cache-v82';
+const CACHE_NAME = 'zetatavern-cache-v85';
 const urlsToCache = [
   './',
   './index.html',

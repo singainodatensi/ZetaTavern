@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260613i';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613i';
+import * as ui from './ui.js?v=20260613l';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613l';
 import * as dropbox from './dropbox.js?v=20260611d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -24,6 +24,32 @@ let isSyncInProgress = false; // 同期の多重実行を防ぐ排他ガード�
 let isDropboxAutoSyncRunning = false;
 let pendingDropboxAutoSync = null;
 let hasDropboxAutoSyncEventBinding = false;
+
+function createEmptySessionLore() {
+  return {
+    summary: '',
+    summary_source: '',
+    current_state: '',
+    open_threads: [],
+    recent_turning_points: [],
+    key_events: []
+  };
+}
+
+function ensureSessionLoreStructure(story) {
+  if (!story) return createEmptySessionLore();
+  const sessionLore = story.session_lore && typeof story.session_lore === 'object'
+    ? story.session_lore
+    : {};
+  story.session_lore = {
+    ...createEmptySessionLore(),
+    ...sessionLore,
+    open_threads: Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : [],
+    recent_turning_points: Array.isArray(sessionLore.recent_turning_points) ? sessionLore.recent_turning_points : [],
+    key_events: Array.isArray(sessionLore.key_events) ? sessionLore.key_events : []
+  };
+  return story.session_lore;
+}
 
 const DROPBOX_SYNC_SETTING_KEYS = [
   'api_provider',
@@ -1769,6 +1795,7 @@ async function createNewStory() {
         timestamp: Date.now()
       }
     ],
+    session_lore: createEmptySessionLore(),
     characterMemory: {},
     relationshipMemory: {},
     lore_candidates: [],
@@ -1799,12 +1826,12 @@ async function createNewStory() {
 
 function getSessionLoreSignature(story) {
   return JSON.stringify({
-    session_lore: story?.session_lore || null,
+    session_lore: ensureSessionLoreStructure(story),
     relationshipMemory: story?.relationshipMemory || null
   });
 }
 
-function extractFallbackSessionSummary(text) {
+function cleanFallbackSummarySource(text) {
   const cleaned = (text || '')
     .replace(/```[\s\S]*?```/g, '')
     .replace(/\*\*/g, '')
@@ -1818,39 +1845,64 @@ function extractFallbackSessionSummary(text) {
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+  return cleaned;
+}
 
+function extractFallbackSessionSummary(text, options = {}) {
+  const cleaned = cleanFallbackSummarySource(text);
   const sentences = splitJapaneseSentences(cleaned);
-  const picked = sentences.find(sentence => sentence.length >= 12) || cleaned;
+  const preferLast = options.preferLast === true;
+  const minLength = Number.isFinite(Number(options.minLength)) ? Number(options.minLength) : 12;
+  const limit = Number.isFinite(Number(options.limit)) ? Number(options.limit) : 120;
+  const candidatePool = preferLast ? [...sentences].reverse() : sentences;
+  const picked = candidatePool.find(sentence => sentence.length >= minLength) || cleaned;
   if (!picked) return '';
-  return picked.length > 120 ? `${picked.slice(0, 117).trim()}...` : picked;
+  return picked.length > limit ? `${picked.slice(0, limit - 3).trim()}...` : picked;
+}
+
+function buildFallbackSessionSummary(story, userText, aiText) {
+  const sessionLore = ensureSessionLoreStructure(story);
+  const previousSummary = (sessionLore.summary || '').trim();
+  const actionSummary = extractFallbackSessionSummary(userText, { minLength: 4, limit: 90 });
+  const currentSituation = extractFallbackSessionSummary(aiText, { minLength: 16, limit: 120 });
+  const latestBeat = extractFallbackSessionSummary(aiText, { preferLast: true, minLength: 16, limit: 120 });
+
+  const segments = [];
+  if (actionSummary) {
+    segments.push(`主人公の直近行動: ${actionSummary}`);
+  }
+  if (currentSituation) {
+    segments.push(`現在状況: ${currentSituation}`);
+  }
+  if (latestBeat && latestBeat !== currentSituation) {
+    segments.push(`直近展開: ${latestBeat}`);
+  }
+
+  if (segments.length === 0 && previousSummary) {
+    return previousSummary;
+  }
+
+  const summary = segments.join('。 ').replace(/。 。/g, '。 ');
+  return summary.length > 340 ? `${summary.slice(0, 337).trim()}...` : summary;
 }
 
 function applyFallbackSessionLoreUpdate(story, userText, aiText) {
-  if (!story.session_lore) {
-    story.session_lore = { summary: '', key_events: [] };
-  }
+  const sessionLore = ensureSessionLoreStructure(story);
 
-  const nextSummary = extractFallbackSessionSummary(aiText);
-  const nextEvents = [];
-  const trimmedUserText = (userText || '').trim();
+  const nextSummary = buildFallbackSessionSummary(story, userText, aiText);
+  const currentSituation = extractFallbackSessionSummary(aiText, { minLength: 16, limit: 120 });
+  const latestBeat = extractFallbackSessionSummary(aiText, { preferLast: true, minLength: 16, limit: 120 });
 
-  if (trimmedUserText) {
-    const userEvent = trimmedUserText.length > 90 ? `${trimmedUserText.slice(0, 87).trim()}...` : trimmedUserText;
-    nextEvents.push(`主人公行動: ${userEvent}`);
+  if ((sessionLore.summary_source || 'auto') !== 'manual' && nextSummary) {
+    sessionLore.summary = nextSummary;
+    sessionLore.summary_source = 'fallback';
   }
-  if (nextSummary) {
-    nextEvents.push(`直近展開: ${nextSummary}`);
+  if (currentSituation) {
+    sessionLore.current_state = currentSituation;
   }
-
-  if (nextEvents.length > 0) {
-    story.session_lore.key_events = Array.from(
-      new Set([...(story.session_lore.key_events || []), ...nextEvents])
-    ).slice(-20);
-  }
-
-  if ((story.session_lore.summary_source || 'auto') !== 'manual' && nextSummary) {
-    story.session_lore.summary = nextSummary;
-    story.session_lore.summary_source = 'auto';
+  if (latestBeat) {
+    const existing = Array.isArray(sessionLore.recent_turning_points) ? sessionLore.recent_turning_points : [];
+    sessionLore.recent_turning_points = Array.from(new Set([latestBeat, ...existing])).slice(0, 4);
   }
 }
 
