@@ -3074,7 +3074,8 @@ export async function generateStoryResponse(story) {
               description: '発生した重要な事件や獲得したフラグ、オリジナルアイテム。summary を支える箇条書きメモであり、summary の代わりにはしない。',
               items: { type: 'STRING' }
             }
-          }
+          },
+          required: ['summary']
         }
       }, {
         name: 'update_world_lore',

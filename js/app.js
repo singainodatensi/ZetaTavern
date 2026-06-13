@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260613l';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613l';
+import * as ui from './ui.js?v=20260613r';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613r';
 import * as dropbox from './dropbox.js?v=20260611d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -1837,11 +1837,23 @@ function cleanFallbackSummarySource(text) {
     .replace(/\*\*/g, '')
     .replace(/[`#>*_]/g, '')
     .split('\n')
-    .map(line => line.trim())
+    .map(line => {
+      const trimmed = line.trim();
+      if (!trimmed) return '';
+      if (/^(A|B|C)[\.\):：）．、]/.test(trimmed)) return '';
+      if (/^【[^】]+】$/.test(trimmed)) return '';
+
+      const speakerMatch = trimmed.match(/^([^\s「【\[]{1,24}(?:（[^）]+）)?)[\:：]\s*(.+)$/);
+      if (speakerMatch) {
+        const speaker = (speakerMatch[1] || '').trim();
+        const body = (speakerMatch[2] || '').replace(/^「|」$/g, '').trim();
+        if (!body) return '';
+        return `${speaker}: ${body}`;
+      }
+
+      return trimmed;
+    })
     .filter(Boolean)
-    .filter(line => !/^(A|B|C)[\.\):：）．、]/.test(line))
-    .filter(line => !/^【[^】]+】$/.test(line))
-    .filter(line => !/^[^\s「【\[]{1,24}(?:（[^）]+）)?[:：]/.test(line))
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -1861,11 +1873,13 @@ function extractFallbackSessionSummary(text, options = {}) {
 }
 
 function buildFallbackSessionSummary(story, userText, aiText) {
-  const sessionLore = ensureSessionLoreStructure(story);
+  const sessionLore = story?.session_lore && typeof story.session_lore === 'object'
+    ? story.session_lore
+    : createEmptySessionLore();
   const previousSummary = (sessionLore.summary || '').trim();
   const actionSummary = extractFallbackSessionSummary(userText, { minLength: 4, limit: 90 });
-  const currentSituation = extractFallbackSessionSummary(aiText, { minLength: 16, limit: 120 });
-  const latestBeat = extractFallbackSessionSummary(aiText, { preferLast: true, minLength: 16, limit: 120 });
+  const currentSituation = extractFallbackSessionSummary(aiText, { minLength: 8, limit: 120 });
+  const latestBeat = extractFallbackSessionSummary(aiText, { preferLast: true, minLength: 8, limit: 120 });
 
   const segments = [];
   if (actionSummary) {
@@ -1886,14 +1900,21 @@ function buildFallbackSessionSummary(story, userText, aiText) {
   return summary.length > 340 ? `${summary.slice(0, 337).trim()}...` : summary;
 }
 
-function applyFallbackSessionLoreUpdate(story, userText, aiText) {
+function applyFallbackSessionLoreUpdate(story, userText, aiText, options = {}) {
   const sessionLore = ensureSessionLoreStructure(story);
 
   const nextSummary = buildFallbackSessionSummary(story, userText, aiText);
-  const currentSituation = extractFallbackSessionSummary(aiText, { minLength: 16, limit: 120 });
-  const latestBeat = extractFallbackSessionSummary(aiText, { preferLast: true, minLength: 16, limit: 120 });
+  const currentSituation = extractFallbackSessionSummary(aiText, { minLength: 8, limit: 120 })
+    || extractFallbackSessionSummary(userText, { minLength: 4, limit: 90 });
+  const latestBeat = extractFallbackSessionSummary(aiText, { preferLast: true, minLength: 8, limit: 120 })
+    || extractFallbackSessionSummary(userText, { minLength: 4, limit: 90 });
+  const rawUserText = String(userText || '').trim();
+  const rawAiText = String(aiText || '').trim();
+  const preserveAiSummary = options.preserveAiSummary === true &&
+    sessionLore.summary_source === 'ai' &&
+    String(sessionLore.summary || '').trim();
 
-  if ((sessionLore.summary_source || 'auto') !== 'manual' && nextSummary) {
+  if (!preserveAiSummary && (sessionLore.summary_source || 'auto') !== 'manual' && nextSummary) {
     sessionLore.summary = nextSummary;
     sessionLore.summary_source = 'fallback';
   }
@@ -1903,6 +1924,49 @@ function applyFallbackSessionLoreUpdate(story, userText, aiText) {
   if (latestBeat) {
     const existing = Array.isArray(sessionLore.recent_turning_points) ? sessionLore.recent_turning_points : [];
     sessionLore.recent_turning_points = Array.from(new Set([latestBeat, ...existing])).slice(0, 4);
+  }
+
+  const nextEvents = [];
+  const trimmedUserText = rawUserText;
+
+  if (trimmedUserText) {
+    const userEvent = trimmedUserText.length > 90 ? `${trimmedUserText.slice(0, 87).trim()}...` : trimmedUserText;
+    nextEvents.push(`主人公行動: ${userEvent}`);
+  }
+  if (latestBeat) {
+    nextEvents.push(`直近展開: ${latestBeat}`);
+  } else if (rawAiText) {
+    const aiEvent = rawAiText.length > 90 ? `${rawAiText.slice(0, 87).trim()}...` : rawAiText;
+    nextEvents.push(`直近展開: ${aiEvent}`);
+  }
+
+  if (nextEvents.length > 0) {
+    sessionLore.key_events = Array.from(
+      new Set([...(sessionLore.key_events || []), ...nextEvents])
+    ).slice(-20);
+  }
+
+  if (!sessionLore.current_state && rawAiText) {
+    sessionLore.current_state = rawAiText.length > 140 ? `${rawAiText.slice(0, 137).trim()}...` : rawAiText;
+  }
+  if (!sessionLore.summary && rawAiText) {
+    const fallbackSegments = [];
+    if (trimmedUserText) fallbackSegments.push(`主人公の直近行動: ${trimmedUserText}`);
+    fallbackSegments.push(`現在状況: ${sessionLore.current_state}`);
+    sessionLore.summary = fallbackSegments.join('。 ').trim();
+    sessionLore.summary_source = 'fallback';
+  }
+
+  if (getState().promptDebugEnabled) {
+    console.log('[Session Lore Debug][extract]', JSON.stringify({
+      storyId: story?.storyId || '',
+      rawUserText,
+      rawAiTextPreview: rawAiText.slice(0, 220),
+      nextSummary,
+      currentSituation,
+      latestBeat,
+      nextEvents
+    }));
   }
 }
 
@@ -1970,8 +2034,15 @@ async function submitStoryTurn(mode = 'normal') {
     }
 
     const afterLoreSignature = getSessionLoreSignature(currentStory);
-    if (beforeLoreSignature === afterLoreSignature) {
-      applyFallbackSessionLoreUpdate(currentStory, userText, aiResponse.text);
+    applyFallbackSessionLoreUpdate(currentStory, userText, aiResponse.text, {
+      preserveAiSummary: beforeLoreSignature !== afterLoreSignature
+    });
+    if (getState().promptDebugEnabled) {
+      console.log('[Session Lore Debug][after-fallback]', JSON.stringify({
+        storyId: currentStory.storyId,
+        session_lore: currentStory.session_lore,
+        relationshipMemory: currentStory.relationshipMemory
+      }));
     }
 
     currentStory.messages.push({
@@ -1991,12 +2062,23 @@ async function submitStoryTurn(mode = 'normal') {
     
     // Auto sync story lists count
     const stories = await db.getStories();
+    const refreshedStory = stories.find(story => story.storyId === currentStory.storyId) || currentStory;
+    if (getState().promptDebugEnabled) {
+      console.log('[Session Lore Debug][after-reload]', JSON.stringify({
+        storyId: refreshedStory.storyId,
+        session_lore: refreshedStory.session_lore,
+        relationshipMemory: refreshedStory.relationshipMemory
+      }));
+    }
     updateState({ stories, isGenerating: false });
+    setActiveStory(refreshedStory);
     ui.renderStory();
     ui.renderStoryList();
+    ui.renderSidebar();
+    await ui.renderLorebook();
 
     // Auto-sync to Dropbox in the background.
-    queueDropboxAutoSync({ storyId: currentStory.storyId });
+    queueDropboxAutoSync({ storyId: refreshedStory.storyId });
 
   } catch (err) {
     // ユーザーによる意図的なキャンセル（手動停止）の場合
