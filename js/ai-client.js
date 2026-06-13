@@ -2099,9 +2099,53 @@ JSONのみを返してください:
 `.trim();
 }
 
+function shouldUseExternalProviderPlanning(provider, tavilyApiKey = '') {
+  const normalizedProvider = normalizeWebSearchProvider(provider);
+  if (normalizedProvider === 'tavily') return true;
+  if (normalizedProvider === 'duckduckgo') return true;
+  if (normalizedProvider === 'auto' && String(tavilyApiKey || '').trim()) return true;
+  return false;
+}
+
+function buildExternalProviderSearchPlan(story, selectedMessages = []) {
+  const latestUserMessage = [...selectedMessages].reverse().find(message => message?.role === 'user');
+  const latestText = String(latestUserMessage?.content || '').trim();
+  if (!latestText) return null;
+
+  const franchise = String(story?.franchise || '').trim();
+  const franchiseContext = String(story?.franchiseContext || '').trim();
+  const searchContext = franchiseContext || franchise;
+  if (!searchContext) return null;
+
+  const candidateTerms = extractReferenceCandidatesFromText(latestText).filter(Boolean);
+  const searchHintPattern = /(教えて|とは|って|誰|どこ|何|なに|どういう|詳細|説明|調べ|検索|依頼|護衛|討伐|商会|騎士団|屋敷|学園|学校|王都|王選|陣営|魔女教|精霊|加護|白鯨|ギルド)/;
+  const shouldSearch = candidateTerms.length > 0 || searchHintPattern.test(latestText);
+  if (!shouldSearch) return null;
+
+  const topicKey = normalizeLoreEntryName(candidateTerms[0] || latestText).slice(0, 60);
+  const queryHead = candidateTerms.slice(0, 2).join(' ');
+  const query = [queryHead || latestText, searchContext].filter(Boolean).join(' ').trim();
+  if (!query) return null;
+
+  const isQuestion = /(教えて|とは|って|誰|どこ|何|なに|どういう|詳細|説明|調べ|検索)/.test(latestText);
+  return {
+    topicKey: topicKey || latestText.slice(0, 40),
+    query,
+    purpose: isQuestion
+      ? 'ユーザーが話題にした固有要素の事実確認'
+      : '次の場面で作品固有の制度・人物・拠点を自然に出すための確認',
+    sceneGoal: isQuestion
+      ? '会話中の質問に世界観準拠で答える'
+      : '次の展開を作品固有の要素で肉付けする',
+    reason: '外部検索プロバイダ利用時のローカル検索計画',
+    franchise: searchContext
+  };
+}
+
 async function planProactiveStorySearch(story, selectedMessages = [], usageAccumulator = null) {
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
+  const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
   const provider = normalizeWebSearchProvider(appState.webSearchProvider);
   if (!apiKey || provider === 'off') return null;
 
@@ -2114,6 +2158,10 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
 
   const latestUserMessage = [...selectedMessages].reverse().find(message => message?.role === 'user');
   if (!latestUserMessage?.content) return null;
+
+  if (shouldUseExternalProviderPlanning(provider, tavilyApiKey)) {
+    return buildExternalProviderSearchPlan(story, selectedMessages);
+  }
 
   const modelName = resolveSearchModelName(appState);
   const prompt = buildSearchPlanningPrompt(story, selectedMessages);
