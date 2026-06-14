@@ -1326,8 +1326,10 @@ function createEmptySessionLore() {
     summary: '',
     summary_source: '',
     current_state: '',
-    open_threads: [],
     recent_turning_points: [],
+    long_term_events: [],
+    active_flags: [],
+    open_threads: [],
     key_events: []
   };
 }
@@ -1340,9 +1342,23 @@ function ensureSessionLoreStructure(story) {
   story.session_lore = {
     ...createEmptySessionLore(),
     ...sessionLore,
-    open_threads: normalizeSessionLoreList(sessionLore.open_threads || [], 10),
     recent_turning_points: normalizeSessionLoreList(sessionLore.recent_turning_points || [], 8),
-    key_events: normalizeSessionLoreList(sessionLore.key_events || [], 20)
+    long_term_events: normalizeSessionLoreList(
+      sessionLore.long_term_events || sessionLore.key_events || [],
+      20
+    ),
+    active_flags: normalizeSessionLoreList(
+      sessionLore.active_flags || sessionLore.open_threads || [],
+      10
+    ),
+    open_threads: normalizeSessionLoreList(
+      sessionLore.active_flags || sessionLore.open_threads || [],
+      10
+    ),
+    key_events: normalizeSessionLoreList(
+      sessionLore.long_term_events || sessionLore.key_events || [],
+      20
+    )
   };
   return story.session_lore;
 }
@@ -1356,14 +1372,18 @@ async function applySessionLoreUpdate(args, story) {
   if (args.current_state) {
     sessionLore.current_state = String(args.current_state || '').trim();
   }
-  if (args.open_threads) {
-    sessionLore.open_threads = normalizeSessionLoreList(args.open_threads, 10);
+  if (args.active_flags || args.open_threads) {
+    const nextFlags = args.active_flags || args.open_threads || [];
+    sessionLore.active_flags = normalizeSessionLoreList(nextFlags, 10);
+    sessionLore.open_threads = [...sessionLore.active_flags];
   }
   if (args.recent_turning_points) {
     sessionLore.recent_turning_points = normalizeSessionLoreList(args.recent_turning_points, 8);
   }
-  if (args.key_events) {
-    sessionLore.key_events = mergeSessionLoreEvents(sessionLore.key_events || [], args.key_events).slice(-20);
+  if (args.long_term_events || args.key_events) {
+    const nextEvents = args.long_term_events || args.key_events || [];
+    sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], nextEvents).slice(-20);
+    sessionLore.key_events = [...sessionLore.long_term_events];
   }
   if (args.affinity_updates) {
     if (!story.relationshipMemory) story.relationshipMemory = {};
@@ -1405,7 +1425,8 @@ async function applyWorldLoreUpdate(args, story) {
       if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
         const sessionLore = ensureSessionLoreStructure(story);
         const sessionNote = buildSessionLoreNote(entry, name, summary);
-        sessionLore.key_events = mergeSessionLoreEvents(sessionLore.key_events || [], [sessionNote]).slice(-20);
+        sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], [sessionNote]).slice(-20);
+        sessionLore.key_events = [...sessionLore.long_term_events];
         reroutedCount++;
       }
       continue;
@@ -1414,7 +1435,8 @@ async function applyWorldLoreUpdate(args, story) {
     if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
       const sessionLore = ensureSessionLoreStructure(story);
       const sessionNote = buildSessionLoreNote(entry, name, summary);
-      sessionLore.key_events = mergeSessionLoreEvents(sessionLore.key_events || [], [sessionNote]).slice(-20);
+      sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], [sessionNote]).slice(-20);
+      sessionLore.key_events = [...sessionLore.long_term_events];
       reroutedCount++;
       continue;
     }
@@ -1705,21 +1727,21 @@ export async function buildSystemInstruction(story, options = {}) {
     if (sessionLore.current_state) {
       instruction += `・現在の場面: ${sessionLore.current_state}\n`;
     }
-    if (sessionLore.open_threads && sessionLore.open_threads.length > 0) {
-      instruction += `・未解決の懸案:\n`;
-      sessionLore.open_threads.forEach(item => {
+    if (sessionLore.active_flags && sessionLore.active_flags.length > 0) {
+      instruction += `・未回収フラグ・伏線:\n`;
+      sessionLore.active_flags.forEach(item => {
         instruction += `  - ${item}\n`;
       });
     }
     if (sessionLore.recent_turning_points && sessionLore.recent_turning_points.length > 0) {
-      instruction += `・最近の転換点:\n`;
+      instruction += `・最近の出来事:\n`;
       sessionLore.recent_turning_points.forEach(item => {
         instruction += `  - ${item}\n`;
       });
     }
-    if (sessionLore.key_events && sessionLore.key_events.length > 0) {
-      instruction += `・主要イベント・獲得フラグ:\n`;
-      sessionLore.key_events.forEach(ev => {
+    if (sessionLore.long_term_events && sessionLore.long_term_events.length > 0) {
+      instruction += `・長期記憶イベント:\n`;
+      sessionLore.long_term_events.forEach(ev => {
         instruction += `  - ${ev}\n`;
       });
     }
@@ -1746,7 +1768,10 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- 逆に、作品全体で共有される安定設定をセッションロアの要点として消費しないこと。\n\n`;
   instruction += `- 大きな出来事、関係性の変化、新規オリジナル人物の登場があったターンでは、本文を書く前に update_session_lore を優先して呼ぶこと。\n`;
   instruction += `- update_session_lore.summary は、履歴圧縮後でも単独で状況が通じる正式な進行要約として扱うこと。主人公が今どこで何をしているか、誰とどんな状態か、未解決の懸案は何かまで分かるように更新すること。\n`;
-  instruction += `- update_session_lore.key_events は補助メモであり、summary の代わりにはしない。summary だけでも大筋を復元できるようにすること。\n`;
+  instruction += `- update_session_lore.recent_turning_points は短期ログであり、直近のやり取りや移動、戦闘、会話進行を記録すること。\n`;
+  instruction += `- update_session_lore.long_term_events は長期記憶であり、誰とどう出会ったか、どの陣営に関わることになったか、重要な宣言、関係の転換点など、後の物語理解に不可欠な出来事だけを残すこと。\n`;
+  instruction += `- update_session_lore.active_flags は未回収の目標、伏線、約束、向かうべき場所、保留案件だけを入れ、解決済みのものは削除すること。\n`;
+  instruction += `- モブとの一時会話や、その場限りの軽い注意喚起は long_term_events に入れないこと。ネームド人物との初接触、救助、契約、所属変化は優先して残すこと。\n`;
   instruction += `- update_world_lore は安定設定だけに使い、セッション情報の代用にしないこと。\n`;
   instruction += `- update_world_lore は「確定登録」ではなく「ワールドロア候補の提案」として扱われる。安定設定だと強く判断できるものだけを提案すること。\n\n`;
   instruction += `【検索と展開設計のルール】\n`;
@@ -3046,14 +3071,14 @@ export async function generateStoryResponse(story) {
               type: 'STRING',
               description: '現在の場面を1〜2文で要約。主人公が今どこで、誰と、何をしている最中かを簡潔に書く。'
             },
-            open_threads: {
+            active_flags: {
               type: 'ARRAY',
-              description: '未解決の懸案、保留中の約束、今後回収すべき火種の一覧。解決済みの話題は含めない。',
+              description: '未解決の懸案、保留中の約束、今後回収すべき伏線や目標の一覧。回収済みのものは含めない。',
               items: { type: 'STRING' }
             },
             recent_turning_points: {
               type: 'ARRAY',
-              description: '最近起きた転換点や状況変化の一覧。直近数件に絞る。',
+              description: '最近起きた出来事や状況変化の一覧。短期ログとして扱い、直近数件に絞る。',
               items: { type: 'STRING' }
             },
             affinity_updates: {
@@ -3069,9 +3094,9 @@ export async function generateStoryResponse(story) {
                 required: ['characterName', 'affinity']
               }
             },
-            key_events: {
+            long_term_events: {
               type: 'ARRAY',
-              description: '発生した重要な事件や獲得したフラグ、オリジナルアイテム。summary を支える箇条書きメモであり、summary の代わりにはしない。',
+              description: '長期記憶すべき重要イベントの一覧。誰とどう出会ったか、陣営参加、救助、重要宣言、関係の転換点など、後の物語の前提になるものだけを記録する。',
               items: { type: 'STRING' }
             }
           },

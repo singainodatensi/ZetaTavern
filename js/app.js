@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260613r';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260613r';
+import * as ui from './ui.js?v=20260614a';
+import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260614a';
 import * as dropbox from './dropbox.js?v=20260611d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
@@ -30,8 +30,10 @@ function createEmptySessionLore() {
     summary: '',
     summary_source: '',
     current_state: '',
-    open_threads: [],
     recent_turning_points: [],
+    long_term_events: [],
+    active_flags: [],
+    open_threads: [],
     key_events: []
   };
 }
@@ -44,9 +46,19 @@ function ensureSessionLoreStructure(story) {
   story.session_lore = {
     ...createEmptySessionLore(),
     ...sessionLore,
-    open_threads: Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : [],
     recent_turning_points: Array.isArray(sessionLore.recent_turning_points) ? sessionLore.recent_turning_points : [],
-    key_events: Array.isArray(sessionLore.key_events) ? sessionLore.key_events : []
+    long_term_events: Array.isArray(sessionLore.long_term_events)
+      ? sessionLore.long_term_events
+      : (Array.isArray(sessionLore.key_events) ? sessionLore.key_events : []),
+    active_flags: Array.isArray(sessionLore.active_flags)
+      ? sessionLore.active_flags
+      : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []),
+    open_threads: Array.isArray(sessionLore.active_flags)
+      ? sessionLore.active_flags
+      : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []),
+    key_events: Array.isArray(sessionLore.long_term_events)
+      ? sessionLore.long_term_events
+      : (Array.isArray(sessionLore.key_events) ? sessionLore.key_events : [])
   };
   return story.session_lore;
 }
@@ -1921,11 +1933,6 @@ function applyFallbackSessionLoreUpdate(story, userText, aiText, options = {}) {
   if (currentSituation) {
     sessionLore.current_state = currentSituation;
   }
-  if (latestBeat) {
-    const existing = Array.isArray(sessionLore.recent_turning_points) ? sessionLore.recent_turning_points : [];
-    sessionLore.recent_turning_points = Array.from(new Set([latestBeat, ...existing])).slice(0, 4);
-  }
-
   const nextEvents = [];
   const trimmedUserText = rawUserText;
 
@@ -1941,9 +1948,9 @@ function applyFallbackSessionLoreUpdate(story, userText, aiText, options = {}) {
   }
 
   if (nextEvents.length > 0) {
-    sessionLore.key_events = Array.from(
-      new Set([...(sessionLore.key_events || []), ...nextEvents])
-    ).slice(-20);
+    sessionLore.recent_turning_points = Array.from(
+      new Set([...(sessionLore.recent_turning_points || []), ...nextEvents])
+    ).slice(-8);
   }
 
   if (!sessionLore.current_state && rawAiText) {

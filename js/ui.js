@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260613r';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260614a';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -3419,11 +3419,19 @@ async function _renderSessionLore(container, renderVersion = 0) {
     summary: '',
     summary_source: '',
     current_state: '',
-    open_threads: [],
     recent_turning_points: [],
+    long_term_events: [],
+    active_flags: [],
+    open_threads: [],
     key_events: [],
     ...(activeStory.session_lore || {})
   };
+  sessionLore.long_term_events = Array.isArray(sessionLore.long_term_events)
+    ? sessionLore.long_term_events
+    : (Array.isArray(sessionLore.key_events) ? sessionLore.key_events : []);
+  sessionLore.active_flags = Array.isArray(sessionLore.active_flags)
+    ? sessionLore.active_flags
+    : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []);
   const relationshipMemory = activeStory.relationshipMemory || {};
 
   // キャラクター名を取得するためにDBを参照
@@ -3476,18 +3484,18 @@ async function _renderSessionLore(container, renderVersion = 0) {
       </div>
     </div>`;
 
-  const openThreads = Array.isArray(sessionLore.open_threads)
-    ? sessionLore.open_threads.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
+  const activeFlags = Array.isArray(sessionLore.active_flags)
+    ? sessionLore.active_flags.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
     : [];
   html += `
     <div class="session-lore-block">
       <div class="session-lore-block-header">
         <span class="material-symbols-outlined">priority_high</span>
-        <h4>未解決の懸案 (${openThreads.length}件)</h4>
+        <h4>未回収フラグ・伏線 (${activeFlags.length}件)</h4>
       </div>
       <div class="session-lore-block-body">`;
-  if (openThreads.length > 0) {
-    html += `<ul class="session-event-list">${openThreads.map((e, index) => `
+  if (activeFlags.length > 0) {
+    html += `<ul class="session-event-list">${activeFlags.map((e, index) => `
       <li>
         <span class="session-event-text">${escapeHTML(e)}</span>
         <button class="session-open-thread-delete-btn" type="button" data-index="${index}" title="懸案を削除">
@@ -3496,11 +3504,11 @@ async function _renderSessionLore(container, renderVersion = 0) {
       </li>
     `).join('')}</ul>`;
   } else {
-    html += `<p style="opacity:0.5;">現在、明示的な懸案はありません。</p>`;
+    html += `<p style="opacity:0.5;">現在、未回収のフラグや伏線はありません。</p>`;
   }
   html += `
         <div class="session-lore-add-row">
-          <input id="session-lore-new-open-thread-input" class="session-lore-input" type="text" placeholder="例: ロズワールの真意が不明">
+          <input id="session-lore-new-open-thread-input" class="session-lore-input" type="text" placeholder="例: 王都へ向かう / 試練のため聖域へ向かう">
           <button id="session-lore-add-open-thread-btn" class="sidebar-session-link-btn" type="button">
             <span class="material-symbols-outlined">add</span>
             <span>追加</span>
@@ -3516,7 +3524,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     <div class="session-lore-block">
       <div class="session-lore-block-header">
         <span class="material-symbols-outlined">fork_right</span>
-        <h4>最近の転換点 (${turningPoints.length}件)</h4>
+        <h4>最近の出来事 (${turningPoints.length}件)</h4>
       </div>
       <div class="session-lore-block-body">`;
   if (turningPoints.length > 0) {
@@ -3529,11 +3537,11 @@ async function _renderSessionLore(container, renderVersion = 0) {
       </li>
     `).join('')}</ul>`;
   } else {
-    html += `<p style="opacity:0.5;">まだ転換点は記録されていません。</p>`;
+    html += `<p style="opacity:0.5;">まだ最近の出来事は記録されていません。</p>`;
   }
   html += `
         <div class="session-lore-add-row">
-          <input id="session-lore-new-turning-point-input" class="session-lore-input" type="text" placeholder="例: エミリア陣営と合流した">
+          <input id="session-lore-new-turning-point-input" class="session-lore-input" type="text" placeholder="例: 村へ移動中 / ダンス練習を見学した">
           <button id="session-lore-add-turning-point-btn" class="sidebar-session-link-btn" type="button">
             <span class="material-symbols-outlined">add</span>
             <span>追加</span>
@@ -3542,19 +3550,19 @@ async function _renderSessionLore(container, renderVersion = 0) {
       </div>
     </div>`;
 
-  // 重要イベント
-  const keyEvents = Array.isArray(sessionLore.key_events)
-    ? sessionLore.key_events.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
+  // 長期記憶イベント
+  const longTermEvents = Array.isArray(sessionLore.long_term_events)
+    ? sessionLore.long_term_events.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
     : [];
   html += `
     <div class="session-lore-block">
       <div class="session-lore-block-header">
         <span class="material-symbols-outlined">event_note</span>
-        <h4>重要フラグ・出来事 (${keyEvents.length}件)</h4>
+        <h4>長期記憶イベント (${longTermEvents.length}件)</h4>
       </div>
       <div class="session-lore-block-body">`;
-  if (keyEvents.length > 0) {
-    html += `<ul class="session-event-list">${keyEvents.map((e, index) => `
+  if (longTermEvents.length > 0) {
+    html += `<ul class="session-event-list">${longTermEvents.map((e, index) => `
       <li>
         <span class="session-event-text">${escapeHTML(e)}</span>
         <button class="session-event-delete-btn" type="button" data-index="${index}" title="イベントを削除">
@@ -3563,11 +3571,11 @@ async function _renderSessionLore(container, renderVersion = 0) {
       </li>
     `).join('')}</ul>`;
   } else {
-    html += `<p style="opacity:0.5;">まだ記録された出来事はありません。</p>`;
+    html += `<p style="opacity:0.5;">まだ長期記憶イベントは記録されていません。</p>`;
   }
   html += `
         <div class="session-lore-add-row">
-          <input id="session-lore-new-event-input" class="session-lore-input" type="text" placeholder="重要イベントや獲得フラグを追加">
+          <input id="session-lore-new-event-input" class="session-lore-input" type="text" placeholder="例: オットーを野盗から救出し、同行することになった">
           <button id="session-lore-add-event-btn" class="sidebar-session-link-btn" type="button">
             <span class="material-symbols-outlined">add</span>
             <span>追加</span>
@@ -3619,11 +3627,38 @@ async function _renderSessionLore(container, renderVersion = 0) {
     requestDropboxAutoSync(activeStory.storyId);
   };
 
+  const ensureEditableSessionLore = () => {
+    if (!activeStory.session_lore) {
+      activeStory.session_lore = {
+        summary: '',
+        current_state: '',
+        recent_turning_points: [],
+        long_term_events: [],
+        active_flags: [],
+        open_threads: [],
+        key_events: []
+      };
+    }
+    if (!Array.isArray(activeStory.session_lore.recent_turning_points)) activeStory.session_lore.recent_turning_points = [];
+    if (!Array.isArray(activeStory.session_lore.long_term_events)) {
+      activeStory.session_lore.long_term_events = Array.isArray(activeStory.session_lore.key_events)
+        ? [...activeStory.session_lore.key_events]
+        : [];
+    }
+    if (!Array.isArray(activeStory.session_lore.active_flags)) {
+      activeStory.session_lore.active_flags = Array.isArray(activeStory.session_lore.open_threads)
+        ? [...activeStory.session_lore.open_threads]
+        : [];
+    }
+    activeStory.session_lore.key_events = [...activeStory.session_lore.long_term_events];
+    activeStory.session_lore.open_threads = [...activeStory.session_lore.active_flags];
+  };
+
   const summaryInput = container.querySelector('#session-lore-editor-summary');
   const saveSummaryBtn = container.querySelector('#session-lore-save-summary-btn');
   if (saveSummaryBtn && summaryInput) {
     saveSummaryBtn.onclick = async () => {
-      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
+      ensureEditableSessionLore();
       activeStory.session_lore.summary = summaryInput.value.trim();
       activeStory.session_lore.summary_source = 'manual';
       await persistSessionLoreChanges();
@@ -3635,7 +3670,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
   const saveCurrentStateBtn = container.querySelector('#session-lore-save-current-state-btn');
   if (saveCurrentStateBtn && currentStateInput) {
     saveCurrentStateBtn.onclick = async () => {
-      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
+      ensureEditableSessionLore();
       activeStory.session_lore.current_state = currentStateInput.value.trim();
       await persistSessionLoreChanges();
       await renderLorebook('session');
@@ -3648,9 +3683,10 @@ async function _renderSessionLore(container, renderVersion = 0) {
     addEventBtn.onclick = async () => {
       const value = newEventInput.value.trim();
       if (!value) return;
-      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
-      const existingEvents = Array.isArray(activeStory.session_lore.key_events) ? activeStory.session_lore.key_events : [];
-      activeStory.session_lore.key_events = Array.from(new Set([...existingEvents, value]));
+      ensureEditableSessionLore();
+      const existingEvents = Array.isArray(activeStory.session_lore.long_term_events) ? activeStory.session_lore.long_term_events : [];
+      activeStory.session_lore.long_term_events = Array.from(new Set([...existingEvents, value]));
+      activeStory.session_lore.key_events = [...activeStory.session_lore.long_term_events];
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };
@@ -3662,9 +3698,10 @@ async function _renderSessionLore(container, renderVersion = 0) {
     addOpenThreadBtn.onclick = async () => {
       const value = newOpenThreadInput.value.trim();
       if (!value) return;
-      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
-      const existingItems = Array.isArray(activeStory.session_lore.open_threads) ? activeStory.session_lore.open_threads : [];
-      activeStory.session_lore.open_threads = Array.from(new Set([...existingItems, value])).slice(0, 10);
+      ensureEditableSessionLore();
+      const existingItems = Array.isArray(activeStory.session_lore.active_flags) ? activeStory.session_lore.active_flags : [];
+      activeStory.session_lore.active_flags = Array.from(new Set([...existingItems, value])).slice(0, 10);
+      activeStory.session_lore.open_threads = [...activeStory.session_lore.active_flags];
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };
@@ -3676,7 +3713,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     addTurningPointBtn.onclick = async () => {
       const value = newTurningPointInput.value.trim();
       if (!value) return;
-      if (!activeStory.session_lore) activeStory.session_lore = { summary: '', current_state: '', open_threads: [], recent_turning_points: [], key_events: [] };
+      ensureEditableSessionLore();
       const existingItems = Array.isArray(activeStory.session_lore.recent_turning_points) ? activeStory.session_lore.recent_turning_points : [];
       activeStory.session_lore.recent_turning_points = Array.from(new Set([value, ...existingItems])).slice(0, 8);
       await persistSessionLoreChanges();
@@ -3688,8 +3725,10 @@ async function _renderSessionLore(container, renderVersion = 0) {
     button.onclick = async () => {
       const index = Number(button.dataset.index);
       if (!Number.isInteger(index) || index < 0) return;
-      if (!activeStory.session_lore || !Array.isArray(activeStory.session_lore.key_events)) return;
-      activeStory.session_lore.key_events.splice(index, 1);
+      ensureEditableSessionLore();
+      if (!Array.isArray(activeStory.session_lore.long_term_events)) return;
+      activeStory.session_lore.long_term_events.splice(index, 1);
+      activeStory.session_lore.key_events = [...activeStory.session_lore.long_term_events];
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };
@@ -3699,8 +3738,10 @@ async function _renderSessionLore(container, renderVersion = 0) {
     button.onclick = async () => {
       const index = Number(button.dataset.index);
       if (!Number.isInteger(index) || index < 0) return;
-      if (!activeStory.session_lore || !Array.isArray(activeStory.session_lore.open_threads)) return;
-      activeStory.session_lore.open_threads.splice(index, 1);
+      ensureEditableSessionLore();
+      if (!Array.isArray(activeStory.session_lore.active_flags)) return;
+      activeStory.session_lore.active_flags.splice(index, 1);
+      activeStory.session_lore.open_threads = [...activeStory.session_lore.active_flags];
       await persistSessionLoreChanges();
       await renderLorebook('session');
     };
