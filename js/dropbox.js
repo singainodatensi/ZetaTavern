@@ -43,6 +43,7 @@ const V2_ROOT         = '/ZetaTavern/v2';
 const V2_MANIFEST     = `${V2_ROOT}/manifest.json`;
 const V2_SETTINGS     = `${V2_ROOT}/settings.json`;
 const V2_LORES        = `${V2_ROOT}/world_lore.json`;
+const V2_LORE_DIR     = `${V2_ROOT}/lores`;
 const V2_CHAR_DIR     = `${V2_ROOT}/characters`;
 const V2_STORY_DIR    = `${V2_ROOT}/stories`;
 const MESSAGE_CHUNK_SIZE = 100;
@@ -470,6 +471,41 @@ function buildCharacterFileName(character) {
   return `${character.characterId}__${name}.json`;
 }
 
+function getLoreFranchiseLabel(value) {
+  const text = String(value || '').trim();
+  return text || '共通';
+}
+
+function hashTextForRemoteName(value = '') {
+  let hash = 5381;
+  const source = String(value || '');
+  for (let i = 0; i < source.length; i++) {
+    hash = ((hash << 5) + hash) ^ source.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function buildLoreFranchiseKey(franchise) {
+  const label = getLoreFranchiseLabel(franchise);
+  const safeLabel = sanitizeRemoteNamePart(label, 'common');
+  return `${safeLabel}__${hashTextForRemoteName(label)}`;
+}
+
+function buildLoreFileName(franchise) {
+  const label = getLoreFranchiseLabel(franchise);
+  return `${buildLoreFranchiseKey(label)}.json`;
+}
+
+function groupLoresByFranchise(lores = []) {
+  const grouped = new Map();
+  for (const lore of Array.isArray(lores) ? lores : []) {
+    const franchise = getLoreFranchiseLabel(lore?.franchise);
+    if (!grouped.has(franchise)) grouped.set(franchise, []);
+    grouped.get(franchise).push(lore);
+  }
+  return grouped;
+}
+
 function getMimeExtension(mimeType = '') {
   const normalized = String(mimeType || '').toLowerCase();
   if (normalized.includes('png')) return '.png';
@@ -583,11 +619,13 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   if (!existingManifest) {
     await ensureFolderExists('/ZetaTavern');
     await ensureFolderExists(V2_ROOT);
+    await ensureFolderExists(V2_LORE_DIR);
     await ensureFolderExists(V2_CHAR_DIR);
     await ensureFolderExists(V2_STORY_DIR);
   } else {
     ensuredFolderPaths.add('/ZetaTavern');
     ensuredFolderPaths.add(V2_ROOT);
+    ensuredFolderPaths.add(V2_LORE_DIR);
     ensuredFolderPaths.add(V2_CHAR_DIR);
     ensuredFolderPaths.add(V2_STORY_DIR);
   }
@@ -596,17 +634,28 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   await uploadJson(V2_SETTINGS, { settings, updatedAt: now });
 
   const manifest = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     updatedAt: now,
     settingsPath: V2_SETTINGS,
-    loresPath: V2_LORES,
     assets: assetEntries,
+    loreFiles: {},
     characters: {},
     stories: {}
   };
 
-  progress(`ロア ${lores.length} 件を同期中...`);
-  await uploadJson(V2_LORES, { lores, updatedAt: now });
+  const loreGroups = groupLoresByFranchise(lores);
+  progress(`ロア ${lores.length} 件を作品別同期中...`);
+  for (const [franchise, items] of loreGroups.entries()) {
+    const previousEntry = existingManifest?.loreFiles?.[buildLoreFranchiseKey(franchise)];
+    const path = previousEntry?.path || `${V2_LORE_DIR}/${buildLoreFileName(franchise)}`;
+    await uploadJson(path, { franchise, lores: items, updatedAt: now });
+    manifest.loreFiles[buildLoreFranchiseKey(franchise)] = {
+      path,
+      franchise,
+      count: items.length,
+      updatedAt: now
+    };
+  }
 
   progress(`キャラクター ${characters.length} 件を同期中...`);
   for (const character of characters) {
@@ -720,8 +769,21 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
   progress('同期目次を取得しました。差分を復元中...');
   const settingsPayload = await downloadJson(manifest.settingsPath || V2_SETTINGS);
   const settings = settingsPayload?.settings || {};
-  const lorePayload = await downloadJson(manifest.loresPath || V2_LORES);
-  const lores = Array.isArray(lorePayload?.lores) ? lorePayload.lores : [];
+  let lores = [];
+  const loreFiles = manifest.loreFiles && typeof manifest.loreFiles === 'object'
+    ? Object.values(manifest.loreFiles)
+    : [];
+  if (loreFiles.length > 0) {
+    for (const entry of loreFiles) {
+      const lorePayload = await downloadJson(entry?.path);
+      if (Array.isArray(lorePayload?.lores)) {
+        lores.push(...lorePayload.lores);
+      }
+    }
+  } else {
+    const lorePayload = await downloadJson(manifest.loresPath || V2_LORES);
+    lores = Array.isArray(lorePayload?.lores) ? lorePayload.lores : [];
+  }
 
   const characters = [];
   for (const entry of Object.values(manifest.characters || {})) {
@@ -1172,7 +1234,7 @@ export async function pushCharacterDeltaToDropbox({ characters, assets = [], onP
   }
 }
 
-export async function pushLoreDeltaToDropbox({ lores, onProgress }) {
+export async function pushLoreDeltaToDropbox({ lores, franchises = [], onProgress }) {
   const progress = msg => { console.log('[Dropbox Lore Delta]', msg); if (onProgress) onProgress(msg); };
 
   progress('ロアブック差分同期を開始します...');
@@ -1191,10 +1253,53 @@ export async function pushLoreDeltaToDropbox({ lores, onProgress }) {
     const now = Date.now();
     ensuredFolderPaths.add('/ZetaTavern');
     ensuredFolderPaths.add(V2_ROOT);
+    ensuredFolderPaths.add(V2_LORE_DIR);
 
-    progress('ロアブックを差分アップロード中...');
-    await uploadJson(manifest.loresPath || V2_LORES, { lores: Array.isArray(lores) ? lores : [], updatedAt: now });
-    manifest.loresPath = manifest.loresPath || V2_LORES;
+    const allLores = Array.isArray(lores) ? lores : [];
+    const hasSplitLoreFiles = manifest.loreFiles && typeof manifest.loreFiles === 'object' && Object.keys(manifest.loreFiles).length > 0;
+    const normalizedTargets = [...new Set(
+      (Array.isArray(franchises) ? franchises : [])
+        .map(getLoreFranchiseLabel)
+        .filter(Boolean)
+    )];
+
+    if (!hasSplitLoreFiles) {
+      progress('旧式ロア同期から作品別ファイルへ移行中...');
+      await ensureFolderExists(V2_LORE_DIR);
+      manifest.loreFiles = {};
+      for (const [franchise, items] of groupLoresByFranchise(allLores).entries()) {
+        const key = buildLoreFranchiseKey(franchise);
+        const path = `${V2_LORE_DIR}/${buildLoreFileName(franchise)}`;
+        await uploadJson(path, { franchise, lores: items, updatedAt: now });
+        manifest.loreFiles[key] = {
+          path,
+          franchise,
+          count: items.length,
+          updatedAt: now
+        };
+      }
+    } else {
+      const loreGroups = groupLoresByFranchise(allLores);
+      const targetFranchises = normalizedTargets.length > 0
+        ? normalizedTargets
+        : [...new Set([...loreGroups.keys(), ...Object.values(manifest.loreFiles || {}).map(entry => getLoreFranchiseLabel(entry?.franchise))])];
+
+      for (const franchise of targetFranchises) {
+        const key = buildLoreFranchiseKey(franchise);
+        const items = loreGroups.get(franchise) || [];
+        const path = manifest.loreFiles?.[key]?.path || `${V2_LORE_DIR}/${buildLoreFileName(franchise)}`;
+        progress(`ロアブックを差分アップロード中... (${franchise})`);
+        await uploadJson(path, { franchise, lores: items, updatedAt: now });
+        manifest.loreFiles[key] = {
+          path,
+          franchise,
+          count: items.length,
+          updatedAt: now
+        };
+      }
+    }
+
+    manifest.schemaVersion = Math.max(Number(manifest.schemaVersion || 0), 4);
     manifest.updatedAt = now;
 
     progress('同期目次を更新中...');

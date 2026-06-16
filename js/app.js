@@ -1127,7 +1127,8 @@ async function bindEvents() {
         syncLores: !!event?.detail?.syncLores,
         syncCharacters: !!event?.detail?.syncCharacters,
         characterIds: Array.isArray(event?.detail?.characterIds) ? event.detail.characterIds : [],
-        assetIds: Array.isArray(event?.detail?.assetIds) ? event.detail.assetIds : []
+        assetIds: Array.isArray(event?.detail?.assetIds) ? event.detail.assetIds : [],
+        loreFranchises: Array.isArray(event?.detail?.loreFranchises) ? event.detail.loreFranchises : []
       });
     });
     hasDropboxAutoSyncEventBinding = true;
@@ -2558,6 +2559,7 @@ function queueDropboxAutoSync(request = {}) {
     request?.syncLores !== undefined ||
     request?.syncCharacters !== undefined;
   const uniq = values => [...new Set((Array.isArray(values) ? values : []).filter(Boolean))];
+  const uniqLoreFranchises = values => [...new Set((Array.isArray(values) ? values : []).map(value => String(value || '').trim() || '共通').filter(Boolean))];
   const normalized = {
     storyId: request?.storyId || null,
     forceFull: !!request?.forceFull,
@@ -2565,7 +2567,8 @@ function queueDropboxAutoSync(request = {}) {
     syncLores: !!request?.syncLores,
     syncCharacters: !!request?.syncCharacters,
     characterIds: uniq(request?.characterIds),
-    assetIds: uniq(request?.assetIds)
+    assetIds: uniq(request?.assetIds),
+    loreFranchises: uniqLoreFranchises(request?.loreFranchises)
   };
   if (!normalized.forceFull && !normalized.syncStory && !normalized.syncLores && !normalized.syncCharacters) {
     normalized.forceFull = true;
@@ -2578,7 +2581,8 @@ function queueDropboxAutoSync(request = {}) {
       syncLores: pendingDropboxAutoSync.syncLores || normalized.syncLores,
       syncCharacters: pendingDropboxAutoSync.syncCharacters || normalized.syncCharacters,
       characterIds: uniq([...(pendingDropboxAutoSync.characterIds || []), ...normalized.characterIds]),
-      assetIds: uniq([...(pendingDropboxAutoSync.assetIds || []), ...normalized.assetIds])
+      assetIds: uniq([...(pendingDropboxAutoSync.assetIds || []), ...normalized.assetIds]),
+      loreFranchises: uniqLoreFranchises([...(pendingDropboxAutoSync.loreFranchises || []), ...normalized.loreFranchises])
     }
     : normalized;
   if (isDropboxAutoSyncRunning) return;
@@ -2598,7 +2602,7 @@ function queueDropboxAutoSync(request = {}) {
   }, 0);
 }
 
-async function performAutoDropboxSync({ storyId = null, forceFull = false, syncStory = false, syncLores = false, syncCharacters = false, characterIds = [], assetIds = [] } = {}) {
+async function performAutoDropboxSync({ storyId = null, forceFull = false, syncStory = false, syncLores = false, syncCharacters = false, characterIds = [], assetIds = [], loreFranchises = [] } = {}) {
   const connected = await dropbox.isConnected();
   if (!connected) return;
 
@@ -2615,7 +2619,7 @@ async function performAutoDropboxSync({ storyId = null, forceFull = false, syncS
     try {
       let completed = false;
       if (!forceFull && (syncStory || syncLores || syncCharacters)) {
-        completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores, syncCharacters, characterIds, assetIds });
+        completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores, syncCharacters, characterIds, assetIds, loreFranchises });
         if (!completed) {
           console.log('[Dropbox AutoSync] 差分同期の基準がないため、フル同期します。');
         }
@@ -2683,7 +2687,7 @@ async function performDropboxPushSilent({ storyId = null, preferDelta = false } 
   });
 }
 
-async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = false, syncLores = false, syncCharacters = false, characterIds = [], assetIds = [] } = {}) {
+async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = false, syncLores = false, syncCharacters = false, characterIds = [], assetIds = [], loreFranchises = [] } = {}) {
   const stories = await db.getStories();
   const uniqueCharacterIds = [...new Set((characterIds || []).filter(Boolean))];
   const uniqueAssetIds = [...new Set((assetIds || []).filter(Boolean))];
@@ -2737,6 +2741,7 @@ async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = fal
     const lores = await db.getWorldLores();
     const loreResult = await dropbox.pushLoreDeltaToDropbox({
       lores,
+      franchises: [...new Set((Array.isArray(loreFranchises) ? loreFranchises : []).map(value => String(value || '').trim() || '共通').filter(Boolean))],
       onProgress: msg => console.log('[Dropbox AutoSync]', msg)
     });
     if (!loreResult) return false;
@@ -2962,7 +2967,7 @@ async function triggerBackgroundLoreLookup(story) {
         status: 'pending'
       };
       await db.saveLore(placeholder);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
       if (getState().activeScreen === 'lorebook') {
         ui.renderLorebook();
       }
@@ -2982,14 +2987,14 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     if (shouldSkipAutoLoreRegistration(result, story)) {
       console.log(`[Lore Automatic Lookup] Skipped auto-registration for ${keyword}: ${result?.reason || 'not a stable world lore entry'}`);
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
       return;
     }
 
     const canonicalName = normalizeLoreEntryName(result.canonicalName || keyword);
     if (!canonicalName) {
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
       return;
     }
 
@@ -2997,14 +3002,14 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     if (existingCanonical && existingCanonical.id !== placeholder.id) {
       console.log(`[Lore Automatic Lookup] Skipped duplicate lore for ${canonicalName}.`);
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
       return;
     }
 
     if (result.type === 'character' && await hasCharacterLibraryConflict(canonicalName, franchise)) {
       console.log(`[Lore Automatic Lookup] Skipped duplicate character lore for ${canonicalName} because character library data takes priority.`);
       await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
+      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
       return;
     }
 
@@ -3018,7 +3023,7 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     placeholder.type = result.type || 'term';
     placeholder.status = 'completed';
     await db.saveLore(placeholder);
-    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
+    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
     console.log(`[Lore Automatic Lookup] Completed and saved lore for ${keyword}`);
     
     // ロアブック画面が表示されている場合はリアルタイムに再描画
@@ -3030,7 +3035,7 @@ async function executeLoreLookup(placeholder, keyword, franchise, story) {
     placeholder.status = 'failed';
     placeholder.content.summary = `自動検索に失敗しました。Error: ${err.message}`;
     await db.saveLore(placeholder);
-    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true });
+    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
     if (getState().activeScreen === 'lorebook') {
       ui.renderLorebook();
     }

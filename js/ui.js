@@ -65,6 +65,14 @@ function normalizeSessionLoreEventForDisplay(event) {
   return '';
 }
 
+function normalizeLoreSyncFranchises(values = []) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map(value => String(value || '').trim() || '共通')
+      .filter(Boolean)
+  )];
+}
+
 function requestDropboxAutoSync(storyId = null, options = {}) {
   const hasExplicitScope =
     options.syncStory !== undefined ||
@@ -79,7 +87,8 @@ function requestDropboxAutoSync(storyId = null, options = {}) {
       syncLores: !!options.syncLores,
       syncCharacters: !!options.syncCharacters,
       characterIds: Array.isArray(options.characterIds) ? options.characterIds.filter(Boolean) : [],
-      assetIds: Array.isArray(options.assetIds) ? options.assetIds.filter(Boolean) : []
+      assetIds: Array.isArray(options.assetIds) ? options.assetIds.filter(Boolean) : [],
+      loreFranchises: normalizeLoreSyncFranchises(options.loreFranchises)
     }
   }));
 }
@@ -2415,6 +2424,7 @@ export async function importLoreJSON(files) {
   let updatedCount = 0;
   let skippedCount = 0;
   const importedNames = [];
+  const touchedFranchises = new Set();
 
   try {
     for (const file of fileList) {
@@ -2431,10 +2441,16 @@ export async function importLoreJSON(files) {
       importedCount += result.importedCount;
       updatedCount += result.updatedCount;
       importedNames.push(...result.importedNames);
+      for (const franchise of result.touchedFranchises || []) {
+        touchedFranchises.add(franchise);
+      }
     }
 
     await renderLorebook('world');
-    requestDropboxAutoSync(null, { syncLores: true });
+    requestDropboxAutoSync(null, {
+      syncLores: true,
+      loreFranchises: [...touchedFranchises]
+    });
 
     const headline = importedCount || updatedCount
       ? `ロアを取り込みました。`
@@ -2549,7 +2565,10 @@ export function showLorePasteModal() {
 
       const result = await importLoreEntries(entries, defaults);
       await renderLorebook('world');
-      requestDropboxAutoSync(currentStory?.storyId || null, { syncLores: true });
+      requestDropboxAutoSync(currentStory?.storyId || null, {
+        syncLores: true,
+        loreFranchises: result.touchedFranchises
+      });
       closeModal();
 
       alert(`ロアを取り込みました。\n新規追加: ${result.importedCount}件\n上書き更新: ${result.updatedCount}件\n\n対象: ${result.importedNames.slice(0, 10).join(' / ')}${result.importedNames.length > 10 ? ' ...' : ''}`);
@@ -3110,6 +3129,7 @@ async function importLoreEntries(entries, defaults = {}) {
   let importedCount = 0;
   let updatedCount = 0;
   const importedNames = [];
+  const touchedFranchises = new Set();
 
   for (const entry of entries) {
     const normalizedEntry = { ...entry };
@@ -3138,6 +3158,7 @@ async function importLoreEntries(entries, defaults = {}) {
       : normalizedEntry;
 
     await db.saveLore(itemToSave);
+    touchedFranchises.add(String(itemToSave.franchise || '共通').trim() || '共通');
     importedNames.push(normalizedEntry.name);
     if (existing) {
       updatedCount += 1;
@@ -3146,7 +3167,7 @@ async function importLoreEntries(entries, defaults = {}) {
     }
   }
 
-  return { importedCount, updatedCount, importedNames };
+  return { importedCount, updatedCount, importedNames, touchedFranchises: [...touchedFranchises] };
 }
 
 function buildLoreExportEntries(lores = []) {
@@ -3532,7 +3553,11 @@ async function _createLoreCandidateSection(candidates, currentStory) {
     const stories = await db.getStories();
     updateState({ stories });
     await renderLorebook('world');
-    requestDropboxAutoSync(currentStory.storyId, { syncStory: true, syncLores: !!acceptBtn });
+    requestDropboxAutoSync(currentStory.storyId, {
+      syncStory: true,
+      syncLores: !!acceptBtn,
+      loreFranchises: acceptBtn ? [candidate.franchise || '共通'] : []
+    });
   });
 
   return section;
@@ -3572,7 +3597,7 @@ function _createFranchiseSection(franchise, items) {
             <button class="icon-btn-circle lore-edit-btn" title="編集" data-id="${escapeHTML(lore.id)}">
               <span class="material-symbols-outlined" style="font-size:18px">edit</span>
             </button>
-            <button class="icon-btn-circle lore-delete-btn" title="削除" data-id="${escapeHTML(lore.id)}" data-name="${escapeHTML(lore.name)}">
+            <button class="icon-btn-circle lore-delete-btn" title="削除" data-id="${escapeHTML(lore.id)}" data-name="${escapeHTML(lore.name)}" data-franchise="${escapeHTML(lore.franchise || '共通')}">
               <span class="material-symbols-outlined" style="font-size:18px">delete</span>
             </button>
           </div>
@@ -3621,11 +3646,16 @@ function _createFranchiseSection(franchise, items) {
     } else if (deleteBtn) {
       const loreName = deleteBtn.dataset.name;
       const loreId = deleteBtn.dataset.id;
+      const loreFranchise = deleteBtn.dataset.franchise || '共通';
       if (await confirmLoreDeletion(loreName)) {
         await recordSyncTombstone('lores', loreId, { name: loreName || '' });
         await db.deleteLore(loreId);
         renderLorebook();
-        requestDropboxAutoSync(null, { forceFull: true, syncLores: true });
+        requestDropboxAutoSync(null, {
+          forceFull: true,
+          syncLores: true,
+          loreFranchises: [loreFranchise]
+        });
       }
     }
   });
@@ -4188,6 +4218,7 @@ export function showLoreEditModal(lore = null, options = {}) {
       verified,
       status: 'completed'
     };
+    const previousFranchise = String(lore?.franchise || '').trim() || '共通';
 
     await db.saveLore(itemToSave);
 
@@ -4202,7 +4233,8 @@ export function showLoreEditModal(lore = null, options = {}) {
     renderLorebook();
     requestDropboxAutoSync(currentStory?.storyId || null, {
       syncStory: !!options.fromCandidate && !!currentStory?.storyId,
-      syncLores: true
+      syncLores: true,
+      loreFranchises: [...new Set([previousFranchise, itemToSave.franchise || '共通'])]
     });
   };
 }
