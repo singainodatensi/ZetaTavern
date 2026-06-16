@@ -2923,6 +2923,44 @@ body {
   flex: 0 0 auto;
 }
 
+.lore-export-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.lore-export-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 50vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.lore-export-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: rgba(124, 77, 255, 0.04);
+}
+
+.lore-export-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.lore-export-row-main strong {
+  font-size: 14px;
+}
+
 @media (max-width: 768px) {
   .lore-candidate-toolbar {
     flex-direction: column;
@@ -2941,5 +2979,10 @@ body {
   .lore-candidate-actions .secondary-btn {
     flex: 1 1 0;
     justify-content: center;
+  }
+
+  .lore-export-row {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

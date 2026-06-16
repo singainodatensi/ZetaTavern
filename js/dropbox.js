@@ -1029,7 +1029,7 @@ export async function pushToDropbox({ stories, characters, lores, settings, asse
   }
 }
 
-export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
+export async function pushStoryDeltaToDropbox({ story, settings, assets = [], onProgress }) {
   const progress = msg => { console.log('[Dropbox Delta Push]', msg); if (onProgress) onProgress(msg); };
 
   if (!story?.storyId) {
@@ -1060,6 +1060,20 @@ export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
       manifest.settingsPath = manifest.settingsPath || V2_SETTINGS;
     }
 
+    if (Array.isArray(assets) && assets.length > 0) {
+      progress(`関連アセット ${assets.length} 件を差分アップロード中...`);
+      const assetEntries = await buildAssetManifestEntries({
+        assets,
+        stories: [story],
+        existingManifest: manifest,
+        onProgress
+      });
+      manifest.assets = {
+        ...(manifest.assets || {}),
+        ...assetEntries
+      };
+    }
+
     progress('現在のストーリーを差分アップロード中...');
     manifest.stories = manifest.stories || {};
     manifest.stories[story.storyId] = await uploadV2StoryAppendDelta(story, manifest.stories[story.storyId], now);
@@ -1072,6 +1086,82 @@ export async function pushStoryDeltaToDropbox({ story, settings, onProgress }) {
       schemaVersion: Number(manifest.schemaVersion || 0)
     };
     progress('差分同期完了！');
+    return manifest;
+  } finally {
+    try {
+      await deleteLockFile();
+    } catch (error) {
+      console.warn('[Dropbox] ロックファイル削除に失敗しました。期限切れ後に自動解除されます。', error);
+    }
+  }
+}
+
+export async function pushCharacterDeltaToDropbox({ characters, assets = [], onProgress }) {
+  const progress = msg => { console.log('[Dropbox Character Delta]', msg); if (onProgress) onProgress(msg); };
+  const targetCharacters = Array.isArray(characters)
+    ? characters.filter(item => item?.characterId)
+    : [];
+
+  if (targetCharacters.length === 0) {
+    throw new Error('差分同期するキャラクターが見つかりません。');
+  }
+
+  progress('キャラクター差分同期を開始します...');
+  const lock = await checkLockFile();
+  if (lock) {
+    throw new Error(`他の端末が同期中です (${lock.operation}) 。しばらく待ってから再試行してください。`);
+  }
+
+  await uploadLockFile('delta-push-characters');
+  try {
+    const manifest = await downloadJson(V2_MANIFEST);
+    if (!manifest || manifest.schemaVersion < 2) {
+      return null;
+    }
+
+    const now = Date.now();
+    ensuredFolderPaths.add('/ZetaTavern');
+    ensuredFolderPaths.add(V2_ROOT);
+    ensuredFolderPaths.add(V2_CHAR_DIR);
+
+    if (Array.isArray(assets) && assets.length > 0) {
+      progress(`関連アセット ${assets.length} 件を差分アップロード中...`);
+      const assetEntries = await buildAssetManifestEntries({
+        assets,
+        characters: targetCharacters,
+        existingManifest: manifest,
+        onProgress
+      });
+      manifest.assets = {
+        ...(manifest.assets || {}),
+        ...assetEntries
+      };
+    }
+
+    progress(`キャラクター ${targetCharacters.length} 件を差分アップロード中...`);
+    manifest.characters = manifest.characters || {};
+    for (const character of targetCharacters) {
+      const previousPath = manifest.characters?.[character.characterId]?.path || '';
+      const path = previousPath && previousPath.includes('__')
+        ? previousPath
+        : `${V2_CHAR_DIR}/${buildCharacterFileName(character)}`;
+      await uploadJson(path, character);
+      manifest.characters[character.characterId] = {
+        path,
+        updatedAt: character.timestamp || now,
+        name: character.name || '',
+        category: character.category || ''
+      };
+    }
+
+    manifest.updatedAt = now;
+    progress('同期目次を更新中...');
+    await uploadJson(V2_MANIFEST, manifest);
+    lastRemoteManifestInfo = {
+      updatedAt: Number(manifest.updatedAt || 0),
+      schemaVersion: Number(manifest.schemaVersion || 0)
+    };
+    progress('キャラクター差分同期完了！');
     return manifest;
   } finally {
     try {

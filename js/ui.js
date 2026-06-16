@@ -66,14 +66,20 @@ function normalizeSessionLoreEventForDisplay(event) {
 }
 
 function requestDropboxAutoSync(storyId = null, options = {}) {
-  const hasExplicitScope = options.syncStory !== undefined || options.syncLores !== undefined;
+  const hasExplicitScope =
+    options.syncStory !== undefined ||
+    options.syncLores !== undefined ||
+    options.syncCharacters !== undefined;
   if (typeof window === 'undefined' || !window.dispatchEvent) return;
   window.dispatchEvent(new CustomEvent('dropbox-auto-sync-request', {
     detail: {
       storyId: storyId || null,
       forceFull: !!options.forceFull,
       syncStory: hasExplicitScope ? !!options.syncStory : !!storyId,
-      syncLores: !!options.syncLores
+      syncLores: !!options.syncLores,
+      syncCharacters: !!options.syncCharacters,
+      characterIds: Array.isArray(options.characterIds) ? options.characterIds.filter(Boolean) : [],
+      assetIds: Array.isArray(options.assetIds) ? options.assetIds.filter(Boolean) : []
     }
   }));
 }
@@ -184,6 +190,50 @@ export function renderApiUsagePanel() {
           <span>履歴制限 ${lastApiUsage.debug.historyCompressionEnabled === false || lastApiUsage.debug.historyTurnLimit === 0 ? '全履歴' : `${formatUsageNumber(lastApiUsage.debug.historyTurnLimit)}ターン`}</span>
           <span>省略 ${formatUsageNumber(lastApiUsage.debug.omittedTurns || 0)}ターン</span>
         </div>
+        ${(lastApiUsage.debug.stageStatus?.search || lastApiUsage.debug.stageStatus?.synthesis) ? `
+          <div class="api-usage-debug-meta">
+            <span>処理段階</span>
+          </div>
+          <div class="api-usage-chip-row">
+            ${['search', 'synthesis'].map(stageName => {
+              const stage = lastApiUsage.debug.stageStatus?.[stageName];
+              if (!stage) return '';
+              const label = stageName === 'search' ? '検索段階' : '整形段階';
+              const phase = stage.phase || 'unknown';
+              const provider = stage.provider ? ` / ${formatSearchProviderLabel(stage.provider)}` : '';
+              const model = stage.modelName ? ` / ${stage.modelName}` : '';
+              const status = Number(stage.status || 0) > 0 ? ` / HTTP ${stage.status}` : '';
+              const kind = stage.failureKind ? ` / ${stage.failureKind}` : '';
+              const queryCount = Number(stage.groundingQueryCount || 0) > 0 ? ` / query ${formatUsageNumber(stage.groundingQueryCount)}` : '';
+              const finishReason = stage.finishReason ? ` / finish ${stage.finishReason}` : '';
+              const candidateCount = Number(stage.candidateCount || 0) > 0 ? ` / candidates ${formatUsageNumber(stage.candidateCount)}` : '';
+              const rawText = Number(stage.rawTextLength || 0) > 0 ? ` / raw ${formatUsageNumber(stage.rawTextLength)}` : '';
+              const extractedText = Number(stage.extractedTextLength || 0) > 0 ? ` / text ${formatUsageNumber(stage.extractedTextLength)}` : '';
+              const groundingMeta = stage.hasGroundingMetadata ? ' / groundingMeta' : '';
+              const serverTools = stage.hasServerToolParts ? ' / serverTools' : '';
+              return `<span class="api-usage-chip">${escapeHTML(`${label}: ${phase}${provider}${model}${status}${kind}${queryCount}${candidateCount}${finishReason}${rawText}${extractedText}${groundingMeta}${serverTools}`)}</span>`;
+            }).join('')}
+          </div>
+          ${['search', 'synthesis'].some(stageName => {
+            const stage = lastApiUsage.debug.stageStatus?.[stageName];
+            return stage?.message || (Array.isArray(stage?.partKinds) && stage.partKinds.length > 0);
+          }) ? `
+            <div class="api-usage-chip-row">
+              ${['search', 'synthesis'].map(stageName => {
+                const stage = lastApiUsage.debug.stageStatus?.[stageName];
+                const parts = Array.isArray(stage?.partKinds) && stage.partKinds.length > 0
+                  ? `${stageName === 'search' ? '検索' : '整形'} parts: ${stage.partKinds.join(', ')}`
+                  : '';
+                if (!stage?.message && !parts) return '';
+                const label = stageName === 'search' ? '検索' : '整形';
+                return `
+                  ${stage?.message ? `<span class="api-usage-chip">${escapeHTML(`${label}: ${stage.message}`)}</span>` : ''}
+                  ${parts ? `<span class="api-usage-chip">${escapeHTML(parts)}</span>` : ''}
+                `;
+              }).join('')}
+            </div>
+          ` : ''}
+        ` : ''}
         ${lastApiUsage.debug.toolCalls?.length ? `
           <div class="api-usage-debug-meta">
             <span>参照/更新ツール ${formatUsageNumber(lastApiUsage.debug.toolCalls.reduce((sum, item) => sum + Number(item.count || 0), 0))}回</span>
@@ -219,8 +269,12 @@ export function renderApiUsagePanel() {
             ${lastApiUsage.debug.searchErrors.map(item => {
               const providerLabel = formatSearchProviderLabel(item.provider || 'auto');
               const preview = item.query ? `: ${item.query}` : '';
+              const status = Number(item.status || 0) > 0 ? ` / HTTP ${item.status}` : '';
+              const model = item.modelName ? ` / ${item.modelName}` : '';
+              const stage = item.stage ? ` / ${item.stage}` : '';
+              const kind = item.failureKind ? ` / ${item.failureKind}` : '';
               const count = Number(item.count || 0) > 1 ? ` x${formatUsageNumber(item.count)}` : '';
-              return `<span class="api-usage-chip">${escapeHTML(`${providerLabel}${preview} - ${item.message || '検索失敗'}${count}`)}</span>`;
+              return `<span class="api-usage-chip">${escapeHTML(`${providerLabel}${preview}${model}${status}${stage}${kind} - ${item.message || '検索失敗'}${count}`)}</span>`;
             }).join('')}
           </div>
         ` : ''}
@@ -2037,13 +2091,17 @@ export async function showCharacterModal(char = null) {
         personality: persInput.value.trim(),
         mes_example: exInput.value.trim()
       };
-      await db.saveCharacter(characterData);
+      const savedCharacterId = await db.saveCharacter(characterData);
       const updatedChars = await db.getCharacters();
       updateState({ characters: updatedChars });
       modal.classList.add('hidden');
       renderCharacterLibrary();
       renderSidebar();
-      requestDropboxAutoSync();
+      requestDropboxAutoSync(null, {
+        syncCharacters: true,
+        characterIds: savedCharacterId ? [savedCharacterId] : [],
+        assetIds: currentAvatarAssetId ? [currentAvatarAssetId] : []
+      });
     } catch (err) {
       alert(`保存に失敗しました: ${err.message}`);
     }
@@ -2174,6 +2232,8 @@ async function importCharacterEntries(entries, defaults = {}) {
   let importedCount = 0;
   let withAvatarCount = 0;
   const importedNames = [];
+  const importedCharacterIds = [];
+  const importedAssetIds = [];
 
   for (const entry of entries) {
     const tags = normalizeImportedTags(entry.tags, defaults.tags || []);
@@ -2190,11 +2250,13 @@ async function importCharacterEntries(entries, defaults = {}) {
     if (entry.avatarBase64) {
       const blob = db.base64ToBlob(entry.avatarBase64);
       charData.avatarAssetId = await db.saveAsset(blob, blob.type);
+      importedAssetIds.push(charData.avatarAssetId);
       withAvatarCount += 1;
     }
 
-    await db.saveCharacter(charData);
+    const savedCharacterId = await db.saveCharacter(charData);
     importedCount += 1;
+    importedCharacterIds.push(savedCharacterId);
     importedNames.push(charData.name);
   }
 
@@ -2202,7 +2264,11 @@ async function importCharacterEntries(entries, defaults = {}) {
   updateState({ characters: updatedChars });
   renderCharacterLibrary();
   renderSidebar();
-  requestDropboxAutoSync();
+  requestDropboxAutoSync(null, {
+    syncCharacters: true,
+    characterIds: importedCharacterIds,
+    assetIds: importedAssetIds
+  });
 
   return { importedCount, withAvatarCount, importedNames };
 }
@@ -2521,7 +2587,7 @@ export async function showStorySettingsModal() {
         <h3 style="margin: 0;">ストーリー設定</h3>
         <button id="story-settings-close-btn" style="background: none; border: none; font-size: 24px; cursor: pointer; color: inherit;">&times;</button>
       </div>
-      <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 4px;">
+      <div data-story-settings-scroll-body="true" style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 4px;">
         <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px;">
           <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">主人公設定</legend>
           <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
@@ -2612,10 +2678,17 @@ export async function showStorySettingsModal() {
 
   // Auto-resize logic for settings textareas
   const textareas = modal.querySelectorAll('textarea');
+  const modalScrollBody = modal.querySelector('[data-story-settings-scroll-body="true"]');
   textareas.forEach(ta => {
     const autoResize = () => {
+      const previousScrollTop = modalScrollBody ? modalScrollBody.scrollTop : 0;
+      const previousWindowScrollY = window.scrollY;
       ta.style.height = 'auto';
       if (ta.scrollHeight > 0) ta.style.height = ta.scrollHeight + 'px';
+      if (modalScrollBody) modalScrollBody.scrollTop = previousScrollTop;
+      if (window.scrollY !== previousWindowScrollY) {
+        window.scrollTo(window.scrollX, previousWindowScrollY);
+      }
     };
     ta.addEventListener('input', autoResize);
     setTimeout(autoResize, 0);
@@ -2753,7 +2826,10 @@ saveBtn.onclick = async () => {
       await db.saveStory(currentStory);
       const updatedStories = await db.getStories();
       updateState({ stories: updatedStories });
-      requestDropboxAutoSync(currentStory.storyId, { forceFull: true });
+      requestDropboxAutoSync(currentStory.storyId, {
+        syncStory: true,
+        assetIds: avatarAssetId ? [avatarAssetId] : []
+      });
       closeModal();
       renderStoryList();
       renderSidebar();
@@ -3071,6 +3147,166 @@ async function importLoreEntries(entries, defaults = {}) {
   }
 
   return { importedCount, updatedCount, importedNames };
+}
+
+function buildLoreExportEntries(lores = []) {
+  return (Array.isArray(lores) ? lores : [])
+    .filter(item => item?.name)
+    .map(item => ({
+      id: item.id,
+      franchise: item.franchise || '共通',
+      searchContext: item.searchContext || '',
+      type: item.type || 'term',
+      name: item.name,
+      summary: item.content?.summary || '',
+      profile: item.content?.profile || '',
+      speech: item.content?.speech || '',
+      relationships: item.content?.relationships || '',
+      verified: item.verified !== false,
+      source: item.source || 'manual',
+      status: item.status || 'completed'
+    }));
+}
+
+function downloadJsonExport(fileName, payload) {
+  const json = JSON.stringify(payload, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function sanitizeExportFileName(value, fallback = 'lorebook') {
+  const text = String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/[. ]+$/g, '')
+    .slice(0, 80);
+  return text || fallback;
+}
+
+export async function showLoreExportModal() {
+  let modal = document.getElementById('lore-export-modal');
+  if (modal) modal.remove();
+
+  const lores = await db.getWorldLores();
+  const { currentStory } = getState();
+  const grouped = new Map();
+  for (const lore of lores) {
+    const franchise = lore?.franchise || '共通';
+    if (!grouped.has(franchise)) grouped.set(franchise, []);
+    grouped.get(franchise).push(lore);
+  }
+
+  const currentFranchise = currentStory?.franchise || '';
+  const currentCount = currentFranchise && grouped.has(currentFranchise)
+    ? grouped.get(currentFranchise).length
+    : 0;
+
+  const rows = [...grouped.entries()]
+    .sort((a, b) => {
+      if (currentFranchise) {
+        if (a[0] === currentFranchise) return -1;
+        if (b[0] === currentFranchise) return 1;
+      }
+      return a[0].localeCompare(b[0], 'ja');
+    })
+    .map(([franchise, items]) => `
+      <div class="lore-export-row">
+        <div class="lore-export-row-main">
+          <strong>${escapeHTML(franchise)}</strong>
+          <span class="lore-candidate-chip">${items.length}件</span>
+          ${currentFranchise && franchise === currentFranchise ? '<span class="lore-candidate-chip">現在の作品</span>' : ''}
+        </div>
+        <button class="secondary-btn lore-export-franchise-btn" type="button" data-franchise="${escapeHTML(franchise)}">
+          書き出し
+        </button>
+      </div>
+    `).join('');
+
+  modal = document.createElement('div');
+  modal.id = 'lore-export-modal';
+  modal.className = 'modal-wrapper';
+  modal.style.zIndex = '5000';
+  modal.innerHTML = `
+    <div class="modal-overlay"></div>
+    <div class="modal-content" style="max-width: 760px; width: 92%;">
+      <div class="modal-header">
+        <h3>ロアブックJSONを書き出し</h3>
+        <button id="lore-export-close-btn" class="icon-btn-circle" type="button">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="modal-body" style="display:flex; flex-direction:column; gap: 14px;">
+        <div class="lore-search-intro">
+          <span class="material-symbols-outlined">archive</span>
+          <p>分割同期の作業前バックアップ用に、ワールドロアを <code>zetatavern-lorebook</code> 形式でまとめて書き出せます。</p>
+        </div>
+
+        <div class="lore-export-actions">
+          <button id="lore-export-all-btn" class="primary-btn" type="button">
+            <span class="material-symbols-outlined">download</span>
+            <span>全作品をまとめて書き出し</span>
+          </button>
+          ${currentFranchise ? `
+            <button id="lore-export-current-btn" class="secondary-btn" type="button" ${currentCount === 0 ? 'disabled' : ''}>
+              <span class="material-symbols-outlined">folder_zip</span>
+              <span>現在の作品だけ書き出し</span>
+            </button>
+          ` : ''}
+        </div>
+
+        <div class="lore-export-list">
+          ${rows || '<p style="opacity:0.7;">書き出せるワールドロアがまだありません。</p>'}
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="lore-export-cancel-btn" class="secondary-btn" type="button">閉じる</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const closeModal = () => modal.remove();
+  modal.querySelector('#lore-export-close-btn')?.addEventListener('click', closeModal);
+  modal.querySelector('#lore-export-cancel-btn')?.addEventListener('click', closeModal);
+  modal.addEventListener('click', e => {
+    if (e.target === modal || e.target.classList.contains('modal-overlay')) closeModal();
+  });
+
+  const exportEntries = (entries, franchiseLabel = '') => {
+    const exportPayload = {
+      spec: 'zetatavern-lorebook',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      entryCount: entries.length,
+      entries: buildLoreExportEntries(entries)
+    };
+    const label = franchiseLabel ? sanitizeExportFileName(franchiseLabel, 'franchise') : 'all';
+    downloadJsonExport(`lorebook_${label}.json`, exportPayload);
+  };
+
+  modal.querySelector('#lore-export-all-btn')?.addEventListener('click', () => {
+    exportEntries(lores, 'all');
+  });
+
+  modal.querySelector('#lore-export-current-btn')?.addEventListener('click', () => {
+    if (!currentFranchise || !grouped.has(currentFranchise)) return;
+    exportEntries(grouped.get(currentFranchise), currentFranchise);
+  });
+
+  modal.querySelectorAll('.lore-export-franchise-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const franchise = btn.dataset.franchise || '';
+      if (!franchise || !grouped.has(franchise)) return;
+      exportEntries(grouped.get(franchise), franchise);
+    });
+  });
 }
 
 function buildLoreImportDefaults(options = {}) {

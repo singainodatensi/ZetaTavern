@@ -528,7 +528,21 @@ function createUsageAccumulator(requestType, modelName) {
       googleSearchAvailable: false,
       serverToolRoundTrips: 0,
       searchProviderLabel: '',
-      searchErrors: []
+      searchErrors: [],
+      stageStatus: {}
+  };
+}
+
+function updateUsageStage(accumulator, stageName, patch = {}) {
+  if (!accumulator || !stageName) return;
+  if (!accumulator.stageStatus || typeof accumulator.stageStatus !== 'object') {
+    accumulator.stageStatus = {};
+  }
+  const current = accumulator.stageStatus[stageName] || {};
+  accumulator.stageStatus[stageName] = {
+    ...current,
+    ...patch,
+    updatedAt: Date.now()
   };
 }
 
@@ -545,7 +559,8 @@ function addUsageMetadata(accumulator, usageMetadata) {
 }
 
 function publishUsageSnapshot(accumulator) {
-  if (!accumulator || accumulator.requestCount <= 0) return null;
+  const hasSearchErrors = Array.isArray(accumulator?.searchErrors) && accumulator.searchErrors.length > 0;
+  if (!accumulator || (accumulator.requestCount <= 0 && !hasSearchErrors)) return null;
   const promptTotalChars = Number(accumulator.debug?.promptTotalChars || 0);
   const promptTokenCount = Number(accumulator.promptTokenCount || 0);
   let debug = null;
@@ -579,6 +594,9 @@ function publishUsageSnapshot(accumulator) {
       googleSearchAvailable: accumulator.googleSearchAvailable === true,
       serverToolRoundTrips: Number(accumulator.serverToolRoundTrips || 0),
       searchProviderLabel: accumulator.searchProviderLabel || '',
+      stageStatus: accumulator.stageStatus && typeof accumulator.stageStatus === 'object'
+        ? accumulator.stageStatus
+        : {},
       breakdown
     };
   }
@@ -639,7 +657,11 @@ function recordSearchError(accumulator, {
   provider = '',
   query = '',
   message = '',
-  code = ''
+  code = '',
+  status = 0,
+  modelName = '',
+  stage = '',
+  failureKind = ''
 } = {}) {
   if (!accumulator || !message) return;
   if (!Array.isArray(accumulator.searchErrors)) {
@@ -650,10 +672,16 @@ function recordSearchError(accumulator, {
   const normalizedQuery = String(query || '').trim().slice(0, 80);
   const normalizedMessage = String(message || '').trim().slice(0, 180);
   const normalizedCode = String(code || '').trim().slice(0, 40);
+  const normalizedModelName = String(modelName || '').trim().slice(0, 80);
+  const normalizedStage = String(stage || '').trim().slice(0, 40);
+  const normalizedFailureKind = String(failureKind || '').trim().slice(0, 60);
+  const normalizedStatus = Number(status || 0);
   const existing = accumulator.searchErrors.find(item =>
     item?.provider === normalizedProvider &&
     item?.query === normalizedQuery &&
-    item?.message === normalizedMessage
+    item?.message === normalizedMessage &&
+    Number(item?.status || 0) === normalizedStatus &&
+    String(item?.failureKind || '') === normalizedFailureKind
   );
   if (existing) {
     existing.count = Number(existing.count || 0) + 1;
@@ -665,7 +693,63 @@ function recordSearchError(accumulator, {
     query: normalizedQuery,
     message: normalizedMessage,
     code: normalizedCode,
+    status: normalizedStatus,
+    modelName: normalizedModelName,
+    stage: normalizedStage,
+    failureKind: normalizedFailureKind,
     count: 1
+  });
+}
+
+function classifySearchFailure({
+  provider = '',
+  status = 0,
+  message = '',
+  modelName = ''
+} = {}) {
+  const normalizedProvider = normalizeWebSearchProvider(provider || 'auto');
+  const normalizedMessage = String(message || '').toLowerCase();
+  const normalizedModel = String(modelName || '').trim().toLowerCase();
+
+  if (normalizedProvider === 'google' && normalizedModel.includes('gemini-3')) {
+    return 'google_grounding_unsupported_on_gemini3_free';
+  }
+  if (status === 401 || normalizedMessage.includes('api key not valid') || normalizedMessage.includes('unauthorized')) {
+    return 'auth';
+  }
+  if (status === 403 || normalizedMessage.includes('permission denied') || normalizedMessage.includes('forbidden')) {
+    return 'forbidden';
+  }
+  if (normalizedMessage.includes('tokens per minute') || normalizedMessage.includes('tpm')) {
+    return 'quota_tpm';
+  }
+  if (normalizedMessage.includes('requests per minute') || normalizedMessage.includes('rpm') || normalizedMessage.includes('per minute')) {
+    return 'quota_rpm';
+  }
+  if (normalizedMessage.includes('requests per day') || normalizedMessage.includes('rpd') || normalizedMessage.includes('per day')) {
+    return 'quota_rpd';
+  }
+  if (isQuotaLikeApiError(status, message)) {
+    return 'quota_unknown';
+  }
+  if (status >= 500) {
+    return 'server';
+  }
+  return 'unknown';
+}
+
+function summarizeCandidatePartKinds(parts = []) {
+  if (!Array.isArray(parts) || parts.length === 0) return [];
+  return parts.map(part => {
+    if (part?.text && part?.thought) return 'thought_text';
+    if (part?.text) return 'text';
+    if (part?.functionCall) return 'functionCall';
+    if (part?.functionResponse) return 'functionResponse';
+    if (part?.toolCall) return 'toolCall';
+    if (part?.toolResponse) return 'toolResponse';
+    if (part?.inlineData) return 'inlineData';
+    const keys = Object.keys(part || {});
+    return keys.length > 0 ? keys[0] : 'unknown';
   });
 }
 
@@ -2473,18 +2557,21 @@ async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
     return {
       provider: 'tavily',
       found: false,
+      status: response.status,
       rateLimited: quotaLike,
+      failureKind: classifySearchFailure({ provider: 'tavily', status: response.status, message }),
       message
     };
   }
 
   const payload = await response.json().catch(() => null);
   const text = buildTavilySummary(payload, query, franchise);
-  return {
-    provider: 'tavily',
-    found: Boolean(text),
-    modelName: '',
-    text,
+    return {
+      provider: 'tavily',
+      found: Boolean(text),
+      status: 200,
+      modelName: '',
+      text,
     groundingQueries: [],
     usageCredits: Number(payload?.usage?.credits || 0),
     message: text ? '' : 'Tavily から十分な要約を取得できませんでした。'
@@ -2534,7 +2621,10 @@ async function runGoogleSearchLookup({
     return {
       provider: 'google',
       found: false,
+      status: response.status,
+      modelName,
       rateLimited: quotaLike,
+      failureKind: classifySearchFailure({ provider: 'google', status: response.status, message, modelName }),
       message
     };
   }
@@ -2548,16 +2638,37 @@ async function runGoogleSearchLookup({
     }
   }
 
+  const firstCandidate = result?.candidates?.[0] || null;
+  const rawParts = Array.isArray(firstCandidate?.content?.parts) ? firstCandidate.content.parts : [];
   const extracted = extractStoryTextAndThoughtFromApiResponse(result);
   const text = String(extracted?.text || '').trim();
+  const debugInfo = {
+    finishReason: String(firstCandidate?.finishReason || '').trim(),
+    rawTextLength: rawParts
+      .filter(part => typeof part?.text === 'string')
+      .map(part => part.text)
+      .join('\n\n')
+      .trim()
+      .length,
+    extractedTextLength: text.length,
+    partKinds: summarizeCandidatePartKinds(rawParts),
+    hasGroundingMetadata: Boolean(firstCandidate?.groundingMetadata),
+    hasServerToolParts: hasServerToolParts(result),
+    candidateCount: Array.isArray(result?.candidates) ? result.candidates.length : 0,
+    groundingQueryCount: Array.isArray(firstCandidate?.groundingMetadata?.webSearchQueries)
+      ? firstCandidate.groundingMetadata.webSearchQueries.length
+      : 0
+  };
   return {
     provider: 'google',
     found: Boolean(text),
+    status: 200,
     modelName,
     text,
     groundingQueries: Array.isArray(result?.candidates?.[0]?.groundingMetadata?.webSearchQueries)
       ? result.candidates[0].groundingMetadata.webSearchQueries
       : [],
+    debugInfo,
     message: text ? '' : 'Google Search から有効な本文を取得できませんでした。'
   };
 }
@@ -2622,6 +2733,8 @@ async function runDuckDuckGoLookup({ query, franchise }) {
     return {
       provider: 'duckduckgo',
       found: false,
+      status: response.status,
+      failureKind: classifySearchFailure({ provider: 'duckduckgo', status: response.status, message: `HTTP status ${response.status}` }),
       message: `HTTP status ${response.status}`
     };
   }
@@ -2631,6 +2744,7 @@ async function runDuckDuckGoLookup({ query, franchise }) {
   return {
     provider: 'duckduckgo',
     found: Boolean(text),
+    status: 200,
     text,
     modelName: '',
     groundingQueries: [],
@@ -2752,6 +2866,10 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
       recordSearchError(usageAccumulator, {
         provider: providerName,
         query,
+        status: attempt?.status || 0,
+        modelName: attempt?.modelName || (providerName === 'google' ? modelName : ''),
+        stage: 'provider_lookup',
+        failureKind: attempt?.failureKind || '',
         code: attempt?.rateLimited ? 'rate_limited' : '',
         message: attempt.message
       });
@@ -3407,8 +3525,186 @@ export async function generateStoryResponse(story) {
 async function getApiKeyFromStorage() {
   return localStorage.getItem('zetatavern_api_key') || '';
 }
+
+function resolveSearchSynthesisModelName(appState) {
+  const preferred = String(appState?.searchSynthesisModelName || '').trim();
+  if (preferred) return preferred;
+  const searchModel = String(appState?.searchModelName || '').trim();
+  if (searchModel) return searchModel;
+  const conversationModel = String(appState?.modelName || '').trim();
+  return conversationModel || DEFAULT_SEARCH_MODEL_NAME;
+}
+
+function parseJsonPayloadFromText(text = '') {
+  const parsed = parseJsonObjectFromModelText(text);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed;
+  }
+  return null;
+}
+
+function buildReferenceSearchEvidenceBlock(result, query, franchise) {
+  const providerLabel = getWebSearchProviderLabel(result?.provider || 'auto');
+  const providerModel = String(result?.modelName || '').trim();
+  const lines = [
+    `検索プロバイダ: ${providerLabel}`,
+    `検索クエリ: ${String(query || '').trim() || '未指定'}`
+  ];
+  if (franchise) {
+    lines.push(`作品・文脈: ${String(franchise || '').trim()}`);
+  }
+  if (providerModel) {
+    lines.push(`検索時モデル: ${providerModel}`);
+  }
+  if (Array.isArray(result?.groundingQueries) && result.groundingQueries.length > 0) {
+    lines.push(`実行クエリ: ${result.groundingQueries.join(' / ')}`);
+  }
+  lines.push('');
+  lines.push('【検索メモ】');
+  lines.push(String(result?.text || '').trim() || '取得なし');
+  return lines.join('\n').trim();
+}
+
+async function performReferenceLookup({ query, purpose, franchise, usageAccumulator }) {
+  recordToolCall(usageAccumulator, 'search_web', { query, purpose, franchise });
+  updateUsageStage(usageAccumulator, 'search', {
+    phase: 'started',
+    query: String(query || '').trim().slice(0, 120),
+    franchise: String(franchise || '').trim().slice(0, 120),
+    purpose: String(purpose || '').trim().slice(0, 120)
+  });
+  try {
+    const result = await searchWebForStory(null, {
+      query,
+      purpose,
+      franchise,
+      topicKey: query,
+      source: 'reference-search'
+    }, usageAccumulator, null);
+
+    updateUsageStage(usageAccumulator, 'search', {
+      phase: result?.found ? 'success' : 'error',
+      provider: result?.provider || '',
+      modelName: result?.modelName || '',
+      status: Number(result?.status || 0),
+      failureKind: String(result?.failureKind || '').trim(),
+      message: String(result?.message || '').trim().slice(0, 220),
+      groundingQueryCount: Array.isArray(result?.groundingQueries) ? result.groundingQueries.length : 0,
+      finishReason: String(result?.debugInfo?.finishReason || '').trim(),
+      rawTextLength: Number(result?.debugInfo?.rawTextLength || 0),
+      extractedTextLength: Number(result?.debugInfo?.extractedTextLength || 0),
+      partKinds: Array.isArray(result?.debugInfo?.partKinds) ? result.debugInfo.partKinds : [],
+      hasGroundingMetadata: result?.debugInfo?.hasGroundingMetadata === true,
+      hasServerToolParts: result?.debugInfo?.hasServerToolParts === true,
+      candidateCount: Number(result?.debugInfo?.candidateCount || 0)
+    });
+
+    if (result?.found && String(result?.text || '').trim()) {
+      return result;
+    }
+
+    const providerLabel = getWebSearchProviderLabel(result?.provider || getState()?.webSearchProvider || 'auto');
+    const message = String(result?.message || '').trim() || '検索結果を取得できませんでした。';
+    throw new Error(`${providerLabel} 検索に失敗しました: ${message}`);
+  } catch (err) {
+    updateUsageStage(usageAccumulator, 'search', {
+      phase: 'error',
+      message: String(err?.message || err || '').trim().slice(0, 220)
+    });
+    throw err;
+  }
+}
+
+async function generateStructuredJsonFromSearchEvidence({
+  appState,
+  apiKey,
+  usageAccumulator,
+  requestLabel,
+  prompt
+}) {
+  const requestedModelName = String(appState?.searchSynthesisModelName || appState?.searchModelName || appState?.modelName || DEFAULT_SEARCH_MODEL_NAME).trim();
+  const modelName = resolveSearchSynthesisModelName(appState);
+  usageAccumulator.modelName = modelName;
+
+  if (modelName !== requestedModelName) {
+    console.log(`[${requestLabel}] Switched synthesis model from ${requestedModelName} to ${modelName}.`);
+  }
+
+  updateUsageStage(usageAccumulator, 'synthesis', {
+    phase: 'started',
+    modelName
+  });
+
+  accumulatePromptDebug(usageAccumulator, {
+    systemInstruction: '',
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    tools: []
+  });
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.4,
+        topP: 0.9,
+        maxOutputTokens: 8192
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const message = errorData.error?.message || `HTTP status ${response.status}`;
+    updateUsageStage(usageAccumulator, 'synthesis', {
+      phase: 'error',
+      modelName,
+      status: Number(response.status || 0),
+      failureKind: classifySearchFailure({ status: response.status, message, modelName }),
+      message: String(message || '').trim().slice(0, 220)
+    });
+    throw new Error(message);
+  }
+
+  const result = await response.json();
+  addUsageMetadata(usageAccumulator, result?.usageMetadata);
+  const extracted = extractStoryTextAndThoughtFromApiResponse(result);
+  const text = String(extracted?.text || '').trim();
+  if (!text) {
+    updateUsageStage(usageAccumulator, 'synthesis', {
+      phase: 'error',
+      modelName,
+      status: 200,
+      failureKind: 'empty_response',
+      message: 'APIから有効なテキストが返されませんでした。'
+    });
+    throw new Error('APIから有効なテキストが返されませんでした。');
+  }
+
+  const parsed = parseJsonPayloadFromText(text);
+  if (!parsed) {
+    console.error(`${requestLabel} Raw Response:`, text);
+    updateUsageStage(usageAccumulator, 'synthesis', {
+      phase: 'error',
+      modelName,
+      status: 200,
+      failureKind: 'invalid_json',
+      message: 'AIが正しいJSON形式で出力しませんでした。'
+    });
+    throw new Error('AIが正しいJSON形式で出力しませんでした。');
+  }
+  updateUsageStage(usageAccumulator, 'synthesis', {
+    phase: 'success',
+    modelName,
+    status: 200,
+    failureKind: '',
+    message: ''
+  });
+  return parsed;
+}
 /**
- * キャラクタープロフィールをGoogle検索経由で自動生成し、JSONで返す関数
+ * キャラクタープロフィールを共通Web検索基盤経由で自動生成し、JSONで返す関数
  */
 export async function generateCharacterProfile(name, category) {
   const appState = getState();
@@ -3418,7 +3714,20 @@ export async function generateCharacterProfile(name, category) {
     throw new Error('APIキーが設定されていません。設定画面で登録してください。');
   }
 
-  const prompt = `
+  const query = [String(name || '').trim(), String(category || '').trim()].filter(Boolean).join(' ').trim();
+  const purpose = 'キャラクターの公式設定・口調・関係性を収集し、RP用プロフィールへ構造化する';
+  const requestedModelName = String(appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME).trim();
+  const usageAccumulator = createUsageAccumulator('character-search', requestedModelName);
+  try {
+    const searchResult = await performReferenceLookup({
+      query: query || String(name || '').trim(),
+      purpose,
+      franchise: String(category || '').trim(),
+      usageAccumulator
+    });
+    const searchEvidence = buildReferenceSearchEvidenceBlock(searchResult, query || name, category);
+
+    const prompt = `
 # キャラクタープロフィール生成 指示書
 
 ## 概要
@@ -3431,6 +3740,11 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
 生成するプロフィールは、以下の用途で利用される。
 * AIチャット / キャラクターロールプレイ / シナリオ生成 / 会話生成 / 感情シミュレーション
 そのため、単なる設定紹介ではなく、「どのように話すか」「何を嫌うか」「どう感情変化するか」「どんな人間関係を持つか」を重視して記述すること。
+
+## 検索結果
+以下は共通検索基盤で取得した外部検索メモである。推測で補わず、この内容を主な根拠として整理すること。
+
+${searchEvidence}
 
 ---
 
@@ -3474,62 +3788,23 @@ ${category ? `対象作品 / カテゴリー: ${category}` : ''}
 }
 \`\`\`
 `;
-
-  const requestedModelName = appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME;
-  const modelName = resolveSearchModelName(appState);
-  const usageAccumulator = createUsageAccumulator('character-search', modelName);
-  if (modelName !== requestedModelName) {
-    console.log(`[Character Search] Switched model from ${requestedModelName} to ${modelName} for googleSearch support.`);
+    const parsed = await generateStructuredJsonFromSearchEvidence({
+      appState,
+      apiKey,
+      usageAccumulator,
+      requestLabel: 'Character Search',
+      prompt
+    });
+    publishUsageSnapshot(usageAccumulator);
+    return parsed;
+  } catch (err) {
+    publishUsageSnapshot(usageAccumulator);
+    throw err;
   }
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-  // 検索用のツールをONにし、JSON生成のため少しだけ温度を低め(0.7)に設定
-  const generationConfig = { temperature: 0.7, topP: 0.9, maxOutputTokens: 8192 };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig,
-      tools: [{ googleSearch: {} }]
-    })
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error?.message || `HTTP status ${response.status}`);
-  }
-
-  const result = await response.json();
-  addUsageMetadata(usageAccumulator, result?.usageMetadata);
-  const parts = result?.candidates?.[0]?.content?.parts;
-  if (!parts?.length) throw new Error('APIから有効なテキストが返されませんでした。');
-
-  // thought（思考）部分を除外し、出力テキストだけを結合
-  const text = parts.filter(p => !p.thought).map(p => p.text).join('\n').trim();
-
-  // ```json の中身だけを正規表現でくり抜く
-  const jsonMatch = text.match(/\`\`\`json\s*(\{[\s\S]*?\})\s*\`\`\`/);
-  let parsed = null;
-
-  if (jsonMatch) {
-    try { parsed = JSON.parse(jsonMatch[1]); } catch (e) { }
-  } else {
-    try { parsed = JSON.parse(text); } catch (e) { }
-  }
-
-  if (!parsed) {
-    console.error('AI Raw Response:', text);
-    throw new Error('AIが正しいJSON形式で出力しませんでした。');
-  }
-
-  publishUsageSnapshot(usageAccumulator);
-  return parsed;
 }
 
 /**
- * 原作知識・固有名詞をGoogle検索経由で要約収集し、構造化JSONで返す関数
+ * 原作知識・固有名詞を共通Web検索基盤経由で要約収集し、構造化JSONで返す関数
  */
 export async function generateLoreProfileFromSearch(name, franchise) {
   const appState = getState();
@@ -3539,17 +3814,35 @@ export async function generateLoreProfileFromSearch(name, franchise) {
     throw new Error('APIキーが設定されていません。設定画面で登録してください。');
   }
 
-  const prompt = `
+  const query = [String(name || '').trim(), String(franchise || '').trim()].filter(Boolean).join(' ').trim();
+  const purpose = '原作世界の安定設定を収集し、ロアブック登録用データへ構造化する';
+  const requestedModelName = String(appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME).trim();
+  const usageAccumulator = createUsageAccumulator('lore-search', requestedModelName);
+  try {
+    const searchResult = await performReferenceLookup({
+      query: query || String(name || '').trim(),
+      purpose,
+      franchise: String(franchise || '').trim(),
+      usageAccumulator
+    });
+    const searchEvidence = buildReferenceSearchEvidenceBlock(searchResult, query || name, franchise);
+
+    const prompt = `
 # 世界観設定 / 固有名詞ロアデータ生成 指示書
 
 対象ワード: ${name}
 対象作品・コンテキスト: ${franchise}
 
-このワードについてGoogle検索を用いて原作の正確な設定情報を収集し、ZetaTavernロアブック用の構造化データを作成してください。
-検索時は必ず「対象ワード」と「対象作品・コンテキスト」を組み合わせ、どの作品の何を調べるかを明確にしてください。
+このワードについて共通検索基盤で取得した外部検索メモをもとに、原作の正確な設定情報を整理し、ZetaTavernロアブック用の構造化データを作成してください。
+検索時は「対象ワード」と「対象作品・コンテキスト」を組み合わせて取得されている。どの作品の何を調べたメモかを踏まえて判定してください。
 安易な捏造や無関係な作品の別単語との混同を避け、正確な原作知識を要約してください。
 検索で原作の安定設定として確認できない場合、あるいはこのワードがセッション限定の出来事・オリジナルキャラクター・即興設定だと判断した場合は、登録しないでください。
 普通名詞や一般語は登録禁止です。時間帯、日常行動、抽象概念、汎用アイテム名などは除外してください。
+
+## 検索結果
+以下は共通検索基盤で取得した外部検索メモである。推測で補わず、この内容を主な根拠として整理すること。
+
+${searchEvidence}
 
 出力は以下のJSONフォーマット（Markdownの \`\`\`json ... \`\`\` コードブロックで囲む）で返してください。
 
@@ -3576,60 +3869,26 @@ export async function generateLoreProfileFromSearch(name, franchise) {
 - summary / profile / speech / relationships はユーザーへの説明文ではなく、ロアブックにそのまま保存できる設定文として書くこと。
 - 文体は簡潔で硬めの常体に統一すること。基本は「〜である」「〜とされる」「〜を指す」などを使い、「〜です」「〜となっています」は避けること。
 `;
-
-  const requestedModelName = appState.searchModelName || appState.modelName || DEFAULT_SEARCH_MODEL_NAME;
-  const searchModelName = resolveSearchModelName(appState);
-  const usageAccumulator = createUsageAccumulator('lore-search', searchModelName);
-  if (searchModelName !== requestedModelName) {
-    console.log(`[Lore Search] Switched model from ${requestedModelName} to ${searchModelName} for googleSearch support.`);
+    const parsed = await generateStructuredJsonFromSearchEvidence({
+      appState,
+      apiKey,
+      usageAccumulator,
+      requestLabel: 'Lore Search',
+      prompt
+    });
+    publishUsageSnapshot(usageAccumulator);
+    return {
+      shouldRegister: parsed.shouldRegister !== false,
+      canonicalName: normalizeLoreEntryName(parsed.canonicalName || name),
+      type: normalizeLoreType((parsed.type || '').trim()),
+      summary: sanitizeLoreText(parsed.summary || ''),
+      profile: sanitizeLoreText(parsed.profile || ''),
+      speech: sanitizeLoreText(parsed.speech || ''),
+      relationships: sanitizeLoreText(parsed.relationships || ''),
+      reason: stripLoreCitations(parsed.reason || '').trim()
+    };
+  } catch (err) {
+    publishUsageSnapshot(usageAccumulator);
+    throw err;
   }
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${searchModelName}:generateContent?key=${apiKey}`;
-  const generationConfig = { temperature: 0.5, topP: 0.9, maxOutputTokens: 4096 };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig,
-      tools: [{ googleSearch: {} }]
-    })
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error?.message || `HTTP status ${response.status}`);
-  }
-
-  const result = await response.json();
-  addUsageMetadata(usageAccumulator, result?.usageMetadata);
-  const parts = result?.candidates?.[0]?.content?.parts;
-  if (!parts?.length) throw new Error('APIから有効なテキストが返されませんでした。');
-
-  const text = parts.filter(p => !p.thought).map(p => p.text).join('\n').trim();
-  const jsonMatch = text.match(/\`\`\`json\s*(\{[\s\S]*?\})\s*\`\`\`/);
-  let parsed = null;
-
-  if (jsonMatch) {
-    try { parsed = JSON.parse(jsonMatch[1]); } catch (e) { }
-  } else {
-    try { parsed = JSON.parse(text); } catch (e) { }
-  }
-
-  if (!parsed) {
-    console.error('AI Raw Response:', text);
-    throw new Error('AIが正しいJSON形式で出力しませんでした。');
-  }
-
-  publishUsageSnapshot(usageAccumulator);
-  return {
-    shouldRegister: parsed.shouldRegister !== false,
-    canonicalName: normalizeLoreEntryName(parsed.canonicalName || name),
-    type: normalizeLoreType((parsed.type || '').trim()),
-    summary: sanitizeLoreText(parsed.summary || ''),
-    profile: sanitizeLoreText(parsed.profile || ''),
-    speech: sanitizeLoreText(parsed.speech || ''),
-    relationships: sanitizeLoreText(parsed.relationships || ''),
-    reason: stripLoreCitations(parsed.reason || '').trim()
-  };
 }

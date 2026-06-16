@@ -68,6 +68,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'api_key',
   'model_name',
   'search_model_name',
+  'search_synthesis_model_name',
   'web_search_provider',
   'show_choices',
   'autoscroll_enabled',
@@ -895,6 +896,7 @@ async function loadConfigurations() {
   const tavilyApiKey = await db.getSetting('tavily_api_key', '');
   const model = await db.getSetting('model_name', 'gemini-2.5-flash');
   const searchModel = await db.getSetting('search_model_name', '');
+  const searchSynthesisModel = await db.getSetting('search_synthesis_model_name', '');
   const webSearchProvider = await db.getSetting('web_search_provider', 'auto');
   const choices = await db.getSetting('show_choices', true);
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
@@ -930,6 +932,7 @@ async function loadConfigurations() {
     tavilyApiKey,
     modelName: model,
     searchModelName: searchModel,
+    searchSynthesisModelName: searchSynthesisModel,
     webSearchProvider,
     showChoices: choices,
     autoscrollEnabled: autoscroll, // ★Stateに反映
@@ -954,6 +957,7 @@ async function loadConfigurations() {
   const tavilyKeyEl = document.getElementById('tavily-api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
+  const searchSynthesisModelEl = document.getElementById('search-synthesis-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★DOM取得
@@ -995,12 +999,21 @@ async function loadConfigurations() {
     normalizedCustomModels.push(searchModel);
     await db.saveSetting('custom_models', normalizedCustomModels);
   }
+  if (searchSynthesisModel && !DEFAULT_MODEL_VALUES.includes(searchSynthesisModel) && !normalizedCustomModels.includes(searchSynthesisModel)) {
+    normalizedCustomModels.push(searchSynthesisModel);
+    await db.saveSetting('custom_models', normalizedCustomModels);
+  }
 
   populateModelSelect(modelEl, normalizedCustomModels, { selectedValue: model });
   populateModelSelect(searchModelEl, normalizedCustomModels, {
     includeFollowOption: true,
     followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
     selectedValue: searchModel
+  });
+  populateModelSelect(searchSynthesisModelEl, normalizedCustomModels, {
+    includeFollowOption: true,
+    followOptionLabel: '検索専用モデルに追従',
+    selectedValue: searchSynthesisModel
   });
   renderCustomModelList(normalizedCustomModels);
   populateThinkingSelectForModel(model, getState());
@@ -1111,7 +1124,10 @@ async function bindEvents() {
         storyId: event?.detail?.storyId || null,
         forceFull: !!event?.detail?.forceFull,
         syncStory: !!event?.detail?.syncStory,
-        syncLores: !!event?.detail?.syncLores
+        syncLores: !!event?.detail?.syncLores,
+        syncCharacters: !!event?.detail?.syncCharacters,
+        characterIds: Array.isArray(event?.detail?.characterIds) ? event.detail.characterIds : [],
+        assetIds: Array.isArray(event?.detail?.assetIds) ? event.detail.assetIds : []
       });
     });
     hasDropboxAutoSyncEventBinding = true;
@@ -1154,6 +1170,7 @@ async function bindEvents() {
 
   // Bind Lorebook elements
   const loreAddBtn = document.getElementById('lore-add-btn');
+  const loreExportBtn = document.getElementById('lore-export-btn');
   const loreSearchInput = document.getElementById('lore-search-input');
   const loreFilterSelect = document.getElementById('lore-filter-select');
   const tabWorld = document.getElementById('lorebook-tab-world');
@@ -1161,6 +1178,9 @@ async function bindEvents() {
 
   if (loreAddBtn) {
     loreAddBtn.onclick = () => ui.showLoreEditModal(null);
+  }
+  if (loreExportBtn) {
+    loreExportBtn.onclick = () => ui.showLoreExportModal();
   }
   if (loreSearchInput) {
     loreSearchInput.oninput = () => ui.renderLorebook();
@@ -1306,6 +1326,7 @@ async function bindEvents() {
   const tavilyKeyEl = document.getElementById('tavily-api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
+  const searchSynthesisModelEl = document.getElementById('search-synthesis-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★自動スクロールDOM
@@ -1358,6 +1379,13 @@ async function bindEvents() {
       const val = e.target.value;
       updateState({ searchModelName: val });
       db.saveSetting('search_model_name', val);
+    };
+  }
+  if (searchSynthesisModelEl) {
+    searchSynthesisModelEl.onchange = (e) => {
+      const val = e.target.value;
+      updateState({ searchSynthesisModelName: val });
+      db.saveSetting('search_synthesis_model_name', val);
     };
   }
   if (webSearchProviderEl) {
@@ -1487,6 +1515,11 @@ async function bindEvents() {
         followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
         selectedValue: getState().searchModelName || ''
       });
+      populateModelSelect(searchSynthesisModelEl, normalizedCustomModels, {
+        includeFollowOption: true,
+        followOptionLabel: '検索専用モデルに追従',
+        selectedValue: getState().searchSynthesisModelName || ''
+      });
       renderCustomModelList(normalizedCustomModels);
 
       updateState({ modelName: newModel });
@@ -1519,6 +1552,10 @@ async function bindEvents() {
         updates.searchModelName = '';
         await db.saveSetting('search_model_name', '');
       }
+      if (getState().searchSynthesisModelName === modelToRemove) {
+        updates.searchSynthesisModelName = '';
+        await db.saveSetting('search_synthesis_model_name', '');
+      }
       if (Object.keys(updates).length > 0) {
         updateState(updates);
       }
@@ -1531,6 +1568,11 @@ async function bindEvents() {
         followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
         selectedValue: updates.searchModelName !== undefined ? updates.searchModelName : getState().searchModelName
       });
+      populateModelSelect(searchSynthesisModelEl, customModels, {
+        includeFollowOption: true,
+        followOptionLabel: '検索専用モデルに追従',
+        selectedValue: updates.searchSynthesisModelName !== undefined ? updates.searchSynthesisModelName : getState().searchSynthesisModelName
+      });
       renderCustomModelList(customModels);
     };
   }
@@ -1542,6 +1584,7 @@ async function bindEvents() {
   const fContextInput = document.getElementById('story-franchise-context-input');
   const imageBaseUrlInput = document.getElementById('story-image-base-url-input');
   const imageDefaultOutfitInput = document.getElementById('story-image-default-outfit-input');
+  let storyConfigSaveTimer = null;
 
   const saveCurrentStoryConfig = () => {
     const { currentStory } = getState();
@@ -1552,11 +1595,16 @@ async function bindEvents() {
     currentStory.franchiseContext = fContextInput ? fContextInput.value.trim() : '';
     currentStory.imageBaseUrl = imageBaseUrlInput ? imageBaseUrlInput.value.trim() : '';
     currentStory.imageDefaultOutfit = imageDefaultOutfitInput ? imageDefaultOutfitInput.value.trim() : '';
-    db.saveStory(currentStory).then(async () => {
-      const stories = await db.getStories();
-      updateState({ stories });
-      ui.renderSidebar();
-    });
+
+    if (storyConfigSaveTimer) clearTimeout(storyConfigSaveTimer);
+    storyConfigSaveTimer = setTimeout(async () => {
+      await db.saveStory(currentStory);
+      const stateNow = getState();
+      const nextStories = Array.isArray(stateNow.stories)
+        ? stateNow.stories.map(story => story.storyId === currentStory.storyId ? currentStory : story)
+        : [currentStory];
+      updateState({ stories: nextStories });
+    }, 180);
   };
 
   if (rPrompt) rPrompt.oninput = () => { saveCurrentStoryConfig(); triggerAutoResize(rPrompt); };
@@ -1618,7 +1666,11 @@ async function bindEvents() {
           const stories = await db.getStories();
           updateState({ stories });
           ui.renderSidebar();
-          queueDropboxAutoSync({ storyId: currentStory.storyId, forceFull: true });
+          queueDropboxAutoSync({
+            storyId: currentStory.storyId,
+            syncStory: true,
+            assetIds: newAssetId ? [newAssetId] : []
+          });
         });
       }
     };
@@ -2501,14 +2553,21 @@ async function performDropboxPull() {
 
 /** ターン終了後に自動同期を行うか確認する（静的UI表示） */
 function queueDropboxAutoSync(request = {}) {
-  const hasExplicitScope = request?.syncStory !== undefined || request?.syncLores !== undefined;
+  const hasExplicitScope =
+    request?.syncStory !== undefined ||
+    request?.syncLores !== undefined ||
+    request?.syncCharacters !== undefined;
+  const uniq = values => [...new Set((Array.isArray(values) ? values : []).filter(Boolean))];
   const normalized = {
     storyId: request?.storyId || null,
     forceFull: !!request?.forceFull,
     syncStory: hasExplicitScope ? !!request.syncStory : !!request?.storyId,
-    syncLores: !!request?.syncLores
+    syncLores: !!request?.syncLores,
+    syncCharacters: !!request?.syncCharacters,
+    characterIds: uniq(request?.characterIds),
+    assetIds: uniq(request?.assetIds)
   };
-  if (!normalized.forceFull && !normalized.syncStory && !normalized.syncLores) {
+  if (!normalized.forceFull && !normalized.syncStory && !normalized.syncLores && !normalized.syncCharacters) {
     normalized.forceFull = true;
   }
   pendingDropboxAutoSync = pendingDropboxAutoSync
@@ -2516,7 +2575,10 @@ function queueDropboxAutoSync(request = {}) {
       storyId: normalized.storyId || pendingDropboxAutoSync.storyId || null,
       forceFull: pendingDropboxAutoSync.forceFull || normalized.forceFull,
       syncStory: pendingDropboxAutoSync.syncStory || normalized.syncStory,
-      syncLores: pendingDropboxAutoSync.syncLores || normalized.syncLores
+      syncLores: pendingDropboxAutoSync.syncLores || normalized.syncLores,
+      syncCharacters: pendingDropboxAutoSync.syncCharacters || normalized.syncCharacters,
+      characterIds: uniq([...(pendingDropboxAutoSync.characterIds || []), ...normalized.characterIds]),
+      assetIds: uniq([...(pendingDropboxAutoSync.assetIds || []), ...normalized.assetIds])
     }
     : normalized;
   if (isDropboxAutoSyncRunning) return;
@@ -2536,7 +2598,7 @@ function queueDropboxAutoSync(request = {}) {
   }, 0);
 }
 
-async function performAutoDropboxSync({ storyId = null, forceFull = false, syncStory = false, syncLores = false } = {}) {
+async function performAutoDropboxSync({ storyId = null, forceFull = false, syncStory = false, syncLores = false, syncCharacters = false, characterIds = [], assetIds = [] } = {}) {
   const connected = await dropbox.isConnected();
   if (!connected) return;
 
@@ -2552,8 +2614,8 @@ async function performAutoDropboxSync({ storyId = null, forceFull = false, syncS
     updateSyncStatusIndicator('syncing');
     try {
       let completed = false;
-      if (!forceFull && (syncStory || syncLores)) {
-        completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores });
+      if (!forceFull && (syncStory || syncLores || syncCharacters)) {
+        completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores, syncCharacters, characterIds, assetIds });
         if (!completed) {
           console.log('[Dropbox AutoSync] 差分同期の基準がないため、フル同期します。');
         }
@@ -2621,24 +2683,58 @@ async function performDropboxPushSilent({ storyId = null, preferDelta = false } 
   });
 }
 
-async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = false, syncLores = false } = {}) {
+async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = false, syncLores = false, syncCharacters = false, characterIds = [], assetIds = [] } = {}) {
   const stories = await db.getStories();
-  const lores = await db.getWorldLores();
-  const settings = await collectDropboxSettings();
+  const uniqueCharacterIds = [...new Set((characterIds || []).filter(Boolean))];
+  const uniqueAssetIds = [...new Set((assetIds || []).filter(Boolean))];
+  const settings = syncStory ? await collectDropboxSettings() : null;
 
   if (syncStory && storyId) {
     const story = stories.find(item => item.storyId === storyId);
     if (story) {
+      const storyAssetIds = [];
+      if (uniqueAssetIds.length > 0 && story?.protagonist?.avatarAssetId && uniqueAssetIds.includes(story.protagonist.avatarAssetId)) {
+        storyAssetIds.push(story.protagonist.avatarAssetId);
+      }
+      const storyAssets = [];
+      for (const assetId of storyAssetIds) {
+        const blob = await db.getAssetBlob(assetId);
+        if (blob) storyAssets.push({ assetId, blob });
+      }
       const storyResult = await dropbox.pushStoryDeltaToDropbox({
         story,
         settings,
+        assets: storyAssets,
         onProgress: msg => console.log('[Dropbox AutoSync]', msg)
       });
       if (!storyResult) return false;
     }
   }
 
+  if (syncCharacters && uniqueCharacterIds.length > 0) {
+    const allCharacters = await db.getCharacters();
+    const targetCharacters = allCharacters.filter(item => uniqueCharacterIds.includes(item.characterId));
+    if (targetCharacters.length === 0) return false;
+
+    const relevantAssetIds = uniqueAssetIds.length > 0
+      ? uniqueAssetIds
+      : targetCharacters.map(item => item.avatarAssetId).filter(Boolean);
+    const characterAssets = [];
+    for (const assetId of relevantAssetIds) {
+      const blob = await db.getAssetBlob(assetId);
+      if (blob) characterAssets.push({ assetId, blob });
+    }
+
+    const characterResult = await dropbox.pushCharacterDeltaToDropbox({
+      characters: targetCharacters,
+      assets: characterAssets,
+      onProgress: msg => console.log('[Dropbox AutoSync]', msg)
+    });
+    if (!characterResult) return false;
+  }
+
   if (syncLores) {
+    const lores = await db.getWorldLores();
     const loreResult = await dropbox.pushLoreDeltaToDropbox({
       lores,
       onProgress: msg => console.log('[Dropbox AutoSync]', msg)

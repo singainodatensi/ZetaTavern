@@ -10,6 +10,7 @@ const state = {
   tavilyApiKey: '',
   modelName: 'gemini-2.5-flash',
   searchModelName: '',
+  searchSynthesisModelName: '',
   webSearchProvider: 'auto',
   availableModels: [],
   lastUsedModel: '',

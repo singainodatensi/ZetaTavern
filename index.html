@@ -285,6 +285,10 @@
                   <span class="material-symbols-outlined">download</span>
                   <span>JSON取り込み</span>
                 </button>
+                <button id="lore-export-btn" class="secondary-btn">
+                  <span class="material-symbols-outlined">upload</span>
+                  <span>JSON書き出し</span>
+                </button>
                 <input type="file" id="lore-import-input" accept=".json" class="hidden" multiple>
                 <button id="lore-add-btn" class="primary-btn">
                   <span class="material-symbols-outlined">add</span>
@@ -365,6 +369,13 @@
                     <option value="">使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)</option>
                   </select>
                   <small style="color: var(--text-sub); display: block; margin-top: 4px;">キャラクター自動検索とロア検索で使うモデルです。通常会話モデルと分離できます。</small>
+                </div>
+                <div class="form-group">
+                  <label for="search-synthesis-model-name-select">検索結果のJSON整形モデル</label>
+                  <select id="search-synthesis-model-name-select">
+                    <option value="">検索専用モデルに追従</option>
+                  </select>
+                  <small style="color: var(--text-sub); display: block; margin-top: 4px;">検索で取得した情報をJSONへ整形する担当モデルです。Google検索担当と分離できます。</small>
                 </div>
                 <div class="form-group">
                   <label for="web-search-provider-select">会話内Web検索プロバイダ</label>
