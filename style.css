@@ -739,13 +739,65 @@ body {
 }
 
 /* --- Dynamic Choices buttons --- */
+.choices-popover-backdrop {
+  position: fixed;
+  inset: 0;
+  background: transparent;
+  z-index: 18;
+}
+
+.choices-popover {
+  position: absolute;
+  left: 32px;
+  right: 32px;
+  bottom: calc(100% - 10px);
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  background: rgba(19, 19, 26, 0.97);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: var(--glass-blur);
+  z-index: 20;
+}
+
+.choices-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--text-sub);
+  font-size: 12px;
+}
+
+.choices-popover-header strong {
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+.choices-popover-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(124, 77, 255, 0.18);
+  color: var(--primary-hover);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .choices-container {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 16px 32px 0 32px;
-  max-width: 800px;
-  margin: 0 auto;
+  padding: 0;
+  max-width: none;
+  margin: 0;
   width: 100%;
   transition: var(--transition-smooth);
 }
@@ -857,6 +909,62 @@ body {
   margin: 0 auto;
   width: 100%;
   align-items: flex-end;
+}
+
+.input-tool-btn {
+  position: relative;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+  border: 1px solid var(--color-border);
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: var(--transition-smooth);
+}
+
+.input-tool-btn .material-symbols-outlined {
+  font-size: 18px;
+}
+
+.input-tool-btn:hover:not(:disabled),
+.input-tool-btn[aria-expanded="true"] {
+  border-color: var(--primary);
+  background: rgba(124, 77, 255, 0.14);
+  transform: translateY(-1px);
+}
+
+.input-tool-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.choice-trigger-glyph {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.input-tool-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(124, 77, 255, 0.35);
 }
 
 .api-usage-panel {
@@ -2310,7 +2418,13 @@ body {
   }
 
   .choices-container {
-    padding: 12px 16px 0 16px;
+    padding: 0;
+  }
+  .choices-popover {
+    left: 12px;
+    right: 12px;
+    bottom: calc(100% - 6px);
+    padding: 10px;
   }
   .mention-autocomplete {
     left: 12px;
@@ -2321,6 +2435,11 @@ body {
   .choice-btn {
     padding: 10px 14px;
     font-size: 13px;
+  }
+  .input-tool-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
   }
 
   /* Drawer header on mobile */
@@ -2659,6 +2778,8 @@ body {
 
 .session-lore-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   justify-content: flex-end;
   margin-top: 10px;
 }
@@ -2666,6 +2787,25 @@ body {
 .session-lore-actions .sidebar-session-link-btn {
   width: auto;
   min-width: 132px;
+}
+
+.session-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+.session-summary-error {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(244, 67, 54, 0.25);
+  background: rgba(244, 67, 54, 0.08);
+  color: #ff9f9f;
+  line-height: 1.6;
 }
 
 .session-event-list {
@@ -2751,6 +2891,11 @@ body {
 
 .session-rel-header .material-symbols-outlined {
   color: var(--text-muted);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .session-rel-header strong {

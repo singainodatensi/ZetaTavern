@@ -33,6 +33,11 @@ const state = {
   promptDebugEnabled: false,
   historyCompressionEnabled: true,
   historyTurnLimit: 10,
+  sessionSummaryAutoEnabled: true,
+  sessionSummaryTurnInterval: 20,
+  sessionSummaryModelName: '',
+  sessionSummaryPrompt: '',
+  isSessionSummaryRunning: false,
   
   // Participant attendance for current active story
   // e.g., { "char-uuid": "active" | "absent" }

@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260616b';
-import { generateStoryResponse, generateLoreProfileFromSearch, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260616b';
-import * as dropbox from './dropbox.js?v=20260616b';
+import * as ui from './ui.js?v=20260617a';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260617a';
+import * as dropbox from './dropbox.js?v=20260617a';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -18,17 +18,35 @@ const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラ
 
 // Default World settings template
 const DEFAULT_WORLD_PROMPT = `【世界観】\n現代の高校を舞台にした日常系ラブコメの世界。\n\n【状況】\n主人公は平凡な男子高校生。ある日、隣の席に学校一の美少女が座ることになり……`;
+const DEFAULT_SESSION_SUMMARY_PROMPT = `あなたはプロの編集者です。以下の会話履歴を、第三者の視点から見た物語の「あらすじ」として要約してください。
+「承知しました」等のAIとしての応答は不要です。要約文のみ出力して下さい。
+
+【最重要ルール】
+- プロットの維持: 物語の重要な転換点、登場人物の重要な決断、新しい事実の判明、伏線となりうる発言は、絶対に省略しないでください。
+- 客観的な記述: 「主人公は〜した。」「〇〇は〜と感じた。」のように、キャラクターの行動と感情を客観的に記述してください。
+- 情報の取捨選択: 日常的な挨拶や、物語の進行に直接関係のない会話は省略してください。
+- 時系列の維持: 出来事が起こった順番を正確に保ってください。
+- 継続性の維持: 誰が誰とどう出会ったか、なぜ同行しているのか、今後どこへ向かうのかが失われないようにしてください。
+- 未回収要素の保持: 約束、保留案件、未解決の懸案、今後回収すべき話題があれば明示してください。
+
+最終的な出力は、このあらすじを初めて読む人でも、これまでの物語の流れを正確に理解できるような形式にしてください。`;
 
 let hasBooted = false;
 let isSyncInProgress = false; // 同期の多重実行を防ぐ排他ガードフラグ
 let isDropboxAutoSyncRunning = false;
 let pendingDropboxAutoSync = null;
 let hasDropboxAutoSyncEventBinding = false;
+const sessionSummaryInFlight = new Set();
 
 function createEmptySessionLore() {
   return {
     summary: '',
     summary_source: '',
+    summary_checkpoint_turn: 0,
+    last_summary_at: 0,
+    last_summary_status: '',
+    last_summary_error: '',
+    last_summary_mode: '',
     current_state: '',
     recent_turning_points: [],
     long_term_events: [],
@@ -46,6 +64,15 @@ function ensureSessionLoreStructure(story) {
   story.session_lore = {
     ...createEmptySessionLore(),
     ...sessionLore,
+    summary_checkpoint_turn: Number.isFinite(Number(sessionLore.summary_checkpoint_turn))
+      ? Number(sessionLore.summary_checkpoint_turn)
+      : 0,
+    last_summary_at: Number.isFinite(Number(sessionLore.last_summary_at))
+      ? Number(sessionLore.last_summary_at)
+      : 0,
+    last_summary_status: String(sessionLore.last_summary_status || '').trim(),
+    last_summary_error: String(sessionLore.last_summary_error || '').trim(),
+    last_summary_mode: String(sessionLore.last_summary_mode || '').trim(),
     recent_turning_points: Array.isArray(sessionLore.recent_turning_points) ? sessionLore.recent_turning_points : [],
     long_term_events: Array.isArray(sessionLore.long_term_events)
       ? sessionLore.long_term_events
@@ -83,6 +110,10 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'prompt_debug_enabled',
   'history_compression_enabled',
   'history_turn_limit',
+  'session_summary_auto_enabled',
+  'session_summary_turn_interval',
+  'session_summary_model_name',
+  'session_summary_prompt',
   'api_timeout',
   'api_retries',
   'font_size',
@@ -358,6 +389,132 @@ function updateHistoryCompressionControls(enabled) {
     historyTurnLimitHelpEl.textContent = enabled
       ? '古い会話はセッションロア要約に委ね、直近の指定ターン数だけをAIへ送ります。'
       : '圧縮がOFFの間は、会話履歴ターン数の制限を使わず全履歴をAIへ送ります。';
+  }
+}
+
+function updateSessionSummaryControls(enabled) {
+  const summaryTurnIntervalEl = document.getElementById('session-summary-turn-interval-select');
+  const summaryTurnIntervalHelpEl = document.getElementById('session-summary-turn-interval-help');
+  if (summaryTurnIntervalEl) {
+    summaryTurnIntervalEl.disabled = !enabled;
+    summaryTurnIntervalEl.title = enabled ? '' : '自動要約がOFFのため無効です。';
+    summaryTurnIntervalEl.style.opacity = enabled ? '1' : '0.55';
+  }
+  if (summaryTurnIntervalHelpEl) {
+    summaryTurnIntervalHelpEl.textContent = enabled
+      ? '指定したユーザー入力ターン数ごとに、会話履歴を圧縮してセッションロアへ統合します。'
+      : '自動要約がOFFの間は、手動の要約ボタンからだけ圧縮を実行できます。';
+  }
+}
+
+function getSessionSummaryInterval(stateSnapshot = getState()) {
+  const rawValue = Number(stateSnapshot.sessionSummaryTurnInterval);
+  if (!Number.isFinite(rawValue) || rawValue <= 0) return 20;
+  return rawValue;
+}
+
+function shouldAutoSummarizeStory(story, stateSnapshot = getState()) {
+  if (!story || stateSnapshot.sessionSummaryAutoEnabled === false) return false;
+  const sessionLore = ensureSessionLoreStructure(story);
+  const totalTurns = countUserTurnChunks(story.messages || []);
+  const checkpointTurn = Number.isFinite(Number(sessionLore.summary_checkpoint_turn))
+    ? Number(sessionLore.summary_checkpoint_turn)
+    : 0;
+  return totalTurns - checkpointTurn >= getSessionSummaryInterval(stateSnapshot);
+}
+
+async function refreshStoryAfterSessionSummary(storyId) {
+  const stories = await db.getStories();
+  const activeState = getState();
+  const refreshedStory = stories.find(item => item.storyId === storyId) || activeState.currentStory;
+  updateState({ stories });
+  if (activeState.currentStory?.storyId === storyId && refreshedStory) {
+    setActiveStory(refreshedStory);
+    ui.renderStory();
+    ui.renderSidebar();
+    await ui.renderLorebook();
+  }
+  ui.renderStoryList();
+}
+
+async function runSessionSummary(storyId, options = {}) {
+  if (!storyId || sessionSummaryInFlight.has(storyId)) return false;
+
+  sessionSummaryInFlight.add(storyId);
+  const activeBefore = getState().currentStory;
+  if (activeBefore?.storyId === storyId) {
+    updateState({ isSessionSummaryRunning: true });
+    ui.renderStory();
+  }
+
+  try {
+    const workingStory = await db.getStory(storyId);
+    if (!workingStory) throw new Error('対象のストーリーが見つかりませんでした。');
+
+    ensureSessionLoreStructure(workingStory);
+    workingStory.session_lore.last_summary_status = 'running';
+    workingStory.session_lore.last_summary_error = '';
+    workingStory.session_lore.last_summary_mode = options.mode === 'manual' ? 'manual' : 'auto';
+    await db.saveStory(workingStory);
+    await refreshStoryAfterSessionSummary(storyId);
+
+    const result = await generateStorySummary(workingStory, { mode: options.mode || 'manual' });
+
+    if (result?.unchanged) {
+      const latestStory = await db.getStory(storyId);
+      if (latestStory) {
+        ensureSessionLoreStructure(latestStory);
+        latestStory.session_lore.last_summary_status = 'success';
+        latestStory.session_lore.last_summary_error = '';
+        latestStory.session_lore.last_summary_mode = options.mode === 'manual' ? 'manual' : 'auto';
+        latestStory.session_lore.last_summary_at = Date.now();
+        await db.saveStory(latestStory);
+      }
+      await refreshStoryAfterSessionSummary(storyId);
+      return true;
+    }
+
+    const latestStory = await db.getStory(storyId);
+    if (!latestStory) throw new Error('要約保存時にストーリーを再取得できませんでした。');
+
+    ensureSessionLoreStructure(latestStory);
+    latestStory.session_lore.summary = String(result.summary || '').trim();
+    latestStory.session_lore.summary_source = 'ai-summary';
+    latestStory.session_lore.summary_checkpoint_turn = Number(result.checkpointTurn || countUserTurnChunks(latestStory.messages || []));
+    latestStory.session_lore.last_summary_at = Date.now();
+    latestStory.session_lore.last_summary_status = 'success';
+    latestStory.session_lore.last_summary_error = '';
+    latestStory.session_lore.last_summary_mode = options.mode === 'manual' ? 'manual' : 'auto';
+    await db.saveStory(latestStory);
+
+    queueDropboxAutoSync({ storyId, syncStory: true });
+    await refreshStoryAfterSessionSummary(storyId);
+    return true;
+  } catch (err) {
+    const latestStory = await db.getStory(storyId);
+    if (latestStory) {
+      ensureSessionLoreStructure(latestStory);
+      latestStory.session_lore.last_summary_status = 'error';
+      latestStory.session_lore.last_summary_error = String(err?.message || err || '').trim();
+      latestStory.session_lore.last_summary_mode = options.mode === 'manual' ? 'manual' : 'auto';
+      latestStory.session_lore.last_summary_at = Date.now();
+      await db.saveStory(latestStory);
+    }
+    await refreshStoryAfterSessionSummary(storyId);
+    if (options.mode === 'manual') {
+      alert(`要約に失敗しました:\n${err.message}`);
+    } else {
+      console.warn('[Session Summary] Auto summary failed:', err);
+    }
+    return false;
+  } finally {
+    sessionSummaryInFlight.delete(storyId);
+    const activeAfter = getState().currentStory;
+    if (activeAfter?.storyId === storyId) {
+      updateState({ isSessionSummaryRunning: false });
+      ui.renderStory();
+      ui.renderSidebar();
+    }
   }
 }
 
@@ -910,6 +1067,10 @@ async function loadConfigurations() {
   const promptDebugEnabled = await db.getSetting('prompt_debug_enabled', false);
   const historyCompressionEnabled = await db.getSetting('history_compression_enabled', true);
   const historyTurnLimit = await db.getSetting('history_turn_limit', 10);
+  const sessionSummaryAutoEnabled = await db.getSetting('session_summary_auto_enabled', true);
+  const sessionSummaryTurnInterval = await db.getSetting('session_summary_turn_interval', 20);
+  const sessionSummaryModelName = await db.getSetting('session_summary_model_name', '');
+  const sessionSummaryPrompt = await db.getSetting('session_summary_prompt', DEFAULT_SESSION_SUMMARY_PROMPT);
   
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
   const apiTimeout = await db.getSetting('api_timeout', 60);
@@ -948,7 +1109,12 @@ async function loadConfigurations() {
     gemmaThinkingEnabled,
     promptDebugEnabled,
     historyCompressionEnabled,
-    historyTurnLimit: Number.isFinite(Number(historyTurnLimit)) ? Number(historyTurnLimit) : 10
+    historyTurnLimit: Number.isFinite(Number(historyTurnLimit)) ? Number(historyTurnLimit) : 10,
+    sessionSummaryAutoEnabled,
+    sessionSummaryTurnInterval: Number.isFinite(Number(sessionSummaryTurnInterval)) ? Number(sessionSummaryTurnInterval) : 20,
+    sessionSummaryModelName: String(sessionSummaryModelName || '').trim(),
+    sessionSummaryPrompt: String(sessionSummaryPrompt || DEFAULT_SESSION_SUMMARY_PROMPT),
+    isSessionSummaryRunning: false
   });
 
   // Prefill settings form
@@ -971,6 +1137,10 @@ async function loadConfigurations() {
   const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
   const historyCompressionEl = document.getElementById('history-compression-toggle-checkbox');
   const historyTurnLimitEl = document.getElementById('history-turn-limit-select');
+  const sessionSummaryAutoEl = document.getElementById('session-summary-auto-toggle-checkbox');
+  const sessionSummaryTurnIntervalEl = document.getElementById('session-summary-turn-interval-select');
+  const sessionSummaryModelEl = document.getElementById('session-summary-model-name-select');
+  const sessionSummaryPromptEl = document.getElementById('session-summary-prompt-input');
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
@@ -987,8 +1157,12 @@ async function loadConfigurations() {
   if (promptDebugEl) promptDebugEl.checked = promptDebugEnabled;
   if (historyCompressionEl) historyCompressionEl.checked = historyCompressionEnabled;
   if (historyTurnLimitEl) historyTurnLimitEl.value = String(historyTurnLimit);
+  if (sessionSummaryAutoEl) sessionSummaryAutoEl.checked = sessionSummaryAutoEnabled;
+  if (sessionSummaryTurnIntervalEl) sessionSummaryTurnIntervalEl.value = String(sessionSummaryTurnInterval);
+  if (sessionSummaryPromptEl) sessionSummaryPromptEl.value = String(sessionSummaryPrompt || DEFAULT_SESSION_SUMMARY_PROMPT);
   if (webSearchProviderEl) webSearchProviderEl.value = webSearchProvider || 'auto';
   updateHistoryCompressionControls(historyCompressionEnabled);
+  updateSessionSummaryControls(sessionSummaryAutoEnabled);
 
   const normalizedCustomModels = Array.isArray(customModels) ? [...new Set(customModels.filter(Boolean))] : [];
   if (model && !DEFAULT_MODEL_VALUES.includes(model) && !normalizedCustomModels.includes(model)) {
@@ -1003,6 +1177,10 @@ async function loadConfigurations() {
     normalizedCustomModels.push(searchSynthesisModel);
     await db.saveSetting('custom_models', normalizedCustomModels);
   }
+  if (sessionSummaryModelName && !DEFAULT_MODEL_VALUES.includes(sessionSummaryModelName) && !normalizedCustomModels.includes(sessionSummaryModelName)) {
+    normalizedCustomModels.push(sessionSummaryModelName);
+    await db.saveSetting('custom_models', normalizedCustomModels);
+  }
 
   populateModelSelect(modelEl, normalizedCustomModels, { selectedValue: model });
   populateModelSelect(searchModelEl, normalizedCustomModels, {
@@ -1014,6 +1192,11 @@ async function loadConfigurations() {
     includeFollowOption: true,
     followOptionLabel: '検索専用モデルに追従',
     selectedValue: searchSynthesisModel
+  });
+  populateModelSelect(sessionSummaryModelEl, normalizedCustomModels, {
+    includeFollowOption: true,
+    followOptionLabel: '使用モデルに追従',
+    selectedValue: sessionSummaryModelName
   });
   renderCustomModelList(normalizedCustomModels);
   populateThinkingSelectForModel(model, getState());
@@ -1285,9 +1468,15 @@ async function bindEvents() {
     const isRetryOnly = e.detail?.retryOnly;
     submitStoryTurn(isRetryOnly ? 'retry' : 'regen');
   });
+  window.addEventListener('requestSessionSummary', async (e) => {
+    const targetStoryId = e.detail?.storyId || getState().currentStory?.storyId;
+    if (!targetStoryId) return;
+    await runSessionSummary(targetStoryId, { mode: 'manual' });
+  });
 
   // Send action input trigger
   const sendBtn = document.getElementById('send-btn');
+  const summaryRunBtn = document.getElementById('summary-run-btn');
   const userInputField = document.getElementById('user-input-field');
 
   if (sendBtn && userInputField) {
@@ -1307,13 +1496,21 @@ async function bindEvents() {
       }
     };
   }
+  if (summaryRunBtn) {
+    summaryRunBtn.onclick = async () => {
+      const targetStoryId = getState().currentStory?.storyId;
+      if (!targetStoryId) return;
+      await runSessionSummary(targetStoryId, { mode: 'manual' });
+    };
+  }
 
   // ★ 長文用 textarea の自動拡張イベントをバインド
   const textareasToAutoResize = [
     document.getElementById('user-input-field'),
     document.getElementById('story-rule-prompt'),
     document.getElementById('story-world-prompt'),
-    document.getElementById('protagonist-desc')
+    document.getElementById('protagonist-desc'),
+    document.getElementById('session-summary-prompt-input')
   ];
   textareasToAutoResize.forEach(el => {
     if (el) {
@@ -1344,6 +1541,10 @@ async function bindEvents() {
   const promptDebugEl = document.getElementById('prompt-debug-toggle-checkbox');
   const historyCompressionEl = document.getElementById('history-compression-toggle-checkbox');
   const historyTurnLimitEl = document.getElementById('history-turn-limit-select');
+  const sessionSummaryAutoEl = document.getElementById('session-summary-auto-toggle-checkbox');
+  const sessionSummaryTurnIntervalEl = document.getElementById('session-summary-turn-interval-select');
+  const sessionSummaryModelEl = document.getElementById('session-summary-model-name-select');
+  const sessionSummaryPromptEl = document.getElementById('session-summary-prompt-input');
 
   if (provEl) {
     provEl.onchange = (e) => {
@@ -1481,6 +1682,36 @@ async function bindEvents() {
       db.saveSetting('history_turn_limit', nextValue);
     };
   }
+  if (sessionSummaryAutoEl) {
+    sessionSummaryAutoEl.onchange = (e) => {
+      const val = e.target.checked;
+      updateState({ sessionSummaryAutoEnabled: val });
+      db.saveSetting('session_summary_auto_enabled', val);
+      updateSessionSummaryControls(val);
+    };
+  }
+  if (sessionSummaryTurnIntervalEl) {
+    sessionSummaryTurnIntervalEl.onchange = (e) => {
+      const val = parseInt(e.target.value, 10);
+      const nextValue = Number.isFinite(val) ? val : 20;
+      updateState({ sessionSummaryTurnInterval: nextValue });
+      db.saveSetting('session_summary_turn_interval', nextValue);
+    };
+  }
+  if (sessionSummaryModelEl) {
+    sessionSummaryModelEl.onchange = (e) => {
+      const val = String(e.target.value || '').trim();
+      updateState({ sessionSummaryModelName: val });
+      db.saveSetting('session_summary_model_name', val);
+    };
+  }
+  if (sessionSummaryPromptEl) {
+    sessionSummaryPromptEl.oninput = (e) => {
+      const val = String(e.target.value || '');
+      updateState({ sessionSummaryPrompt: val });
+      db.saveSetting('session_summary_prompt', val);
+    };
+  }
   // ナレーション表示設定変更のイベント監視
   const onNarrationStyleChange = () => {
     const bg = nBgEl ? nBgEl.value : '#f3f5f8';
@@ -1521,6 +1752,11 @@ async function bindEvents() {
         followOptionLabel: '検索専用モデルに追従',
         selectedValue: getState().searchSynthesisModelName || ''
       });
+      populateModelSelect(sessionSummaryModelEl, normalizedCustomModels, {
+        includeFollowOption: true,
+        followOptionLabel: '使用モデルに追従',
+        selectedValue: getState().sessionSummaryModelName || ''
+      });
       renderCustomModelList(normalizedCustomModels);
 
       updateState({ modelName: newModel });
@@ -1557,6 +1793,10 @@ async function bindEvents() {
         updates.searchSynthesisModelName = '';
         await db.saveSetting('search_synthesis_model_name', '');
       }
+      if (getState().sessionSummaryModelName === modelToRemove) {
+        updates.sessionSummaryModelName = '';
+        await db.saveSetting('session_summary_model_name', '');
+      }
       if (Object.keys(updates).length > 0) {
         updateState(updates);
       }
@@ -1573,6 +1813,11 @@ async function bindEvents() {
         includeFollowOption: true,
         followOptionLabel: '検索専用モデルに追従',
         selectedValue: updates.searchSynthesisModelName !== undefined ? updates.searchSynthesisModelName : getState().searchSynthesisModelName
+      });
+      populateModelSelect(sessionSummaryModelEl, customModels, {
+        includeFollowOption: true,
+        followOptionLabel: '使用モデルに追従',
+        selectedValue: updates.sessionSummaryModelName !== undefined ? updates.sessionSummaryModelName : getState().sessionSummaryModelName
       });
       renderCustomModelList(customModels);
     };
@@ -1975,11 +2220,14 @@ function applyFallbackSessionLoreUpdate(story, userText, aiText, options = {}) {
     || extractFallbackSessionSummary(userText, { minLength: 4, limit: 90 });
   const rawUserText = String(userText || '').trim();
   const rawAiText = String(aiText || '').trim();
+  const summarySource = String(sessionLore.summary_source || '').trim();
   const preserveAiSummary = options.preserveAiSummary === true &&
-    sessionLore.summary_source === 'ai' &&
+    ['ai', 'ai-summary'].includes(summarySource) &&
+    String(sessionLore.summary || '').trim();
+  const shouldKeepCompressedSummary = ['manual', 'ai-summary'].includes(summarySource) &&
     String(sessionLore.summary || '').trim();
 
-  if (!preserveAiSummary && (sessionLore.summary_source || 'auto') !== 'manual' && nextSummary) {
+  if (!preserveAiSummary && !shouldKeepCompressedSummary && nextSummary) {
     sessionLore.summary = nextSummary;
     sessionLore.summary_source = 'fallback';
   }
@@ -2139,6 +2387,12 @@ async function submitStoryTurn(mode = 'normal') {
 
     // Auto-sync to Dropbox in the background.
     queueDropboxAutoSync({ storyId: refreshedStory.storyId });
+
+    if (shouldAutoSummarizeStory(refreshedStory, getState())) {
+      runSessionSummary(refreshedStory.storyId, { mode: 'auto' }).catch(err => {
+        console.warn('[Session Summary] Auto summary task failed:', err);
+      });
+    }
 
   } catch (err) {
     // ユーザーによる意図的なキャンセル（手動停止）の場合

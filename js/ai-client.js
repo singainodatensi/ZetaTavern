@@ -44,6 +44,18 @@ function hasCharacterLoreConflict(lore, characters, franchise) {
 }
 
 const DEFAULT_SEARCH_MODEL_NAME = 'gemini-2.5-flash-lite';
+const DEFAULT_SESSION_SUMMARY_PROMPT = `あなたはプロの編集者です。以下の会話履歴を、第三者の視点から見た物語の「あらすじ」として要約してください。
+「承知しました」等のAIとしての応答は不要です。要約文のみ出力して下さい。
+
+【最重要ルール】
+- プロットの維持: 物語の重要な転換点、登場人物の重要な決断、新しい事実の判明、伏線となりうる発言は、絶対に省略しないでください。
+- 客観的な記述: 「主人公は〜した。」「〇〇は〜と感じた。」のように、キャラクターの行動と感情を客観的に記述してください。
+- 情報の取捨選択: 日常的な挨拶や、物語の進行に直接関係のない会話は省略してください。
+- 時系列の維持: 出来事が起こった順番を正確に保ってください。
+- 継続性の維持: 誰が誰とどう出会ったか、なぜ同行しているのか、今後どこへ向かうのかが失われないようにしてください。
+- 未回収要素の保持: 約束、保留案件、未解決の懸案、今後回収すべき話題があれば明示してください。
+
+最終的な出力は、このあらすじを初めて読む人でも、これまでの物語の流れを正確に理解できるような形式にしてください。`;
 const MAX_SEARCH_WEB_CALLS_PER_TURN = 1;
 const webSearchCooldownUntilByProvider = {
   google: 0,
@@ -233,6 +245,74 @@ function chunkMessagesByUserTurn(messages = []) {
   }
 
   return chunks;
+}
+
+export function countUserTurnChunks(messages = []) {
+  return chunkMessagesByUserTurn(messages).length;
+}
+
+function buildStorySummaryTranscript(chunks = []) {
+  const lines = [];
+  chunks.forEach((chunk, chunkIndex) => {
+    lines.push(`## Turn ${chunkIndex + 1}`);
+    chunk.forEach(message => {
+      const roleLabel = message?.role === 'model' ? 'AI' : 'USER';
+      const body = String(message?.content || '').trim();
+      if (!body) return;
+      lines.push(`${roleLabel}: ${body}`);
+    });
+    lines.push('');
+  });
+  return lines.join('\n').trim();
+}
+
+function resolveSessionSummaryModelName(appState) {
+  const preferred = String(appState?.sessionSummaryModelName || '').trim();
+  if (preferred) return preferred;
+  const conversationModel = String(appState?.modelName || '').trim();
+  return conversationModel || DEFAULT_SEARCH_MODEL_NAME;
+}
+
+function buildSessionSummaryPrompt({
+  basePrompt,
+  story,
+  existingSummary,
+  transcript,
+  startTurn,
+  endTurn,
+  totalTurns,
+  mode
+}) {
+  const sections = [
+    String(basePrompt || DEFAULT_SESSION_SUMMARY_PROMPT).trim(),
+    '',
+    `【ストーリータイトル】`,
+    String(story?.title || '無題のストーリー'),
+    '',
+    `【今回統合する範囲】`,
+    `- 要約モード: ${mode === 'manual' ? 'manual' : 'auto'}`,
+    `- 統合開始ターン: ${Math.max(1, Number(startTurn || 0) + 1)}`,
+    `- 統合終了ターン: ${Math.max(0, Number(endTurn || 0))}`,
+    `- 現在の総ユーザーターン数: ${Math.max(0, Number(totalTurns || 0))}`,
+    ''
+  ];
+
+  if (existingSummary) {
+    sections.push('【これまでの圧縮あらすじ】');
+    sections.push(existingSummary.trim());
+    sections.push('');
+    sections.push('【指示】');
+    sections.push('上記の既存要約に、これから提示する新しい会話履歴を統合し、重複を整理した最新版のあらすじとして再出力してください。');
+    sections.push('');
+  } else {
+    sections.push('【指示】');
+    sections.push('以下の会話履歴を最初の圧縮あらすじとして要約してください。');
+    sections.push('');
+  }
+
+  sections.push('【今回追加する会話履歴】');
+  sections.push(transcript || '（今回追加する会話履歴はありません）');
+  return sections.join('\n');
 }
 
 function selectPromptMessages(messages = [], turnLimit = 0) {
@@ -1409,6 +1489,11 @@ function createEmptySessionLore() {
   return {
     summary: '',
     summary_source: '',
+    summary_checkpoint_turn: 0,
+    last_summary_at: 0,
+    last_summary_status: '',
+    last_summary_error: '',
+    last_summary_mode: '',
     current_state: '',
     recent_turning_points: [],
     long_term_events: [],
@@ -1426,6 +1511,15 @@ function ensureSessionLoreStructure(story) {
   story.session_lore = {
     ...createEmptySessionLore(),
     ...sessionLore,
+    summary_checkpoint_turn: Number.isFinite(Number(sessionLore.summary_checkpoint_turn))
+      ? Number(sessionLore.summary_checkpoint_turn)
+      : 0,
+    last_summary_at: Number.isFinite(Number(sessionLore.last_summary_at))
+      ? Number(sessionLore.last_summary_at)
+      : 0,
+    last_summary_status: String(sessionLore.last_summary_status || '').trim(),
+    last_summary_error: String(sessionLore.last_summary_error || '').trim(),
+    last_summary_mode: String(sessionLore.last_summary_mode || '').trim(),
     recent_turning_points: normalizeSessionLoreList(sessionLore.recent_turning_points || [], 8),
     long_term_events: normalizeSessionLoreList(
       sessionLore.long_term_events || sessionLore.key_events || [],
@@ -1806,7 +1900,10 @@ export async function buildSystemInstruction(story, options = {}) {
     const sessionLore = ensureSessionLoreStructure(story);
     instruction += `【これまでのストーリー進行・獲得フラグ（長期記憶）】\n`;
     if (sessionLore.summary) {
-      instruction += `・全体状況/あらすじ: ${sessionLore.summary}\n`;
+      instruction += `・圧縮あらすじ（古い会話履歴の要約）: ${sessionLore.summary}\n`;
+    }
+    if (sessionLore.summary_checkpoint_turn) {
+      instruction += `・圧縮済みユーザーターン数: ${sessionLore.summary_checkpoint_turn}\n`;
     }
     if (sessionLore.current_state) {
       instruction += `・現在の場面: ${sessionLore.current_state}\n`;
@@ -2999,6 +3096,108 @@ function describeThinkingConfig(config) {
     return `Budget: ${config.thinkingBudget}`;
   }
   return 'あり';
+}
+
+export async function generateStorySummary(story, options = {}) {
+  const appState = getState();
+  const apiKey = appState.apiKey || await getApiKeyFromStorage();
+
+  if (!apiKey) {
+    throw new Error('APIキーが設定されていません。設定画面で登録してください。');
+  }
+
+  const modelName = resolveSessionSummaryModelName(appState);
+  const usageAccumulator = createUsageAccumulator('story-summary', modelName);
+  const messages = Array.isArray(story?.messages) ? story.messages : [];
+  const chunks = chunkMessagesByUserTurn(messages);
+  const totalTurns = chunks.length;
+  const sessionLore = ensureSessionLoreStructure(story);
+  const checkpointTurn = Number.isFinite(Number(sessionLore.summary_checkpoint_turn))
+    ? Number(sessionLore.summary_checkpoint_turn)
+    : 0;
+  const isManual = options.mode === 'manual';
+
+  let startTurn = Math.max(0, Math.min(checkpointTurn, totalTurns));
+  let chunksToSummarize = chunks.slice(startTurn, totalTurns);
+  let existingSummary = String(sessionLore.summary || '').trim();
+
+  if (chunksToSummarize.length === 0 && isManual) {
+    startTurn = 0;
+    chunksToSummarize = chunks.slice(0, totalTurns);
+    existingSummary = '';
+  }
+
+  if (chunksToSummarize.length === 0) {
+    return {
+      summary: existingSummary,
+      checkpointTurn,
+      totalTurns,
+      unchanged: true,
+      usage: publishUsageSnapshot(usageAccumulator),
+      modelName
+    };
+  }
+
+  const transcript = buildStorySummaryTranscript(chunksToSummarize);
+  const summaryPrompt = buildSessionSummaryPrompt({
+    basePrompt: String(appState.sessionSummaryPrompt || '').trim() || DEFAULT_SESSION_SUMMARY_PROMPT,
+    story,
+    existingSummary,
+    transcript,
+    startTurn,
+    endTurn: totalTurns,
+    totalTurns,
+    mode: isManual ? 'manual' : 'auto'
+  });
+
+  const contents = [{ role: 'user', parts: [{ text: summaryPrompt }] }];
+  accumulatePromptDebug(usageAccumulator, {
+    systemInstruction: '',
+    contents,
+    tools: []
+  });
+
+  const generationConfig = {
+    temperature: 0.3,
+    topP: 0.9,
+    maxOutputTokens: 4096
+  };
+  const thinkingConfig = buildThinkingConfig(modelName, appState);
+  usageAccumulator.thinkingConfigLabel = describeThinkingConfig(thinkingConfig);
+  if (thinkingConfig && typeof thinkingConfig.gemmaThinkEnabled !== 'boolean') {
+    generationConfig.thinkingConfig = thinkingConfig;
+  }
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents,
+      generationConfig
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const message = errorData.error?.message || `HTTP status ${response.status}`;
+    throw new Error(`要約API Error: ${message}`);
+  }
+
+  const result = await response.json();
+  addUsageMetadata(usageAccumulator, result?.usageMetadata);
+  const extracted = extractStoryTextAndThoughtFromApiResponse(result);
+  const summaryText = String(extracted?.text || '').trim();
+  if (!summaryText) {
+    throw new Error('要約テキストを取得できませんでした。');
+  }
+
+  return {
+    summary: summaryText,
+    checkpointTurn: totalTurns,
+    totalTurns,
+    usage: publishUsageSnapshot(usageAccumulator),
+    modelName
+  };
 }
 
 /**

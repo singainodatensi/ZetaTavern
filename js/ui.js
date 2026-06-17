@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName } from './ai-client.js?v=20260616b';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks } from './ai-client.js?v=20260617a';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -63,6 +63,16 @@ function normalizeSessionLoreEventForDisplay(event) {
     }
   }
   return '';
+}
+
+function formatSessionSummaryTimestamp(value) {
+  const timestamp = Number(value || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '未実行';
+  try {
+    return new Date(timestamp).toLocaleString('ja-JP');
+  } catch (_) {
+    return '未実行';
+  }
 }
 
 function normalizeLoreSyncFranchises(values = []) {
@@ -820,6 +830,10 @@ export async function renderStory() {
   const { currentStory, uiMode, isGenerating, autoscrollEnabled } = appState;
 
   if (!currentStory) {
+    latestStoryChoices = [];
+    closeChoicePopover();
+    updateChoiceTriggerUI();
+    updateSessionSummaryTriggerUI();
     container.innerHTML = `
       <div class="empty-state">
         <span class="material-symbols-outlined">menu_book</span>
@@ -1175,6 +1189,7 @@ for (let i = 0; i < messages.length; i++) {
 
   // 選択肢ボタンの描画
   renderChoiceButtons(parsedLast.choices);
+  updateSessionSummaryTriggerUI();
 
   // ★ 最後にスクロール位置の調整
   if (autoscrollEnabled !== false) {
@@ -1455,32 +1470,130 @@ export async function showEditMessageModal(msgIndex) {
   };
 }
 
+let latestStoryChoices = [];
+let isChoicePopoverOpen = false;
+let choicePopoverBindingsInitialized = false;
+
+function updateSessionSummaryTriggerUI() {
+  const trigger = document.getElementById('summary-run-btn');
+  if (!trigger) return;
+  const icon = trigger.querySelector('.material-symbols-outlined');
+  const { currentStory, isGenerating, isSessionSummaryRunning } = getState();
+  const hasStory = !!currentStory;
+  trigger.classList.toggle('hidden', !hasStory);
+  trigger.disabled = !hasStory || isGenerating || isSessionSummaryRunning;
+  trigger.title = isSessionSummaryRunning
+    ? '要約を実行中です'
+    : '会話履歴を要約して圧縮';
+  trigger.setAttribute('aria-label', trigger.title);
+  if (icon) {
+    icon.textContent = isSessionSummaryRunning ? 'sync' : 'summarize';
+    icon.style.animation = isSessionSummaryRunning ? 'spin 1s linear infinite' : '';
+  }
+}
+
+function closeChoicePopover() {
+  isChoicePopoverOpen = false;
+  const popover = document.getElementById('choices-popover');
+  const backdrop = document.getElementById('choices-popover-backdrop');
+  const trigger = document.getElementById('choices-toggle-btn');
+  if (popover) {
+    popover.classList.add('hidden');
+    popover.setAttribute('aria-hidden', 'true');
+  }
+  if (backdrop) backdrop.classList.add('hidden');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+
+function openChoicePopover() {
+  const { showChoices, isGenerating } = getState();
+  if (!showChoices || isGenerating || latestStoryChoices.length === 0) return;
+  isChoicePopoverOpen = true;
+  const popover = document.getElementById('choices-popover');
+  const backdrop = document.getElementById('choices-popover-backdrop');
+  const trigger = document.getElementById('choices-toggle-btn');
+  if (popover) {
+    popover.classList.remove('hidden');
+    popover.setAttribute('aria-hidden', 'false');
+  }
+  if (backdrop) backdrop.classList.remove('hidden');
+  if (trigger) trigger.setAttribute('aria-expanded', 'true');
+}
+
+function updateChoiceTriggerUI() {
+  const trigger = document.getElementById('choices-toggle-btn');
+  const badge = document.getElementById('choices-toggle-badge');
+  const countBadge = document.getElementById('choices-popover-count');
+  const choicesContainer = document.getElementById('choices-container');
+  if (!trigger || !badge || !countBadge || !choicesContainer) return;
+
+  const { showChoices, isGenerating } = getState();
+  const availableCount = Array.isArray(latestStoryChoices) ? latestStoryChoices.length : 0;
+  const hasAvailableChoices = showChoices && !isGenerating && availableCount > 0;
+
+  trigger.classList.toggle('hidden', !showChoices);
+  trigger.disabled = !hasAvailableChoices;
+  trigger.title = hasAvailableChoices ? '選択肢を開く' : '選択肢はまだありません';
+  trigger.setAttribute('aria-label', hasAvailableChoices ? '選択肢を開く' : '選択肢はまだありません');
+
+  badge.textContent = String(availableCount);
+  countBadge.textContent = `${availableCount}件`;
+  badge.classList.toggle('hidden', availableCount <= 0);
+  countBadge.classList.toggle('hidden', availableCount <= 0);
+
+  choicesContainer.classList.toggle('hidden', !hasAvailableChoices);
+  if (!hasAvailableChoices) closeChoicePopover();
+}
+
+function ensureChoicePopoverBindings() {
+  if (choicePopoverBindingsInitialized) return;
+  const trigger = document.getElementById('choices-toggle-btn');
+  const backdrop = document.getElementById('choices-popover-backdrop');
+  if (trigger) {
+    trigger.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (trigger.disabled) return;
+      if (isChoicePopoverOpen) closeChoicePopover();
+      else openChoicePopover();
+    });
+  }
+  if (backdrop) {
+    backdrop.addEventListener('click', () => closeChoicePopover());
+  }
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && isChoicePopoverOpen) {
+      closeChoicePopover();
+    }
+  });
+  choicePopoverBindingsInitialized = true;
+}
+
 function renderChoiceButtons(choices) {
+  ensureChoicePopoverBindings();
   const choicesContainer = document.getElementById('choices-container');
   if (!choicesContainer) return;
 
+  latestStoryChoices = Array.isArray(choices) ? choices : [];
   choicesContainer.innerHTML = '';
-  const { showChoices, isGenerating } = getState();
-  
-  if (!showChoices || choices.length === 0 || isGenerating) {
-    choicesContainer.classList.add('hidden');
-    return;
-  }
 
-  choicesContainer.classList.remove('hidden');
-  choices.forEach(choice => {
+  latestStoryChoices.forEach(choice => {
     const btn = document.createElement('button');
     btn.className = 'choice-btn';
+    btn.type = 'button';
     btn.innerHTML = `
       <span class="choice-label">${choice.label}</span>
       <span class="choice-text">${choice.text}</span>
     `;
     btn.onclick = () => {
+      closeChoicePopover();
       const textToSend = `${choice.label}. ${choice.text}`;
       window.dispatchEvent(new CustomEvent('submitUserAction', { detail: textToSend }));
     };
     choicesContainer.appendChild(btn);
   });
+
+  updateChoiceTriggerUI();
 }
 
 export async function renderSidebar() {
@@ -3684,6 +3797,11 @@ async function _renderSessionLore(container, renderVersion = 0) {
   const sessionLore = {
     summary: '',
     summary_source: '',
+    summary_checkpoint_turn: 0,
+    last_summary_at: 0,
+    last_summary_status: '',
+    last_summary_error: '',
+    last_summary_mode: '',
     current_state: '',
     recent_turning_points: [],
     long_term_events: [],
@@ -3699,6 +3817,17 @@ async function _renderSessionLore(container, renderVersion = 0) {
     ? sessionLore.active_flags
     : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []);
   const relationshipMemory = activeStory.relationshipMemory || {};
+  const totalTurns = countUserTurnChunks(activeStory.messages || []);
+  const summaryStatusLabel = sessionLore.last_summary_status === 'error'
+    ? '失敗'
+    : sessionLore.last_summary_status === 'running'
+      ? '実行中'
+      : sessionLore.last_summary_status === 'success'
+        ? '成功'
+        : '未実行';
+  const summaryCoverage = Number.isFinite(Number(sessionLore.summary_checkpoint_turn))
+    ? Number(sessionLore.summary_checkpoint_turn)
+    : 0;
 
   // キャラクター名を取得するためにDBを参照
   const { getCharacters } = await import('./db.js');
@@ -3720,11 +3849,21 @@ async function _renderSessionLore(container, renderVersion = 0) {
     <div class="session-lore-block">
       <div class="session-lore-block-header">
         <span class="material-symbols-outlined">summarize</span>
-        <h4>ストーリーの進行状況</h4>
+        <h4>圧縮あらすじ・長期記憶</h4>
       </div>
       <div class="session-lore-block-body">
+        <div class="session-summary-meta">
+          <span><strong>状態:</strong> ${escapeHTML(summaryStatusLabel)}</span>
+          <span><strong>圧縮済み:</strong> ${escapeHTML(String(summaryCoverage))} / ${escapeHTML(String(totalTurns))} ターン</span>
+          <span><strong>最終実行:</strong> ${escapeHTML(formatSessionSummaryTimestamp(sessionLore.last_summary_at))}</span>
+        </div>
+        ${sessionLore.last_summary_error ? `<p class="session-summary-error">${escapeHTML(sessionLore.last_summary_error)}</p>` : ''}
         <textarea id="session-lore-editor-summary" class="session-lore-textarea" rows="6" placeholder="AIの要約や、手動で整理したい進行メモをここにまとめられます。">${escapeHTML(sessionLore.summary || '')}</textarea>
         <div class="session-lore-actions">
+          <button id="session-lore-run-summary-btn" class="sidebar-session-link-btn" type="button">
+            <span class="material-symbols-outlined">summarize</span>
+            <span>最新履歴を要約</span>
+          </button>
           <button id="session-lore-save-summary-btn" class="sidebar-session-link-btn" type="button">
             <span class="material-symbols-outlined">save</span>
             <span>要約を保存</span>
@@ -3897,6 +4036,12 @@ async function _renderSessionLore(container, renderVersion = 0) {
     if (!activeStory.session_lore) {
       activeStory.session_lore = {
         summary: '',
+        summary_source: '',
+        summary_checkpoint_turn: 0,
+        last_summary_at: 0,
+        last_summary_status: '',
+        last_summary_error: '',
+        last_summary_mode: '',
         current_state: '',
         recent_turning_points: [],
         long_term_events: [],
@@ -3916,12 +4061,23 @@ async function _renderSessionLore(container, renderVersion = 0) {
         ? [...activeStory.session_lore.open_threads]
         : [];
     }
+    if (!Number.isFinite(Number(activeStory.session_lore.summary_checkpoint_turn))) {
+      activeStory.session_lore.summary_checkpoint_turn = 0;
+    }
     activeStory.session_lore.key_events = [...activeStory.session_lore.long_term_events];
     activeStory.session_lore.open_threads = [...activeStory.session_lore.active_flags];
   };
 
   const summaryInput = container.querySelector('#session-lore-editor-summary');
+  const runSummaryBtn = container.querySelector('#session-lore-run-summary-btn');
   const saveSummaryBtn = container.querySelector('#session-lore-save-summary-btn');
+  if (runSummaryBtn) {
+    runSummaryBtn.onclick = () => {
+      window.dispatchEvent(new CustomEvent('requestSessionSummary', {
+        detail: { storyId: activeStory.storyId }
+      }));
+    };
+  }
   if (saveSummaryBtn && summaryInput) {
     saveSummaryBtn.onclick = async () => {
       ensureEditableSessionLore();
