@@ -2414,7 +2414,7 @@ async function submitStoryTurn(mode = 'normal') {
 function parseDirectedUserInput(text) {
   const utterances = [];
   const passthrough = [];
-  const directiveRegex = /^@:\s*([^「」:：\n]+?)\s*(?:「([^」]*)」|[:：]\s*(.+)|\s+(.+))\s*$/;
+  const directiveRegex = /^@:\s*([^「」:：\n]+)\s*(?:「([^」]*)」|[:：]\s*(.+)|\s+(.+))\s*$/;
 
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();

@@ -980,7 +980,7 @@ for (let i = 0; i < messages.length; i++) {
         };
 
  // 新形式の入力（動作の括弧を含む）に対応した正規表現
-        const directiveRegex = /^@:\s*([^「（\(\[:：\n]+?)(?:[（\(]([^）\)]+)[）\)])?[\s:：]*(?:「([^」]*)」|(.+))?\s*$/;
+        const directiveRegex = /^@:\s*([^「（\(\[:：\n]+)(?:[（\(]([^）\)]+)[）\)])?[\s:：]*(?:「([^」]*)」|(.+))?\s*$/;
 
         for (const line of lines) {
           const token = parseStoryImageInstructionLine(line);
