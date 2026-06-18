@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks } from './ai-client.js?v=20260617a';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks } from './ai-client.js?v=20260618a';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -1804,10 +1804,19 @@ export async function renderStoryList() {
           recordSyncTombstone('stories', story.storyId, {
             title: story.title || '',
             franchise: story.franchise || ''
+          }).then(async () => {
+            if (story?.protagonist?.avatarAssetId) {
+              await recordSyncTombstone('assets', story.protagonist.avatarAssetId, {
+                label: `${story.title || 'story'} protagonist avatar`
+              });
+            }
           }).then(() => db.deleteStory(story.storyId)).then(() => {
             if (current && current.storyId === story.storyId) setActiveStory(null);
             renderStoryList();
-            requestDropboxAutoSync(null, { forceFull: true });
+            requestDropboxAutoSync(story.storyId, {
+              syncStory: true,
+              assetIds: story?.protagonist?.avatarAssetId ? [story.protagonist.avatarAssetId] : []
+            });
           });
         }
         return;
@@ -1938,7 +1947,11 @@ export async function renderCharacterLibrary() {
           updateState({ characters: updatedChars });
           renderCharacterLibrary();
           renderSidebar();
-          requestDropboxAutoSync(null, { forceFull: true });
+          requestDropboxAutoSync(null, {
+            syncCharacters: true,
+            characterIds: [char.characterId],
+            assetIds: char.avatarAssetId ? [char.avatarAssetId] : []
+          });
         });
       }
     };
@@ -3765,7 +3778,6 @@ function _createFranchiseSection(franchise, items) {
         await db.deleteLore(loreId);
         renderLorebook();
         requestDropboxAutoSync(null, {
-          forceFull: true,
           syncLores: true,
           loreFranchises: [loreFranchise]
         });

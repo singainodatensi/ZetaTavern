@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260617a';
+import { getSetting, saveSetting } from './db.js?v=20260618a';
 
 // ============================================================
 // 定数
@@ -401,6 +401,75 @@ async function downloadJson(path) {
   } catch (error) {
     if (error.message.includes('path/not_found')) return null;
     throw error;
+  }
+}
+
+async function deleteRemotePath(path) {
+  const target = String(path || '').trim();
+  if (!target) return null;
+  try {
+    return await _request('api', '/files/delete_v2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: target }),
+    });
+  } catch (error) {
+    if (String(error?.message || '').includes('not_found')) return null;
+    throw error;
+  }
+}
+
+async function syncSettingsDelta(manifest, settings = {}, onProgress) {
+  const progress = msg => { if (onProgress) onProgress(msg); };
+  const remoteSettingsPayload = await downloadJson(manifest?.settingsPath || V2_SETTINGS);
+  const mergedTombstones = mergeSyncTombstones(
+    settings?.dropbox_sync_tombstones || {},
+    remoteSettingsPayload?.settings?.dropbox_sync_tombstones || {}
+  );
+  const mergedSettings = {
+    ...(remoteSettingsPayload?.settings || {}),
+    ...(settings || {}),
+    dropbox_sync_tombstones: mergedTombstones
+  };
+  progress('設定を差分アップロード中...');
+  await uploadJson(manifest.settingsPath || V2_SETTINGS, { settings: mergedSettings, updatedAt: Date.now() });
+  manifest.settingsPath = manifest.settingsPath || V2_SETTINGS;
+  return { mergedSettings, mergedTombstones };
+}
+
+async function pruneDeletedStoryEntries(manifest, tombstones = {}, onProgress) {
+  const progress = msg => { if (onProgress) onProgress(msg); };
+  if (!manifest?.stories || typeof manifest.stories !== 'object') return;
+  for (const storyId of Object.keys(tombstones || {})) {
+    const entry = manifest.stories?.[storyId];
+    if (!entry) continue;
+    progress(`削除済みストーリーをクラウドから整理中... (${entry.title || storyId})`);
+    await deleteRemotePath(entry.dirPath || '');
+    delete manifest.stories[storyId];
+  }
+}
+
+async function pruneDeletedCharacterEntries(manifest, tombstones = {}, onProgress) {
+  const progress = msg => { if (onProgress) onProgress(msg); };
+  if (!manifest?.characters || typeof manifest.characters !== 'object') return;
+  for (const characterId of Object.keys(tombstones || {})) {
+    const entry = manifest.characters?.[characterId];
+    if (!entry) continue;
+    progress(`削除済みキャラクターをクラウドから整理中... (${entry.name || characterId})`);
+    await deleteRemotePath(entry.path || '');
+    delete manifest.characters[characterId];
+  }
+}
+
+async function pruneDeletedAssetEntries(manifest, tombstones = {}, onProgress) {
+  const progress = msg => { if (onProgress) onProgress(msg); };
+  if (!manifest?.assets || typeof manifest.assets !== 'object') return;
+  for (const assetId of Object.keys(tombstones || {})) {
+    const entry = manifest.assets?.[assetId];
+    if (!entry) continue;
+    progress(`削除済みアセットをクラウドから整理中... (${entry.label || assetId})`);
+    await deleteRemotePath(entry.path || '');
+    delete manifest.assets[assetId];
   }
 }
 
@@ -1094,10 +1163,6 @@ export async function pushToDropbox({ stories, characters, lores, settings, asse
 export async function pushStoryDeltaToDropbox({ story, settings, assets = [], onProgress }) {
   const progress = msg => { console.log('[Dropbox Delta Push]', msg); if (onProgress) onProgress(msg); };
 
-  if (!story?.storyId) {
-    throw new Error('差分同期するストーリーが見つかりません。');
-  }
-
   progress('差分同期を開始します...');
   const lock = await checkLockFile();
   if (lock) {
@@ -1110,17 +1175,14 @@ export async function pushStoryDeltaToDropbox({ story, settings, assets = [], on
     if (!manifest || manifest.schemaVersion < 2) {
       return null;
     }
+    const { mergedTombstones } = await syncSettingsDelta(manifest, settings || {}, onProgress);
 
     const now = Date.now();
     ensuredFolderPaths.add('/ZetaTavern');
     ensuredFolderPaths.add(V2_ROOT);
     ensuredFolderPaths.add(V2_STORY_DIR);
-
-    if (settings) {
-      progress('設定を差分アップロード中...');
-      await uploadJson(manifest.settingsPath || V2_SETTINGS, { settings, updatedAt: now });
-      manifest.settingsPath = manifest.settingsPath || V2_SETTINGS;
-    }
+    await pruneDeletedStoryEntries(manifest, mergedTombstones?.stories, onProgress);
+    await pruneDeletedAssetEntries(manifest, mergedTombstones?.assets, onProgress);
 
     if (Array.isArray(assets) && assets.length > 0) {
       progress(`関連アセット ${assets.length} 件を差分アップロード中...`);
@@ -1136,9 +1198,11 @@ export async function pushStoryDeltaToDropbox({ story, settings, assets = [], on
       };
     }
 
-    progress('現在のストーリーを差分アップロード中...');
-    manifest.stories = manifest.stories || {};
-    manifest.stories[story.storyId] = await uploadV2StoryAppendDelta(story, manifest.stories[story.storyId], now);
+    if (story?.storyId) {
+      progress('現在のストーリーを差分アップロード中...');
+      manifest.stories = manifest.stories || {};
+      manifest.stories[story.storyId] = await uploadV2StoryAppendDelta(story, manifest.stories[story.storyId], now);
+    }
     manifest.updatedAt = now;
 
     progress('同期目次を更新中...');
@@ -1158,15 +1222,11 @@ export async function pushStoryDeltaToDropbox({ story, settings, assets = [], on
   }
 }
 
-export async function pushCharacterDeltaToDropbox({ characters, assets = [], onProgress }) {
+export async function pushCharacterDeltaToDropbox({ characters, settings = {}, assets = [], onProgress }) {
   const progress = msg => { console.log('[Dropbox Character Delta]', msg); if (onProgress) onProgress(msg); };
   const targetCharacters = Array.isArray(characters)
     ? characters.filter(item => item?.characterId)
     : [];
-
-  if (targetCharacters.length === 0) {
-    throw new Error('差分同期するキャラクターが見つかりません。');
-  }
 
   progress('キャラクター差分同期を開始します...');
   const lock = await checkLockFile();
@@ -1180,11 +1240,14 @@ export async function pushCharacterDeltaToDropbox({ characters, assets = [], onP
     if (!manifest || manifest.schemaVersion < 2) {
       return null;
     }
+    const { mergedTombstones } = await syncSettingsDelta(manifest, settings || {}, onProgress);
 
     const now = Date.now();
     ensuredFolderPaths.add('/ZetaTavern');
     ensuredFolderPaths.add(V2_ROOT);
     ensuredFolderPaths.add(V2_CHAR_DIR);
+    await pruneDeletedCharacterEntries(manifest, mergedTombstones?.characters, onProgress);
+    await pruneDeletedAssetEntries(manifest, mergedTombstones?.assets, onProgress);
 
     if (Array.isArray(assets) && assets.length > 0) {
       progress(`関連アセット ${assets.length} 件を差分アップロード中...`);
@@ -1234,7 +1297,7 @@ export async function pushCharacterDeltaToDropbox({ characters, assets = [], onP
   }
 }
 
-export async function pushLoreDeltaToDropbox({ lores, franchises = [], onProgress }) {
+export async function pushLoreDeltaToDropbox({ lores, settings = {}, franchises = [], onProgress }) {
   const progress = msg => { console.log('[Dropbox Lore Delta]', msg); if (onProgress) onProgress(msg); };
 
   progress('ロアブック差分同期を開始します...');
@@ -1249,11 +1312,13 @@ export async function pushLoreDeltaToDropbox({ lores, franchises = [], onProgres
     if (!manifest || manifest.schemaVersion < 2) {
       return null;
     }
+    const { mergedTombstones } = await syncSettingsDelta(manifest, settings || {}, onProgress);
 
     const now = Date.now();
     ensuredFolderPaths.add('/ZetaTavern');
     ensuredFolderPaths.add(V2_ROOT);
     ensuredFolderPaths.add(V2_LORE_DIR);
+    await pruneDeletedAssetEntries(manifest, mergedTombstones?.assets, onProgress);
 
     const allLores = Array.isArray(lores) ? lores : [];
     const hasSplitLoreFiles = manifest.loreFiles && typeof manifest.loreFiles === 'object' && Object.keys(manifest.loreFiles).length > 0;
@@ -1288,14 +1353,22 @@ export async function pushLoreDeltaToDropbox({ lores, franchises = [], onProgres
         const key = buildLoreFranchiseKey(franchise);
         const items = loreGroups.get(franchise) || [];
         const path = manifest.loreFiles?.[key]?.path || `${V2_LORE_DIR}/${buildLoreFileName(franchise)}`;
-        progress(`ロアブックを差分アップロード中... (${franchise})`);
-        await uploadJson(path, { franchise, lores: items, updatedAt: now });
-        manifest.loreFiles[key] = {
-          path,
-          franchise,
-          count: items.length,
-          updatedAt: now
-        };
+        if (items.length === 0) {
+          progress(`空になったロアブックをクラウドから整理中... (${franchise})`);
+          await deleteRemotePath(path);
+          if (manifest.loreFiles?.[key]) {
+            delete manifest.loreFiles[key];
+          }
+        } else {
+          progress(`ロアブックを差分アップロード中... (${franchise})`);
+          await uploadJson(path, { franchise, lores: items, updatedAt: now });
+          manifest.loreFiles[key] = {
+            path,
+            franchise,
+            count: items.length,
+            updatedAt: now
+          };
+        }
       }
     }
 

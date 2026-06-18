@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260617a';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260617a';
-import * as dropbox from './dropbox.js?v=20260617a';
+import * as ui from './ui.js?v=20260618a';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260618a';
+import * as dropbox from './dropbox.js?v=20260618a';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -2945,7 +2945,8 @@ async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = fal
   const stories = await db.getStories();
   const uniqueCharacterIds = [...new Set((characterIds || []).filter(Boolean))];
   const uniqueAssetIds = [...new Set((assetIds || []).filter(Boolean))];
-  const settings = syncStory ? await collectDropboxSettings() : null;
+  const needsSettingsDelta = syncStory || syncLores || syncCharacters;
+  const settings = needsSettingsDelta ? await collectDropboxSettings() : null;
 
   if (syncStory && storyId) {
     const story = stories.find(item => item.storyId === storyId);
@@ -2963,6 +2964,14 @@ async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = fal
         story,
         settings,
         assets: storyAssets,
+        onProgress: msg => console.log('[Dropbox AutoSync]', msg)
+      });
+      if (!storyResult) return false;
+    } else {
+      const storyResult = await dropbox.pushStoryDeltaToDropbox({
+        story: null,
+        settings,
+        assets: [],
         onProgress: msg => console.log('[Dropbox AutoSync]', msg)
       });
       if (!storyResult) return false;
@@ -2985,7 +2994,16 @@ async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = fal
 
     const characterResult = await dropbox.pushCharacterDeltaToDropbox({
       characters: targetCharacters,
+      settings,
       assets: characterAssets,
+      onProgress: msg => console.log('[Dropbox AutoSync]', msg)
+    });
+    if (!characterResult) return false;
+  } else if (syncCharacters && uniqueCharacterIds.length === 0 && uniqueAssetIds.length > 0) {
+    const characterResult = await dropbox.pushCharacterDeltaToDropbox({
+      characters: [],
+      settings,
+      assets: [],
       onProgress: msg => console.log('[Dropbox AutoSync]', msg)
     });
     if (!characterResult) return false;
@@ -2995,6 +3013,7 @@ async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = fal
     const lores = await db.getWorldLores();
     const loreResult = await dropbox.pushLoreDeltaToDropbox({
       lores,
+      settings,
       franchises: [...new Set((Array.isArray(loreFranchises) ? loreFranchises : []).map(value => String(value || '').trim() || '共通').filter(Boolean))],
       onProgress: msg => console.log('[Dropbox AutoSync]', msg)
     });
