@@ -3197,6 +3197,10 @@ function normalizeImportedLoreEntry(rawEntry, defaults = {}) {
     resolveImportedLoreField(source, ['speech', 'tone', 'style', '口調', '話し方']);
   const relationships = resolveImportedLoreField(contentSource, ['relationships', 'relations', '関係性', '関連']) ||
     resolveImportedLoreField(source, ['relationships', 'relations', '関係性', '関連']);
+  const tags = normalizeImportedTags(
+    source.tags ?? source.keywords ?? source.aliases ?? source.searchKeywords ?? source.タグ ?? source.キーワード,
+    defaults.tags || []
+  ).slice(0, 5);
 
   return {
     id: typeof source.id === 'string' && source.id.trim() ? source.id.trim() : undefined,
@@ -3204,6 +3208,7 @@ function normalizeImportedLoreEntry(rawEntry, defaults = {}) {
     searchContext,
     type: normalizeImportedLoreType(resolveImportedLoreField(source, ['type', 'category', 'loreType', '種類', 'カテゴリ'])),
     name,
+    tags,
     content: {
       summary,
       profile,
@@ -3274,6 +3279,7 @@ async function importLoreEntries(entries, defaults = {}) {
         ...existing,
         ...normalizedEntry,
         id: existing.id,
+        tags: Array.isArray(normalizedEntry.tags) ? normalizedEntry.tags.slice(0, 5) : [],
         content: {
           summary: normalizedEntry.content?.summary || '',
           profile: normalizedEntry.content?.profile || '',
@@ -3305,6 +3311,7 @@ function buildLoreExportEntries(lores = []) {
       searchContext: item.searchContext || '',
       type: item.type || 'term',
       name: item.name,
+      tags: Array.isArray(item.tags) ? item.tags.slice(0, 5) : [],
       summary: item.content?.summary || '',
       profile: item.content?.profile || '',
       speech: item.content?.speech || '',
@@ -3463,6 +3470,7 @@ function buildLoreImportDefaults(options = {}) {
   return {
     franchise,
     searchContext,
+    tags: normalizeImportedTags(options.tags, []),
     forceFranchise: options.forceFranchise ? franchise : '',
     forceSearchContext: options.forceFranchise ? searchContext : ''
   };
@@ -3520,7 +3528,8 @@ async function _renderWorldLore(container, renderVersion = 0) {
       const nameMatch = candidate.name && candidate.name.toLowerCase().includes(query);
       const summaryMatch = candidate.content?.summary && candidate.content.summary.toLowerCase().includes(query);
       const franchiseMatch = candidate.franchise && candidate.franchise.toLowerCase().includes(query);
-      return !query || nameMatch || summaryMatch || franchiseMatch;
+      const tagMatch = Array.isArray(candidate.tags) && candidate.tags.some(tag => tag.toLowerCase().includes(query));
+      return !query || nameMatch || summaryMatch || franchiseMatch || tagMatch;
     })
     : [];
 
@@ -3529,7 +3538,8 @@ async function _renderWorldLore(container, renderVersion = 0) {
     const nameMatch = lore.name && lore.name.toLowerCase().includes(query);
     const summaryMatch = lore.content?.summary && lore.content.summary.toLowerCase().includes(query);
     const franchiseMatch = lore.franchise && lore.franchise.toLowerCase().includes(query);
-    const searchMatch = !query || nameMatch || summaryMatch || franchiseMatch;
+    const tagMatch = Array.isArray(lore.tags) && lore.tags.some(tag => tag.toLowerCase().includes(query));
+    const searchMatch = !query || nameMatch || summaryMatch || franchiseMatch || tagMatch;
 
     let statusMatch = true;
     if (filter === 'verified') statusMatch = lore.verified === true;
@@ -3597,6 +3607,7 @@ async function _createLoreCandidateSection(candidates, currentStory) {
             <span class="lore-candidate-chip">${escapeHTML(candidate.franchise || '共通')}</span>
           </div>
           <p class="lore-candidate-summary">${escapeHTML(candidate.content?.summary || '候補の要約はありません。')}</p>
+          ${Array.isArray(candidate.tags) && candidate.tags.length > 0 ? `<p class="lore-candidate-profile-preview">タグ: ${escapeHTML(candidate.tags.join(', '))}</p>` : ''}
           ${candidate.content?.profile ? `<p class="lore-candidate-profile-preview">${escapeHTML(candidate.content.profile)}</p>` : ''}
         </div>
         <div class="lore-candidate-actions">
@@ -3662,6 +3673,7 @@ async function _createLoreCandidateSection(candidates, currentStory) {
         franchise: candidate.franchise || '共通',
         type: candidate.type || 'term',
         name: candidate.name,
+        tags: Array.isArray(candidate.tags) ? candidate.tags.slice(0, 5) : [],
         content: {
           summary: candidate.content?.summary || '',
           profile: candidate.content?.profile || '',
@@ -3712,12 +3724,18 @@ function _createFranchiseSection(franchise, items) {
         ? `<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary-color)" title="確認済み">verified</span>`
         : `<span class="material-symbols-outlined" style="font-size:14px;color:#ff9800" title="AI自動収集・未確認">warning</span>`;
       const summaryText = lore.content?.summary ? escapeHTML(lore.content.summary).substring(0, 80) + (lore.content.summary.length > 80 ? '…' : '') : '—';
+      const tagHtml = Array.isArray(lore.tags) && lore.tags.length > 0
+        ? `<div class="lore-item-tags">${lore.tags.slice(0, 5).map(tag => `<span class="lore-candidate-chip">${escapeHTML(tag)}</span>`).join('')}</div>`
+        : '';
       return `
         <div class="lore-item-row" data-lore-id="${escapeHTML(lore.id)}">
           <div class="lore-item-main">
             ${verifiedIcon}
-            <span class="lore-item-name">${escapeHTML(lore.name)}</span>
-            <span class="lore-item-summary">${summaryText}</span>
+            <div class="lore-item-copy">
+              <span class="lore-item-name">${escapeHTML(lore.name)}</span>
+              <span class="lore-item-summary">${summaryText}</span>
+              ${tagHtml}
+            </div>
           </div>
           <div class="lore-item-actions">
             <button class="icon-btn-circle lore-edit-btn" title="編集" data-id="${escapeHTML(lore.id)}">
@@ -4213,6 +4231,7 @@ export function showLoreEditModal(lore = null, options = {}) {
     : (currentStory?.franchiseContext || currentStory?.franchise || '');
   const loreType = isEdit ? lore.type : 'term';
   const loreVerified = isEdit ? lore.verified : true;
+  const loreTags = isEdit && Array.isArray(lore.tags) ? lore.tags.join(', ') : '';
 
   const contentSummary = isEdit ? (lore.content?.summary || '') : '';
   const contentProfile = isEdit ? (lore.content?.profile || '') : '';
@@ -4249,6 +4268,11 @@ export function showLoreEditModal(lore = null, options = {}) {
         <div class="form-group">
           <label for="lore-search-context-input">検索用作品名・別名</label>
           <input type="text" id="lore-search-context-input" placeholder="例: リゼロ / Re:ゼロから始める異世界生活" value="${escapeHTML(loreSearchContext)}">
+        </div>
+
+        <div class="form-group">
+          <label for="lore-tags-input">タグ / 検索候補 (最大5件・カンマ区切り)</label>
+          <input type="text" id="lore-tags-input" placeholder="例: 芦ケ谷高校, 甘織, れな子, 血盟騎士団副団長" value="${escapeHTML(loreTags)}">
         </div>
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: center;">
@@ -4338,6 +4362,9 @@ export function showLoreEditModal(lore = null, options = {}) {
         if (generated.type) {
           modal.querySelector('#lore-type-select').value = generated.type;
         }
+        if (Array.isArray(generated.tags)) {
+          modal.querySelector('#lore-tags-input').value = generated.tags.join(', ');
+        }
         modal.querySelector('#lore-summary-textarea').value = generated.summary || '';
         modal.querySelector('#lore-profile-textarea').value = generated.profile || '';
         modal.querySelector('#lore-speech-textarea').value = generated.speech || '';
@@ -4357,6 +4384,7 @@ export function showLoreEditModal(lore = null, options = {}) {
     const name = modal.querySelector('#lore-name-input').value.trim();
     const franchise = modal.querySelector('#lore-franchise-input').value.trim();
     const searchContext = modal.querySelector('#lore-search-context-input').value.trim();
+    const tags = normalizeImportedTags(modal.querySelector('#lore-tags-input').value || '', []).slice(0, 5);
     const type = modal.querySelector('#lore-type-select').value;
     const verified = modal.querySelector('#lore-verified-checkbox').checked;
     
@@ -4374,6 +4402,7 @@ export function showLoreEditModal(lore = null, options = {}) {
       id: lore ? lore.id : undefined,
       franchise: franchise || '共通',
       searchContext,
+      tags,
       type,
       name,
       content: {

@@ -1047,6 +1047,7 @@ function buildLoreSearchCorpus(lore) {
     lore?.name,
     lore?.type,
     lore?.franchise,
+    ...(Array.isArray(lore?.tags) ? lore.tags : []),
     lore?.searchContext,
     lore?.content?.summary,
     lore?.content?.profile,
@@ -1072,6 +1073,7 @@ function toLoreSearchResult(lore, score = 0) {
     name: lore.name || '',
     type: lore.type || 'term',
     franchise: lore.franchise || '',
+    tags: Array.isArray(lore?.tags) ? lore.tags : [],
     summary: lore?.content?.summary || '',
     score
   };
@@ -1236,6 +1238,7 @@ async function getLoreEntryForStory(story, args = {}) {
       name: lore.name || '',
       type: lore.type || 'term',
       franchise: lore.franchise || '',
+      tags: Array.isArray(lore?.tags) ? lore.tags : [],
       searchContext: lore.searchContext || '',
       summary: lore?.content?.summary || '',
       profile: lore?.content?.profile || '',
@@ -1252,9 +1255,10 @@ function extractReferenceCandidatesFromText(text) {
 
   const katakana = source.match(/[\u30a0-\u30ffー]{2,20}/g) || [];
   const kanji = source.match(/[\u4e00-\u9faf]{2,12}/g) || [];
+  const mixedJapanese = source.match(/(?:[\u4e00-\u9faf]+[ぁ-んァ-ヶー][\u3040-\u30ff\u4e00-\u9fafー]{1,18}|[ぁ-んァ-ヶー]+[\u4e00-\u9faf][\u3040-\u30ff\u4e00-\u9fafー]{1,18})/g) || [];
   const english = source.match(/[A-Z][a-zA-Z0-9:_-]{2,20}/g) || [];
 
-  for (const rawWord of [...katakana, ...kanji, ...english]) {
+  for (const rawWord of [...katakana, ...kanji, ...mixedJapanese, ...english]) {
     const word = normalizeLoreEntryName(rawWord).trim();
     if (!word || word.length < 2) continue;
     if (PROACTIVE_REFERENCE_STOPWORDS.has(word)) continue;
@@ -1593,6 +1597,9 @@ async function applyWorldLoreUpdate(args, story) {
   for (const entry of entries) {
     const name = normalizeLoreEntryName(entry?.name);
     const summary = (entry?.summary || '').trim();
+    const tags = Array.isArray(entry?.tags)
+      ? entry.tags.map(tag => normalizeLoreEntryName(tag)).filter(Boolean).slice(0, 5)
+      : [];
     if (!name || !summary) continue;
 
     const type = normalizeLoreType((entry?.type || '').trim());
@@ -1635,6 +1642,7 @@ async function applyWorldLoreUpdate(args, story) {
       franchise,
       type,
       name,
+      tags,
       content: {
         summary,
         profile: (entry?.details || '').trim(),
@@ -1970,10 +1978,12 @@ export async function buildSystemInstruction(story, options = {}) {
     const matchedLores = [];
     const franchise = story.franchise || '';
 
-    // DBから完全/部分一致するロアを取得
+    // DBから関連度の高いロアを取得
     for (const keyword of detectedKeywords) {
       try {
-        const lore = await getLoreByNameAndFranchise(keyword, franchise);
+        const searchResult = await searchLorebookForStory(story, { query: keyword, franchise });
+        const topResult = Array.isArray(searchResult?.results) ? searchResult.results[0] : null;
+        const lore = topResult?.loreId ? await getLore(topResult.loreId) : null;
         if (lore && lore.status === 'completed' && !matchedLores.some(l => l.id === lore.id)) {
           matchedLores.push(lore);
         }
@@ -2061,9 +2071,10 @@ function extractKeywordsForLore(story) {
   // カタカナ・漢字（2文字以上）、および大文字英単語などを抽出する簡易的な正規表現
   const matchesKatakana = combinedText.match(/[\u30a0-\u30ffー]{2,15}/g) || [];
   const matchesKanji = combinedText.match(/[\u4e00-\u9faf]{2,10}/g) || [];
+  const matchesMixedJapanese = combinedText.match(/(?:[\u4e00-\u9faf]+[ぁ-んァ-ヶー][\u3040-\u30ff\u4e00-\u9fafー]{1,18}|[ぁ-んァ-ヶー]+[\u4e00-\u9faf][\u3040-\u30ff\u4e00-\u9fafー]{1,18})/g) || [];
   const matchesEnglish = combinedText.match(/[A-Z][a-zA-Z]{2,15}/g) || [];
 
-  [...matchesKatakana, ...matchesKanji, ...matchesEnglish].forEach(word => {
+  [...matchesKatakana, ...matchesKanji, ...matchesMixedJapanese, ...matchesEnglish].forEach(word => {
     // 一般名詞や助詞、不要な言葉のフィルタリング（文字長などの簡易フィルタ）
     const w = word.trim();
     if (w && w.length >= 2) {
@@ -3433,6 +3444,7 @@ export async function generateStoryResponse(story) {
                 properties: {
                   name: { type: 'STRING', description: 'ロア項目名。例: 旭高校、ペンタゴン、王選、集英組' },
                   type: { type: 'STRING', description: 'character, location, organization, term, event, item のいずれか。' },
+                  tags: { type: 'ARRAY', description: '検索候補に使う別名・略称・役職名など。最大5件。', items: { type: 'STRING' } },
                   summary: { type: 'STRING', description: '一言で分かる概要。短く具体的に。' },
                   details: { type: 'STRING', description: '必要なら補足説明。任意。' },
                   speech: { type: 'STRING', description: '人物や組織の口調・特徴など。任意。' },
@@ -4050,6 +4062,7 @@ ${searchEvidence}
   "shouldRegister": true,
   "canonicalName": "加護",
   "type": "character", // character, location, organization, term, event, item のいずれか一つ
+  "tags": ["別名1", "略称2", "役職3"],
   "summary": "【概要・設定要約】100文字〜200文字程度の簡単な紹介・定義文。",
   "profile": "【プロフィール詳細】外見、性格、戦闘能力、役割などの詳細な設定テキスト。",
   "speech": "【口調や特徴】セリフや話し方の傾向、一人称/二人称、特徴的な口癖など（もしあれば記載、なければ空欄）。",
@@ -4060,6 +4073,7 @@ ${searchEvidence}
 
 ルール:
 - canonicalName には日本語の代表表記だけを書くこと。英語名や括弧つき併記は禁止。
+- tags には検索用の別名・略称・姓のみ/名のみ・役職名などを最大5件まで入れること。一般語ばかりのタグ列は避けること。
 - 原作上の安定設定として確認できない場合は shouldRegister を false にし、summary 等は空欄で reason に理由を書くこと。
 - セッション固有情報やオリジナルキャラクターを原作設定として捏造してはいけません。
 - 次のような一般語は shouldRegister を false にしてください: 放課後, アクセサリー, 知的生命体, 勉強, 会話。
@@ -4080,6 +4094,7 @@ ${searchEvidence}
       shouldRegister: parsed.shouldRegister !== false,
       canonicalName: normalizeLoreEntryName(parsed.canonicalName || name),
       type: normalizeLoreType((parsed.type || '').trim()),
+      tags: Array.isArray(parsed.tags) ? parsed.tags.map(tag => normalizeLoreEntryName(tag)).filter(Boolean).slice(0, 5) : [],
       summary: sanitizeLoreText(parsed.summary || ''),
       profile: sanitizeLoreText(parsed.profile || ''),
       speech: sanitizeLoreText(parsed.speech || ''),

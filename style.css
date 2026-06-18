@@ -2624,11 +2624,19 @@ body {
 
 .lore-item-main {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   flex: 1;
   min-width: 0;
   overflow: hidden;
+}
+
+.lore-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
 }
 
 .lore-item-name {
@@ -2650,6 +2658,12 @@ body {
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+}
+
+.lore-item-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .lore-status-chip,
