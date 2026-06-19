@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks } from './ai-client.js?v=20260618a';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks } from './ai-client.js?v=20260619a';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -3826,6 +3826,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
 
   const sessionLore = {
     summary: '',
+    summary_segments: [],
     summary_source: '',
     summary_checkpoint_turn: 0,
     last_summary_at: 0,
@@ -4066,6 +4067,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     if (!activeStory.session_lore) {
       activeStory.session_lore = {
         summary: '',
+        summary_segments: [],
         summary_source: '',
         summary_checkpoint_turn: 0,
         last_summary_at: 0,
@@ -4094,6 +4096,9 @@ async function _renderSessionLore(container, renderVersion = 0) {
     if (!Number.isFinite(Number(activeStory.session_lore.summary_checkpoint_turn))) {
       activeStory.session_lore.summary_checkpoint_turn = 0;
     }
+    if (!Array.isArray(activeStory.session_lore.summary_segments)) {
+      activeStory.session_lore.summary_segments = [];
+    }
     activeStory.session_lore.key_events = [...activeStory.session_lore.long_term_events];
     activeStory.session_lore.open_threads = [...activeStory.session_lore.active_flags];
   };
@@ -4112,6 +4117,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     saveSummaryBtn.onclick = async () => {
       ensureEditableSessionLore();
       activeStory.session_lore.summary = summaryInput.value.trim();
+      activeStory.session_lore.summary_segments = [];
       activeStory.session_lore.summary_source = 'manual';
       await persistSessionLoreChanges();
       await renderLorebook('session');

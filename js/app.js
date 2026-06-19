@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260618a';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260618a';
-import * as dropbox from './dropbox.js?v=20260618a';
+import * as ui from './ui.js?v=20260619a';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260619a';
+import * as dropbox from './dropbox.js?v=20260619a';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -30,6 +30,7 @@ const DEFAULT_SESSION_SUMMARY_PROMPT = `あなたはプロの編集者です。�
 - 未回収要素の保持: 約束、保留案件、未解決の懸案、今後回収すべき話題があれば明示してください。
 
 最終的な出力は、このあらすじを初めて読む人でも、これまでの物語の流れを正確に理解できるような形式にしてください。`;
+const SESSION_SUMMARY_RECENT_SEGMENT_LIMIT = 2;
 
 let hasBooted = false;
 let isSyncInProgress = false; // 同期の多重実行を防ぐ排他ガードフラグ
@@ -41,6 +42,7 @@ const sessionSummaryInFlight = new Set();
 function createEmptySessionLore() {
   return {
     summary: '',
+    summary_segments: [],
     summary_source: '',
     summary_checkpoint_turn: 0,
     last_summary_at: 0,
@@ -54,6 +56,92 @@ function createEmptySessionLore() {
     open_threads: [],
     key_events: []
   };
+}
+
+function createSessionSummarySegment({
+  type = 'segment',
+  startTurn = 1,
+  endTurn = 1,
+  summary = '',
+  source = '',
+  createdAt = Date.now()
+} = {}) {
+  const text = String(summary || '').trim();
+  if (!text) return null;
+  const fromTurn = Math.max(1, Number(startTurn || 1));
+  const toTurn = Math.max(fromTurn, Number(endTurn || fromTurn));
+  return {
+    type: type === 'chapter' ? 'chapter' : 'segment',
+    startTurn: fromTurn,
+    endTurn: toTurn,
+    summary: text,
+    source: String(source || '').trim(),
+    createdAt: Number(createdAt || Date.now()),
+    updatedAt: Date.now()
+  };
+}
+
+function parseSessionSummarySegmentsFromText(summaryText = '', checkpointTurn = 0, source = '') {
+  const raw = String(summaryText || '').trim();
+  if (!raw) return [];
+
+  const segments = [];
+  const regex = /【第(\d+)(?:〜(\d+))?ターン(章)?要約】\n([\s\S]*?)(?=\n\n【第\d+(?:〜\d+)?ターン(?:章)?要約】|$)/g;
+  let match;
+  while ((match = regex.exec(raw)) !== null) {
+    const startTurn = Number(match[1] || 1);
+    const endTurn = Number(match[2] || match[1] || startTurn);
+    const type = match[3] ? 'chapter' : 'segment';
+    const summary = String(match[4] || '').trim();
+    const segment = createSessionSummarySegment({ type, startTurn, endTurn, summary, source });
+    if (segment) segments.push(segment);
+  }
+
+  if (segments.length > 0) return segments;
+
+  const fallbackEndTurn = Math.max(1, Number(checkpointTurn || 1));
+  const fallbackType = String(source || '').trim() === 'manual' ? 'segment' : 'chapter';
+  return [
+    createSessionSummarySegment({
+      type: fallbackType,
+      startTurn: 1,
+      endTurn: fallbackEndTurn,
+      summary: raw,
+      source
+    })
+  ].filter(Boolean);
+}
+
+function normalizeSessionSummarySegments(sessionLore = {}) {
+  if (Array.isArray(sessionLore.summary_segments) && sessionLore.summary_segments.length > 0) {
+    return sessionLore.summary_segments
+      .map(segment => createSessionSummarySegment(segment))
+      .filter(Boolean)
+      .sort((a, b) => Number(a.startTurn || 0) - Number(b.startTurn || 0));
+  }
+
+  return parseSessionSummarySegmentsFromText(
+    sessionLore.summary || '',
+    sessionLore.summary_checkpoint_turn || 0,
+    sessionLore.summary_source || ''
+  );
+}
+
+function renderSessionSummarySegments(segments = []) {
+  return segments
+    .map(segment => {
+      const fromTurn = Math.max(1, Number(segment.startTurn || 1));
+      const toTurn = Math.max(fromTurn, Number(segment.endTurn || fromTurn));
+      const label = segment.type === 'chapter'
+        ? `【第${fromTurn}〜${toTurn}ターン章要約】`
+        : (fromTurn === toTurn
+          ? `【第${fromTurn}ターン要約】`
+          : `【第${fromTurn}〜${toTurn}ターン要約】`);
+      return `${label}\n${String(segment.summary || '').trim()}`;
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
 }
 
 function ensureSessionLoreStructure(story) {
@@ -80,6 +168,7 @@ function ensureSessionLoreStructure(story) {
     active_flags: Array.isArray(sessionLore.active_flags)
       ? sessionLore.active_flags
       : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []),
+    summary_segments: normalizeSessionSummarySegments(sessionLore),
     open_threads: Array.isArray(sessionLore.active_flags)
       ? sessionLore.active_flags
       : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []),
@@ -87,6 +176,7 @@ function ensureSessionLoreStructure(story) {
       ? sessionLore.long_term_events
       : (Array.isArray(sessionLore.key_events) ? sessionLore.key_events : [])
   };
+  story.session_lore.summary = renderSessionSummarySegments(story.session_lore.summary_segments);
   return story.session_lore;
 }
 
@@ -423,18 +513,29 @@ function shouldAutoSummarizeStory(story, stateSnapshot = getState()) {
   return totalTurns - checkpointTurn >= getSessionSummaryInterval(stateSnapshot);
 }
 
-function appendSessionSummarySegment(existingSummary, nextSummary, startTurn, endTurn) {
-  const next = String(nextSummary || '').trim();
-  if (!next) return String(existingSummary || '').trim();
+async function maybeChapterCompressSessionSummary(story) {
+  const sessionLore = ensureSessionLoreStructure(story);
+  const segments = normalizeSessionSummarySegments(sessionLore);
+  if (segments.length <= SESSION_SUMMARY_RECENT_SEGMENT_LIMIT + 1) return false;
 
-  const fromTurn = Math.max(1, Number(startTurn || 0) + 1);
-  const toTurn = Math.max(fromTurn, Number(endTurn || fromTurn));
-  const rangeLabel = fromTurn === toTurn
-    ? `【第${fromTurn}ターン要約】`
-    : `【第${fromTurn}〜${toTurn}ターン要約】`;
-  const block = `${rangeLabel}\n${next}`;
-  const prev = String(existingSummary || '').trim();
-  return prev ? `${prev}\n\n${block}` : block;
+  const olderSegments = segments.slice(0, -SESSION_SUMMARY_RECENT_SEGMENT_LIMIT);
+  const recentSegments = segments.slice(-SESSION_SUMMARY_RECENT_SEGMENT_LIMIT);
+  if (olderSegments.length < 2) return false;
+
+  const result = await generateSessionChapterSummary(story, { segments: olderSegments });
+  const chapterSegment = createSessionSummarySegment({
+    type: 'chapter',
+    startTurn: result.startTurn,
+    endTurn: result.endTurn,
+    summary: result.summary,
+    source: 'ai-chapter-summary'
+  });
+  if (!chapterSegment) return false;
+
+  sessionLore.summary_segments = [chapterSegment, ...recentSegments];
+  sessionLore.summary = renderSessionSummarySegments(sessionLore.summary_segments);
+  sessionLore.summary_source = 'ai-summary';
+  return true;
 }
 
 async function refreshStoryAfterSessionSummary(storyId) {
@@ -492,18 +593,27 @@ async function runSessionSummary(storyId, options = {}) {
     if (!latestStory) throw new Error('要約保存時にストーリーを再取得できませんでした。');
 
     ensureSessionLoreStructure(latestStory);
-    latestStory.session_lore.summary = appendSessionSummarySegment(
-      latestStory.session_lore.summary,
-      result.summary,
-      result.startTurn,
-      result.checkpointTurn
-    );
+    const nextSegment = createSessionSummarySegment({
+      type: 'segment',
+      startTurn: Number(result.startTurn || 0) + 1,
+      endTurn: result.checkpointTurn,
+      summary: result.summary,
+      source: 'ai-summary'
+    });
+    const existingSegments = normalizeSessionSummarySegments(latestStory.session_lore);
+    latestStory.session_lore.summary_segments = [...existingSegments, nextSegment].filter(Boolean);
+    latestStory.session_lore.summary = renderSessionSummarySegments(latestStory.session_lore.summary_segments);
     latestStory.session_lore.summary_source = 'ai-summary';
     latestStory.session_lore.summary_checkpoint_turn = Number(result.checkpointTurn || countUserTurnChunks(latestStory.messages || []));
     latestStory.session_lore.last_summary_at = Date.now();
     latestStory.session_lore.last_summary_status = 'success';
     latestStory.session_lore.last_summary_error = '';
     latestStory.session_lore.last_summary_mode = options.mode === 'manual' ? 'manual' : 'auto';
+    try {
+      await maybeChapterCompressSessionSummary(latestStory);
+    } catch (chapterErr) {
+      console.warn('[Session Summary] Chapter compression failed:', chapterErr);
+    }
     await db.saveStory(latestStory);
 
     queueDropboxAutoSync({ storyId, syncStory: true });
