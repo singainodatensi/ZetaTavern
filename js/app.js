@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260619a';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260619a';
-import * as dropbox from './dropbox.js?v=20260619a';
+import * as ui from './ui.js?v=20260620c';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260620c';
+import * as dropbox from './dropbox.js?v=20260620c';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -37,8 +37,34 @@ let isSyncInProgress = false; // 同期の多重実行を防ぐ排他ガード�
 let isDropboxAutoSyncRunning = false;
 let pendingDropboxAutoSync = null;
 let hasDropboxAutoSyncEventBinding = false;
+let activeDropboxSyncLabel = '';
+let dropboxSyncChain = Promise.resolve();
 const sessionSummaryInFlight = new Set();
 const TURN_INTERVAL_OPTIONS = [10, 20, 30, 40];
+
+async function runExclusiveDropboxSync(label, task) {
+  const waitForPrevious = dropboxSyncChain;
+  let releaseCurrent = null;
+  dropboxSyncChain = new Promise(resolve => {
+    releaseCurrent = resolve;
+  });
+
+  if (activeDropboxSyncLabel) {
+    console.log(`[Dropbox] ${label} は ${activeDropboxSyncLabel} の完了待ちです...`);
+  }
+
+  await waitForPrevious;
+  activeDropboxSyncLabel = label;
+  isSyncInProgress = true;
+
+  try {
+    return await task();
+  } finally {
+    activeDropboxSyncLabel = '';
+    isSyncInProgress = false;
+    releaseCurrent?.();
+  }
+}
 
 function normalizeTurnIntervalChoice(value, fallback = 10) {
   const rawValue = Number(value);
@@ -2829,39 +2855,42 @@ async function performDropboxPush() {
   if (pullBtn) pullBtn.disabled = true;
 
   try {
-    const stories    = await db.getStories();
-    const characters = await db.getCharacters();
-    const lores      = await db.getWorldLores();
+    setDropboxProgress(activeDropboxSyncLabel ? `他の同期 (${activeDropboxSyncLabel}) の完了待ち...` : '同期待機中...');
+    await runExclusiveDropboxSync('manual-push', async () => {
+      const stories    = await db.getStories();
+      const characters = await db.getCharacters();
+      const lores      = await db.getWorldLores();
 
-    const assetIds = new Set();
-    [...stories, ...characters].forEach(item => {
-      if (item.protagonist?.avatarAssetId) assetIds.add(item.protagonist.avatarAssetId);
-      if (item.avatarAssetId) assetIds.add(item.avatarAssetId);
+      const assetIds = new Set();
+      [...stories, ...characters].forEach(item => {
+        if (item.protagonist?.avatarAssetId) assetIds.add(item.protagonist.avatarAssetId);
+        if (item.avatarAssetId) assetIds.add(item.avatarAssetId);
+      });
+
+      const assets = [];
+      for (const assetId of assetIds) {
+        if (!assetId) continue;
+        const blob = await db.getAssetBlob(assetId);
+        if (blob) assets.push({ assetId, blob });
+      }
+
+      await dropbox.pushToDropbox({
+        stories,
+        characters,
+        lores,
+        settings: await collectDropboxSettings(),
+        assets,
+        onProgress: msg => setDropboxProgress(msg)
+      });
+
+      const now = Date.now();
+      await db.saveSetting('dropbox_last_sync', now);
+      const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+      if (remoteManifestUpdatedAt) {
+        await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+      }
+      updateLastSyncText(now);
     });
-
-    const assets = [];
-    for (const assetId of assetIds) {
-      if (!assetId) continue;
-      const blob = await db.getAssetBlob(assetId);
-      if (blob) assets.push({ assetId, blob });
-    }
-
-    await dropbox.pushToDropbox({
-      stories,
-      characters,
-      lores,
-      settings: await collectDropboxSettings(),
-      assets,
-      onProgress: msg => setDropboxProgress(msg)
-    });
-
-    const now = Date.now();
-    await db.saveSetting('dropbox_last_sync', now);
-    const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
-    if (remoteManifestUpdatedAt) {
-      await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
-    }
-    updateLastSyncText(now);
     setDropboxProgress(null);
     alert('クラウドへの保存が完了しました！');
   } catch (err) {
@@ -2885,51 +2914,62 @@ async function performDropboxPull() {
   if (pullBtn) pullBtn.disabled = true;
 
   try {
-    const localAssets = await db.getAll('assets');
-    const localAssetIds = new Set(localAssets.map(a => a.assetId));
+    setDropboxProgress(activeDropboxSyncLabel ? `他の同期 (${activeDropboxSyncLabel}) の完了待ち...` : '同期待機中...');
+    let result = null;
+    await runExclusiveDropboxSync('manual-pull', async () => {
+      const localAssets = await db.getAll('assets');
+      const localAssetIds = new Set(localAssets.map(a => a.assetId));
 
-    const { stories, characters, lores, settings, newAssets } = await dropbox.pullFromDropbox({
-      localAssetIds,
-      onProgress: msg => setDropboxProgress(msg)
+      const pulled = await dropbox.pullFromDropbox({
+        localAssetIds,
+        onProgress: msg => setDropboxProgress(msg)
+      });
+
+      if (!pulled.stories) {
+        result = pulled;
+        return;
+      }
+
+      setDropboxProgress('ローカルデータを更新中...');
+
+      await db.runWithoutLocalChangeTracking(async () => {
+        await restoreDropboxSettings(pulled.settings);
+
+        for (const { assetId, blob } of pulled.newAssets) {
+          await db.saveAssetWithId(assetId, blob, blob.type);
+        }
+
+        await db.clearStore('stories');
+        await db.clearStore('characters');
+        await db.clearStore('world_lore');
+
+        for (const story of pulled.stories) {
+          await db.saveStory(story);
+        }
+        for (const char of pulled.characters) {
+          await db.saveCharacter(char);
+        }
+        for (const lore of (pulled.lores || [])) {
+          await db.saveLore(lore);
+        }
+      });
+
+      const now = Date.now();
+      await db.saveSetting('dropbox_last_sync', now);
+      const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+      if (remoteManifestUpdatedAt) {
+        await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+      }
+      updateLastSyncText(now);
+      result = pulled;
     });
 
-    if (!stories) {
+    if (!result?.stories) {
       setDropboxProgress(null);
       alert('クラウドにデータが見つかりませんでした。');
       return;
     }
 
-    setDropboxProgress('ローカルデータを更新中...');
-
-    await db.runWithoutLocalChangeTracking(async () => {
-      await restoreDropboxSettings(settings);
-
-      for (const { assetId, blob } of newAssets) {
-        await db.saveAssetWithId(assetId, blob, blob.type);
-      }
-
-      await db.clearStore('stories');
-      await db.clearStore('characters');
-      await db.clearStore('world_lore');
-
-      for (const story of stories) {
-        await db.saveStory(story);
-      }
-      for (const char of characters) {
-        await db.saveCharacter(char);
-      }
-      for (const lore of (lores || [])) {
-        await db.saveLore(lore);
-      }
-    });
-
-    const now = Date.now();
-    await db.saveSetting('dropbox_last_sync', now);
-    const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
-    if (remoteManifestUpdatedAt) {
-      await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
-    }
-    updateLastSyncText(now);
     setDropboxProgress(null);
 
     const updatedStories = await db.getStories();
@@ -2947,7 +2987,7 @@ async function performDropboxPull() {
     ui.renderStory();
     ui.renderSidebar();
 
-    alert(`クラウドからの復元が完了しました！\nストーリー: ${stories.length}件, キャラクター: ${characters.length}件, ロア: ${(lores || []).length}件, 新規アセット: ${newAssets.length}件`);
+    alert(`クラウドからの復元が完了しました！\nストーリー: ${result.stories.length}件, キャラクター: ${result.characters.length}件, ロア: ${(result.lores || []).length}件, 新規アセット: ${result.newAssets.length}件`);
   } catch (err) {
     setDropboxProgress(null);
     alert(`Pull 同期に失敗しました:\n${err.message}`);
@@ -3020,30 +3060,32 @@ async function performAutoDropboxSync({ storyId = null, forceFull = false, syncS
   if (counter >= freq) {
     await db.saveSetting('dropbox_sync_counter', 0);
     console.log('[Dropbox] 自動同期を開始...');
-    updateSyncStatusIndicator('syncing');
-    try {
-      let completed = false;
-      if (!forceFull && (syncStory || syncLores || syncCharacters)) {
-        completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores, syncCharacters, characterIds, assetIds, loreFranchises });
-        if (!completed) {
-          console.log('[Dropbox AutoSync] 差分同期の基準がないため、フル同期します。');
+    await runExclusiveDropboxSync('auto-sync', async () => {
+      updateSyncStatusIndicator('syncing');
+      try {
+        let completed = false;
+        if (!forceFull && (syncStory || syncLores || syncCharacters)) {
+          completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores, syncCharacters, characterIds, assetIds, loreFranchises });
+          if (!completed) {
+            console.log('[Dropbox AutoSync] 差分同期の基準がないため、フル同期します。');
+          }
         }
+        if (!completed) {
+          await performDropboxPushSilent({ storyId, preferDelta: !forceFull && syncStory && !syncLores });
+        }
+        const now = Date.now();
+        await db.saveSetting('dropbox_last_sync', now);
+        const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+        if (remoteManifestUpdatedAt) {
+          await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+        }
+        updateLastSyncText(now);
+        updateSyncStatusIndicator('success');
+      } catch (e) {
+        console.warn('[Dropbox] 自動同期に失敗しました:', e);
+        updateSyncStatusIndicator('error');
       }
-      if (!completed) {
-        await performDropboxPushSilent({ storyId, preferDelta: !forceFull && syncStory && !syncLores });
-      }
-      const now = Date.now();
-      await db.saveSetting('dropbox_last_sync', now);
-      const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
-      if (remoteManifestUpdatedAt) {
-        await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
-      }
-      updateLastSyncText(now);
-      updateSyncStatusIndicator('success');
-    } catch (e) {
-      console.warn('[Dropbox] 自動同期に失敗しました:', e);
-      updateSyncStatusIndicator('error');
-    }
+    });
   }
 }
 
@@ -3238,17 +3280,70 @@ async function performStartupSync() {
   const freq = parseInt(await db.getSetting('dropbox_sync_frequency', '0'), 10);
   if (freq === 0) return;
 
-  if (isSyncInProgress) {
-    console.log('[Dropbox] 起動時同期の多重実行を回避しました。');
-    return;
-  }
+  await runExclusiveDropboxSync('startup-sync', async () => {
+    updateSyncStatusIndicator('syncing');
+    try {
+      if (await hasNewerLocalChanges()) {
+        console.log('[Dropbox StartupSync] ローカルに最新の未同期編集があります。Pullをスキップし、Pushをバックグラウンド実行します。');
+        await performDropboxPushSilent();
+        const now = Date.now();
+        await db.saveSetting('dropbox_last_sync', now);
+        const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
+        if (remoteManifestUpdatedAt) {
+          await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
+        }
+        updateLastSyncText(now);
+        updateSyncStatusIndicator('success');
+        return;
+      }
 
-  isSyncInProgress = true;
-  updateSyncStatusIndicator('syncing');
-  try {
-    if (await hasNewerLocalChanges()) {
-      console.log('[Dropbox StartupSync] ローカルに最新の未同期編集があります。Pullをスキップし、Pushをバックグラウンド実行します。');
-      await performDropboxPushSilent();
+      const knownRemoteManifestUpdatedAt = parseInt(await db.getSetting('dropbox_remote_manifest_updated_at', '0'), 10) || 0;
+      const remoteManifestInfo = await dropbox.getRemoteManifestInfo();
+      if (remoteManifestInfo?.updatedAt && remoteManifestInfo.updatedAt === knownRemoteManifestUpdatedAt) {
+        console.log('[Dropbox StartupSync] クラウド側の manifest に変更がないため、重いプルをスキップします。');
+        updateSyncStatusIndicator('success');
+        return;
+      }
+
+      const localAssets = await db.getAll('assets');
+      const localAssetIds = new Set(localAssets.map(a => a.assetId));
+
+      const { stories, characters, lores, settings, newAssets } = await dropbox.pullFromDropbox({
+        localAssetIds,
+        onProgress: msg => console.log('[Dropbox StartupSync]', msg)
+      });
+
+      if (stories) {
+        await db.runWithoutLocalChangeTracking(async () => {
+          await restoreDropboxSettings(settings);
+
+          for (const { assetId, blob } of newAssets) {
+            await db.saveAssetWithId(assetId, blob, blob.type);
+          }
+          await db.clearStore('stories');
+          await db.clearStore('characters');
+          await db.clearStore('world_lore');
+          for (const story of stories) await db.saveStory(story);
+          for (const char of characters) await db.saveCharacter(char);
+          for (const lore of (lores || [])) await db.saveLore(lore);
+        });
+
+        const updatedStories = await db.getStories();
+        const updatedChars   = await db.getCharacters();
+        updateState({ stories: updatedStories, characters: updatedChars });
+
+        if (updatedStories.length > 0) {
+          updatedStories.sort((a, b) => b.timestamp - a.timestamp);
+          const lastActiveId = await db.getSetting('last_active_story_id', null);
+          let targetStory = updatedStories.find(s => s.storyId === lastActiveId);
+          if (!targetStory) targetStory = updatedStories[0];
+          setActiveStory(targetStory);
+        }
+        ui.renderStoryList();
+        ui.renderCharacterLibrary();
+        ui.renderLorebook();
+      }
+
       const now = Date.now();
       await db.saveSetting('dropbox_last_sync', now);
       const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
@@ -3257,71 +3352,11 @@ async function performStartupSync() {
       }
       updateLastSyncText(now);
       updateSyncStatusIndicator('success');
-      return;
+    } catch (e) {
+      console.warn('[Dropbox] 起動時同期に失敗:', e);
+      updateSyncStatusIndicator('error');
     }
-
-    const knownRemoteManifestUpdatedAt = parseInt(await db.getSetting('dropbox_remote_manifest_updated_at', '0'), 10) || 0;
-    const remoteManifestInfo = await dropbox.getRemoteManifestInfo();
-    if (remoteManifestInfo?.updatedAt && remoteManifestInfo.updatedAt === knownRemoteManifestUpdatedAt) {
-      console.log('[Dropbox StartupSync] クラウド側の manifest に変更がないため、重いプルをスキップします。');
-      updateSyncStatusIndicator('success');
-      return;
-    }
-
-    const localAssets = await db.getAll('assets');
-    const localAssetIds = new Set(localAssets.map(a => a.assetId));
-
-    const { stories, characters, lores, settings, newAssets } = await dropbox.pullFromDropbox({
-      localAssetIds,
-      onProgress: msg => console.log('[Dropbox StartupSync]', msg)
-    });
-
-    if (stories) {
-      await db.runWithoutLocalChangeTracking(async () => {
-        await restoreDropboxSettings(settings);
-
-        for (const { assetId, blob } of newAssets) {
-          await db.saveAssetWithId(assetId, blob, blob.type);
-        }
-        await db.clearStore('stories');
-        await db.clearStore('characters');
-        await db.clearStore('world_lore');
-        for (const story of stories) await db.saveStory(story);
-        for (const char of characters) await db.saveCharacter(char);
-        for (const lore of (lores || [])) await db.saveLore(lore);
-      });
-
-      const updatedStories = await db.getStories();
-      const updatedChars   = await db.getCharacters();
-      updateState({ stories: updatedStories, characters: updatedChars });
-
-      if (updatedStories.length > 0) {
-        updatedStories.sort((a, b) => b.timestamp - a.timestamp);
-        // ★ ここでも起動時のラストストーリーの復元処理を連携
-        const lastActiveId = await db.getSetting('last_active_story_id', null);
-        let targetStory = updatedStories.find(s => s.storyId === lastActiveId);
-        if (!targetStory) targetStory = updatedStories[0];
-        setActiveStory(targetStory);
-      }
-      ui.renderStoryList();
-      ui.renderCharacterLibrary();
-      ui.renderLorebook();
-    }
-
-    const now = Date.now();
-    await db.saveSetting('dropbox_last_sync', now);
-    const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();
-    if (remoteManifestUpdatedAt) {
-      await db.saveSetting('dropbox_remote_manifest_updated_at', remoteManifestUpdatedAt);
-    }
-    updateLastSyncText(now);
-    updateSyncStatusIndicator('success');
-  } catch (e) {
-    console.warn('[Dropbox] 起動時同期に失敗:', e);
-    updateSyncStatusIndicator('error');
-  } finally {
-    isSyncInProgress = false;
-  }
+  });
 }
 
 /** Sync on tab return (visibility change) */

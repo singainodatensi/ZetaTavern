@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260619a';
+import { getSetting, saveSetting } from './db.js?v=20260620c';
 
 // ============================================================
 // 定数
@@ -41,14 +41,19 @@ const CLIENT_ID_KEY   = 'dropboxClientId';
 const LOCK_TTL_MS     = 30 * 60 * 1000;
 const V2_ROOT         = '/ZetaTavern/v2';
 const V2_MANIFEST     = `${V2_ROOT}/manifest.json`;
+const V2_MANIFEST_BACKUP = `${V2_ROOT}/manifest.backup.json`;
+const V2_MANIFEST_PREV = `${V2_ROOT}/manifest.prev.json`;
 const V2_SETTINGS     = `${V2_ROOT}/settings.json`;
 const V2_LORES        = `${V2_ROOT}/world_lore.json`;
 const V2_LORE_DIR     = `${V2_ROOT}/lores`;
 const V2_CHAR_DIR     = `${V2_ROOT}/characters`;
 const V2_STORY_DIR    = `${V2_ROOT}/stories`;
 const MESSAGE_CHUNK_SIZE = 100;
+const DROPBOX_RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 let lastRemoteManifestInfo = null;
 const ensuredFolderPaths = new Set();
+let cachedTokens = undefined;
+let tokenRefreshPromise = null;
 
 // ============================================================
 // 内部ヘルパー
@@ -92,11 +97,77 @@ function _isTokenExpired(tokens) {
 }
 
 async function _getTokens() {
-  return getSetting(TOKENS_KEY, null);
+  if (cachedTokens !== undefined) {
+    return cachedTokens;
+  }
+  cachedTokens = await getSetting(TOKENS_KEY, null);
+  return cachedTokens;
 }
 
 async function _saveTokens(tokens) {
+  cachedTokens = tokens ?? null;
   await saveSetting(TOKENS_KEY, tokens);
+}
+
+function _sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function _isRetryableDropboxError(error) {
+  const status = Number(error?.status || 0);
+  if (DROPBOX_RETRYABLE_STATUSES.has(status)) return true;
+
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    message.includes('failed to fetch') ||
+    message.includes('networkerror') ||
+    message.includes('load failed') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('timeout') ||
+    message.includes('timed out')
+  );
+}
+
+function _annotateDropboxError(error, actionLabel, contextLabel) {
+  if (!error) return error;
+  const baseMessage = String(error.message || '不明なエラー');
+  const context = String(contextLabel || '').trim();
+  error.message = context
+    ? `${actionLabel} に失敗しました (${context}): ${baseMessage}`
+    : `${actionLabel} に失敗しました: ${baseMessage}`;
+  return error;
+}
+
+function _isUsableV2Manifest(manifest) {
+  return !!manifest && typeof manifest === 'object' && Number(manifest.schemaVersion || 0) >= 2;
+}
+
+async function _runDropboxWithRetry(actionLabel, contextLabel, executor, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts || 3));
+  const baseDelayMs = Math.max(150, Number(options.baseDelayMs || 500));
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await executor();
+    } catch (error) {
+      lastError = error;
+      if (!_isRetryableDropboxError(error) || attempt >= attempts) {
+        throw _annotateDropboxError(lastError, actionLabel, contextLabel);
+      }
+
+      const waitMs = baseDelayMs * attempt;
+      console.warn(`[Dropbox] ${actionLabel} の再試行 ${attempt}/${attempts - 1} を行います。`, {
+        context: contextLabel,
+        status: Number(error?.status || 0),
+        message: String(error?.message || ''),
+        waitMs
+      });
+      await _sleep(waitMs);
+    }
+  }
+
+  throw _annotateDropboxError(lastError || new Error('不明なエラー'), actionLabel, contextLabel);
 }
 
 function _buildDropboxCorsSafeFetch(domain, endpoint, accessToken, options = {}) {
@@ -167,31 +238,43 @@ async function _getClientId() {
 }
 
 async function _refreshAccessToken(refreshToken) {
-  console.log('[Dropbox] アクセストークンを更新中...');
-  const clientId = await getAppKey();
-  const params = new URLSearchParams({
-    grant_type:    'refresh_token',
-    refresh_token: refreshToken,
-    client_id:     clientId,
-  });
-
-  const response = await fetch('https://api.dropboxapi.com/oauth2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params,
-  });
-
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error_description || 'トークン更新に失敗しました');
+  if (tokenRefreshPromise) {
+    return tokenRefreshPromise;
   }
 
-  const data = await response.json();
-  const current = await _getTokens() || {};
-  const updated = _applyTokenExpiry({ ...current, ...data });
-  await _saveTokens(updated);
-  console.log('[Dropbox] トークン更新完了。');
-  return updated;
+  console.log('[Dropbox] アクセストークンを更新中...');
+  tokenRefreshPromise = (async () => {
+    const clientId = await getAppKey();
+    const params = new URLSearchParams({
+      grant_type:    'refresh_token',
+      refresh_token: refreshToken,
+      client_id:     clientId,
+    });
+
+    const response = await fetch('https://api.dropboxapi.com/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params,
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error_description || 'トークン更新に失敗しました');
+    }
+
+    const data = await response.json();
+    const current = await _getTokens() || {};
+    const updated = _applyTokenExpiry({ ...current, ...data });
+    await _saveTokens(updated);
+    console.log('[Dropbox] トークン更新完了。');
+    return updated;
+  })();
+
+  try {
+    return await tokenRefreshPromise;
+  } finally {
+    tokenRefreshPromise = null;
+  }
 }
 
 /**
@@ -232,7 +315,11 @@ async function _request(domain, endpoint, options = {}, retryCount = 0) {
       }
 
       const errMsg = await _readDropboxErrorResponse(response);
-      throw new Error(errMsg);
+      const error = new Error(errMsg);
+      error.status = response.status;
+      error.endpoint = endpoint;
+      error.domain = domain;
+      throw error;
     }
 
     // ダウンロード系は Blob で返す
@@ -244,6 +331,8 @@ async function _request(domain, endpoint, options = {}, retryCount = 0) {
     return text ? JSON.parse(text) : {};
 
   } catch (error) {
+    if (!('endpoint' in error)) error.endpoint = endpoint;
+    if (!('domain' in error)) error.domain = domain;
     const message = String(error?.message || '');
     if (!message.includes('not_found') && !message.includes('path/conflict/folder')) {
       console.error(`[Dropbox] リクエストエラー (${endpoint}):`, error);
@@ -326,6 +415,7 @@ export async function disconnect() {
       console.warn('[Dropbox] サーバー側のトークン失効に失敗しましたが、ローカルは削除します。', e);
     }
   }
+  cachedTokens = null;
   await saveSetting(TOKENS_KEY, null);
   console.log('[Dropbox] 連携を解除しました。');
 }
@@ -378,28 +468,35 @@ export async function downloadMetadata() {
   }
 }
 
-async function uploadJson(path, value) {
+async function uploadJson(path, value, label = '') {
   const payload = JSON.stringify(value);
   const args = { path, mode: 'overwrite', mute: true };
-  return _request('content', '/files/upload', {
+  return _runDropboxWithRetry('JSONアップロード', label || path, () => _request('content', '/files/upload', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/octet-stream',
       'Dropbox-API-Arg': JSON.stringify(args),
     },
     body: payload,
-  });
+  }));
 }
 
-async function downloadJson(path) {
+async function downloadJson(path, label = '') {
   try {
-    const blob = await _request('content', '/files/download', {
-      method: 'POST',
-      headers: { 'Dropbox-API-Arg': JSON.stringify({ path }) },
-    });
+    const blob = await downloadBlobViaTemporaryLink(path, label || path);
     return JSON.parse(await blob.text());
   } catch (error) {
     if (error.message.includes('path/not_found')) return null;
+    const status = Number(error?.status || 0);
+    const message = String(error?.message || '');
+    if (status === 401 || message.includes('temporary_link_missing') || message.includes('other/...')) {
+      console.warn(`[Dropbox] 一時リンク取得に失敗したため、通常ダウンロードへフォールバックします: ${label || path}`);
+      const blob = await _runDropboxWithRetry('JSON取得', label || path, () => _request('content', '/files/download', {
+        method: 'POST',
+        headers: { 'Dropbox-API-Arg': JSON.stringify({ path }) },
+      }));
+      return JSON.parse(await blob.text());
+    }
     throw error;
   }
 }
@@ -408,15 +505,80 @@ async function deleteRemotePath(path) {
   const target = String(path || '').trim();
   if (!target) return null;
   try {
-    return await _request('api', '/files/delete_v2', {
+    return await _runDropboxWithRetry('リモート削除', target, () => _request('api', '/files/delete_v2', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: target }),
-    });
+    }), { attempts: 2, baseDelayMs: 400 });
   } catch (error) {
     if (String(error?.message || '').includes('not_found')) return null;
     throw error;
   }
+}
+
+async function downloadBlobViaTemporaryLink(path, label = '') {
+  const contextLabel = label || path;
+  const result = await _runDropboxWithRetry('一時ダウンロードリンク取得', contextLabel, () => _request('api', '/files/get_temporary_link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  }));
+
+  const link = String(result?.link || '').trim();
+  if (!link) {
+    throw new Error('temporary_link_missing');
+  }
+
+  return _runDropboxWithRetry('一時リンクダウンロード', contextLabel, async () => {
+    const response = await fetch(link, {
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-store'
+    });
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.blob();
+  }, { attempts: 2, baseDelayMs: 400 });
+}
+
+async function loadManifestWithFallback() {
+  const candidates = [
+    { path: V2_MANIFEST, label: '同期目次 manifest.json', source: 'primary' },
+    { path: V2_MANIFEST_BACKUP, label: '同期目次 manifest.backup.json', source: 'backup' },
+    { path: V2_MANIFEST_PREV, label: '同期目次 manifest.prev.json', source: 'previous' }
+  ];
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      const manifest = await downloadJson(candidate.path, candidate.label);
+      if (!_isUsableV2Manifest(manifest)) {
+        if (manifest == null) continue;
+        console.warn(`[Dropbox] ${candidate.label} は存在しますが、v2 manifest としては不正です。`, manifest);
+        continue;
+      }
+      return { manifest, source: candidate.source, path: candidate.path };
+    } catch (error) {
+      lastError = error;
+      console.warn(`[Dropbox] ${candidate.label} の読み込みに失敗しました。次の候補を試します。`, error);
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+  return { manifest: null, source: 'none', path: '' };
+}
+
+async function uploadManifestBundle(manifest, previousManifest = null) {
+  if (previousManifest && _isUsableV2Manifest(previousManifest)) {
+    await uploadJson(V2_MANIFEST_PREV, previousManifest, '同期目次 manifest.prev.json');
+  }
+  await uploadJson(V2_MANIFEST, manifest, '同期目次 manifest.json');
+  await uploadJson(V2_MANIFEST_BACKUP, manifest, '同期目次 manifest.backup.json');
 }
 
 async function syncSettingsDelta(manifest, settings = {}, onProgress) {
@@ -474,14 +636,15 @@ async function pruneDeletedAssetEntries(manifest, tombstones = {}, onProgress) {
 }
 
 export async function getRemoteManifestInfo() {
-  const manifest = await downloadJson(V2_MANIFEST);
-  if (!manifest || Number(manifest.schemaVersion || 0) < 2) {
+  const { manifest, source } = await loadManifestWithFallback();
+  if (!_isUsableV2Manifest(manifest)) {
     lastRemoteManifestInfo = null;
     return null;
   }
   lastRemoteManifestInfo = {
     updatedAt: Number(manifest.updatedAt || 0),
-    schemaVersion: Number(manifest.schemaVersion || 0)
+    schemaVersion: Number(manifest.schemaVersion || 0),
+    source
   };
   return lastRemoteManifestInfo;
 }
@@ -701,6 +864,9 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
 
   progress('設定を分割アップロード中...');
   await uploadJson(V2_SETTINGS, { settings, updatedAt: now });
+  const previousManifest = existingManifest && _isUsableV2Manifest(existingManifest)
+    ? structuredClone(existingManifest)
+    : null;
 
   const manifest = {
     schemaVersion: 4,
@@ -749,7 +915,7 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   }
 
   progress('同期目次を更新中...');
-  await uploadJson(V2_MANIFEST, manifest);
+  await uploadManifestBundle(manifest, previousManifest);
   return manifest;
 }
 
@@ -828,45 +994,65 @@ async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) 
 
 async function downloadV2Data({ localAssetIds, onProgress }) {
   const progress = msg => { if (onProgress) onProgress(msg); };
-  const manifest = await downloadJson(V2_MANIFEST);
-  if (!manifest || manifest.schemaVersion < 2) return null;
+  const { manifest, source } = await loadManifestWithFallback();
+  if (!_isUsableV2Manifest(manifest)) return null;
   lastRemoteManifestInfo = {
     updatedAt: Number(manifest.updatedAt || 0),
-    schemaVersion: Number(manifest.schemaVersion || 0)
+    schemaVersion: Number(manifest.schemaVersion || 0),
+    source
   };
 
-  progress('同期目次を取得しました。差分を復元中...');
-  const settingsPayload = await downloadJson(manifest.settingsPath || V2_SETTINGS);
+  if (source !== 'primary') {
+    progress(`同期目次の予備バックアップ (${source}) を使用して復元中...`);
+  } else {
+    progress('同期目次を取得しました。差分を復元中...');
+  }
+  const settingsPayload = await downloadJson(manifest.settingsPath || V2_SETTINGS, '設定 settings.json');
   const settings = settingsPayload?.settings || {};
   let lores = [];
   const loreFiles = manifest.loreFiles && typeof manifest.loreFiles === 'object'
     ? Object.values(manifest.loreFiles)
     : [];
   if (loreFiles.length > 0) {
-    for (const entry of loreFiles) {
-      const lorePayload = await downloadJson(entry?.path);
+    for (let index = 0; index < loreFiles.length; index++) {
+      const entry = loreFiles[index];
+      const franchiseLabel = getLoreFranchiseLabel(entry?.franchise);
+      progress(`ロアブック ${index + 1}/${loreFiles.length} を取得中... (${franchiseLabel})`);
+      const lorePayload = await downloadJson(entry?.path, `ロアブック ${franchiseLabel}`);
       if (Array.isArray(lorePayload?.lores)) {
         lores.push(...lorePayload.lores);
       }
     }
   } else {
-    const lorePayload = await downloadJson(manifest.loresPath || V2_LORES);
+    progress('旧式ロアブック world_lore.json を取得中...');
+    const lorePayload = await downloadJson(manifest.loresPath || V2_LORES, '旧式ロアブック world_lore.json');
     lores = Array.isArray(lorePayload?.lores) ? lorePayload.lores : [];
   }
 
   const characters = [];
-  for (const entry of Object.values(manifest.characters || {})) {
-    const character = await downloadJson(entry.path);
+  const characterEntries = Object.values(manifest.characters || {});
+  for (let index = 0; index < characterEntries.length; index++) {
+    const entry = characterEntries[index];
+    progress(`キャラクター ${index + 1}/${characterEntries.length} を取得中... (${entry?.name || 'unknown'})`);
+    const character = await downloadJson(entry.path, `キャラクター ${entry?.name || entry?.path || index + 1}`);
     if (character) characters.push(character);
   }
 
   const stories = [];
-  for (const entry of Object.values(manifest.stories || {})) {
-    const meta = await downloadJson(entry.metaPath);
+  const storyEntries = Object.values(manifest.stories || {});
+  for (let storyIndex = 0; storyIndex < storyEntries.length; storyIndex++) {
+    const entry = storyEntries[storyIndex];
+    progress(`ストーリー ${storyIndex + 1}/${storyEntries.length} を取得中... (${entry?.title || 'untitled'})`);
+    const meta = await downloadJson(entry.metaPath, `ストーリーmeta ${entry?.title || entry?.metaPath || storyIndex + 1}`);
     if (!meta) continue;
     const messages = [];
-    for (const chunkPath of entry.messageChunks || []) {
-      const chunk = await downloadJson(chunkPath);
+    const chunkPaths = entry.messageChunks || [];
+    for (let chunkIndex = 0; chunkIndex < chunkPaths.length; chunkIndex++) {
+      const chunkPath = chunkPaths[chunkIndex];
+      const chunk = await downloadJson(
+        chunkPath,
+        `ストーリーchunk ${entry?.title || entry?.storyId || storyIndex + 1} ${chunkIndex + 1}/${chunkPaths.length}`
+      );
       if (Array.isArray(chunk?.messages)) messages.push(...chunk.messages);
     }
     stories.push({ ...meta, messages });
@@ -922,14 +1108,14 @@ export async function ensureAssetsFolderExists() {
 export async function uploadAsset(blob, assetId, remotePath = '') {
   const path = remotePath || `${ASSETS_DIR_PATH}/${assetId}`;
   const args = { path, mode: 'overwrite', mute: true };
-  return _request('content', '/files/upload', {
+  return _runDropboxWithRetry('アセットアップロード', assetId || path, () => _request('content', '/files/upload', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/octet-stream',
       'Dropbox-API-Arg': JSON.stringify(args),
     },
     body: blob,
-  });
+  }));
 }
 
 /**
@@ -938,16 +1124,22 @@ export async function uploadAsset(blob, assetId, remotePath = '') {
  */
 export async function downloadAsset(assetId, remotePath = '') {
   const path = remotePath || `${ASSETS_DIR_PATH}/${assetId}`;
-  const args = { path };
   try {
-    return await _request('content', '/files/download', {
-      method: 'POST',
-      headers: { 'Dropbox-API-Arg': JSON.stringify(args) },
-    });
+    return await downloadBlobViaTemporaryLink(path, assetId || path);
   } catch (error) {
     if (error.message.includes('path/not_found')) {
       console.warn(`[Dropbox] アセットがクラウドに見つかりません: ${assetId}`);
       return null;
+    }
+    const status = Number(error?.status || 0);
+    const message = String(error?.message || '');
+    if (status === 401 || message.includes('temporary_link_missing') || message.includes('other/...')) {
+      const args = { path };
+      console.warn(`[Dropbox] 一時リンクでのアセット取得に失敗したため、通常ダウンロードへフォールバックします: ${assetId}`);
+      return _runDropboxWithRetry('アセット取得', assetId || path, () => _request('content', '/files/download', {
+        method: 'POST',
+        headers: { 'Dropbox-API-Arg': JSON.stringify(args) },
+      }));
     }
     throw error;
   }
@@ -1058,12 +1250,8 @@ export async function deleteLockFile() {
 
 export async function checkLockFile() {
   try {
-    const blob = await _request('content', '/files/download', {
-      method: 'POST',
-      headers: { 'Dropbox-API-Arg': JSON.stringify({ path: LOCK_PATH }) },
-    });
-    const text = await blob.text();
-    const lock = JSON.parse(text);
+    const lock = await downloadJson(LOCK_PATH, '同期ロック');
+    if (!lock) return null;
     const expiresAt = Number(lock.expiresAt || 0);
     const timestamp = Date.parse(lock.timestamp || '');
     const fallbackExpiresAt = Number.isFinite(timestamp) ? timestamp + LOCK_TTL_MS : 0;
@@ -1111,7 +1299,7 @@ export async function pushToDropbox({ stories, characters, lores, settings, asse
 
   await uploadLockFile('push');
   try {
-    const existingManifest = await downloadJson(V2_MANIFEST);
+    const { manifest: existingManifest } = await loadManifestWithFallback();
     const remoteSettingsPayload = await downloadJson(existingManifest?.settingsPath || V2_SETTINGS);
     const mergedTombstones = mergeSyncTombstones(
       settings?.dropbox_sync_tombstones || {},
@@ -1171,10 +1359,12 @@ export async function pushStoryDeltaToDropbox({ story, settings, assets = [], on
 
   await uploadLockFile('delta-push');
   try {
-    const manifest = await downloadJson(V2_MANIFEST);
-    if (!manifest || manifest.schemaVersion < 2) {
+    const loaded = await loadManifestWithFallback();
+    const manifest = loaded.manifest;
+    if (!_isUsableV2Manifest(manifest)) {
       return null;
     }
+    const previousManifest = structuredClone(manifest);
     const { mergedTombstones } = await syncSettingsDelta(manifest, settings || {}, onProgress);
 
     const now = Date.now();
@@ -1206,7 +1396,7 @@ export async function pushStoryDeltaToDropbox({ story, settings, assets = [], on
     manifest.updatedAt = now;
 
     progress('同期目次を更新中...');
-    await uploadJson(V2_MANIFEST, manifest);
+    await uploadManifestBundle(manifest, previousManifest);
     lastRemoteManifestInfo = {
       updatedAt: Number(manifest.updatedAt || 0),
       schemaVersion: Number(manifest.schemaVersion || 0)
@@ -1236,10 +1426,12 @@ export async function pushCharacterDeltaToDropbox({ characters, settings = {}, a
 
   await uploadLockFile('delta-push-characters');
   try {
-    const manifest = await downloadJson(V2_MANIFEST);
-    if (!manifest || manifest.schemaVersion < 2) {
+    const loaded = await loadManifestWithFallback();
+    const manifest = loaded.manifest;
+    if (!_isUsableV2Manifest(manifest)) {
       return null;
     }
+    const previousManifest = structuredClone(manifest);
     const { mergedTombstones } = await syncSettingsDelta(manifest, settings || {}, onProgress);
 
     const now = Date.now();
@@ -1281,7 +1473,7 @@ export async function pushCharacterDeltaToDropbox({ characters, settings = {}, a
 
     manifest.updatedAt = now;
     progress('同期目次を更新中...');
-    await uploadJson(V2_MANIFEST, manifest);
+    await uploadManifestBundle(manifest, previousManifest);
     lastRemoteManifestInfo = {
       updatedAt: Number(manifest.updatedAt || 0),
       schemaVersion: Number(manifest.schemaVersion || 0)
@@ -1308,10 +1500,12 @@ export async function pushLoreDeltaToDropbox({ lores, settings = {}, franchises 
 
   await uploadLockFile('delta-push-lores');
   try {
-    const manifest = await downloadJson(V2_MANIFEST);
-    if (!manifest || manifest.schemaVersion < 2) {
+    const loaded = await loadManifestWithFallback();
+    const manifest = loaded.manifest;
+    if (!_isUsableV2Manifest(manifest)) {
       return null;
     }
+    const previousManifest = structuredClone(manifest);
     const { mergedTombstones } = await syncSettingsDelta(manifest, settings || {}, onProgress);
 
     const now = Date.now();
@@ -1376,7 +1570,7 @@ export async function pushLoreDeltaToDropbox({ lores, settings = {}, franchises 
     manifest.updatedAt = now;
 
     progress('同期目次を更新中...');
-    await uploadJson(V2_MANIFEST, manifest);
+    await uploadManifestBundle(manifest, previousManifest);
     lastRemoteManifestInfo = {
       updatedAt: Number(manifest.updatedAt || 0),
       schemaVersion: Number(manifest.schemaVersion || 0)
