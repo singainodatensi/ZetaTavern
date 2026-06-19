@@ -302,7 +302,9 @@ function buildSessionSummaryPrompt({
     sections.push(existingSummary.trim());
     sections.push('');
     sections.push('【指示】');
-    sections.push('上記の既存要約に、これから提示する新しい会話履歴を統合し、重複を整理した最新版のあらすじとして再出力してください。');
+    sections.push('上記は既に保存されている過去ログの圧縮あらすじです。これを上書き・再編集するのではなく、これから提示する新しい会話履歴の追加分だけを要約してください。');
+    sections.push('出力は「今回追加する会話履歴」の内容だけに限定し、既存要約の言い換えや書き直しは行わないでください。');
+    sections.push('ただし、既存要約を文脈として参照し、誰が誰で、なぜ同行しているか等の継続性が崩れないようにしてください。');
     sections.push('');
   } else {
     sections.push('【指示】');
@@ -1908,7 +1910,7 @@ export async function buildSystemInstruction(story, options = {}) {
     const sessionLore = ensureSessionLoreStructure(story);
     instruction += `【これまでのストーリー進行・獲得フラグ（長期記憶）】\n`;
     if (sessionLore.summary) {
-      instruction += `・圧縮あらすじ（古い会話履歴の要約）: ${sessionLore.summary}\n`;
+      instruction += `・圧縮あらすじ（古い会話履歴の要約）:\n${sessionLore.summary}\n`;
     }
     if (sessionLore.summary_checkpoint_turn) {
       instruction += `・圧縮済みユーザーターン数: ${sessionLore.summary_checkpoint_turn}\n`;
@@ -3132,12 +3134,6 @@ export async function generateStorySummary(story, options = {}) {
   let chunksToSummarize = chunks.slice(startTurn, totalTurns);
   let existingSummary = String(sessionLore.summary || '').trim();
 
-  if (chunksToSummarize.length === 0 && isManual) {
-    startTurn = 0;
-    chunksToSummarize = chunks.slice(0, totalTurns);
-    existingSummary = '';
-  }
-
   if (chunksToSummarize.length === 0) {
     return {
       summary: existingSummary,
@@ -3204,6 +3200,7 @@ export async function generateStorySummary(story, options = {}) {
 
   return {
     summary: summaryText,
+    startTurn,
     checkpointTurn: totalTurns,
     totalTurns,
     usage: publishUsageSnapshot(usageAccumulator),

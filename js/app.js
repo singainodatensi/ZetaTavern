@@ -423,6 +423,20 @@ function shouldAutoSummarizeStory(story, stateSnapshot = getState()) {
   return totalTurns - checkpointTurn >= getSessionSummaryInterval(stateSnapshot);
 }
 
+function appendSessionSummarySegment(existingSummary, nextSummary, startTurn, endTurn) {
+  const next = String(nextSummary || '').trim();
+  if (!next) return String(existingSummary || '').trim();
+
+  const fromTurn = Math.max(1, Number(startTurn || 0) + 1);
+  const toTurn = Math.max(fromTurn, Number(endTurn || fromTurn));
+  const rangeLabel = fromTurn === toTurn
+    ? `【第${fromTurn}ターン要約】`
+    : `【第${fromTurn}〜${toTurn}ターン要約】`;
+  const block = `${rangeLabel}\n${next}`;
+  const prev = String(existingSummary || '').trim();
+  return prev ? `${prev}\n\n${block}` : block;
+}
+
 async function refreshStoryAfterSessionSummary(storyId) {
   const stories = await db.getStories();
   const activeState = getState();
@@ -478,7 +492,12 @@ async function runSessionSummary(storyId, options = {}) {
     if (!latestStory) throw new Error('要約保存時にストーリーを再取得できませんでした。');
 
     ensureSessionLoreStructure(latestStory);
-    latestStory.session_lore.summary = String(result.summary || '').trim();
+    latestStory.session_lore.summary = appendSessionSummarySegment(
+      latestStory.session_lore.summary,
+      result.summary,
+      result.startTurn,
+      result.checkpointTurn
+    );
     latestStory.session_lore.summary_source = 'ai-summary';
     latestStory.session_lore.summary_checkpoint_turn = Number(result.checkpointTurn || countUserTurnChunks(latestStory.messages || []));
     latestStory.session_lore.last_summary_at = Date.now();
