@@ -38,6 +38,28 @@ let isDropboxAutoSyncRunning = false;
 let pendingDropboxAutoSync = null;
 let hasDropboxAutoSyncEventBinding = false;
 const sessionSummaryInFlight = new Set();
+const TURN_INTERVAL_OPTIONS = [10, 20, 30, 40];
+
+function normalizeTurnIntervalChoice(value, fallback = 10) {
+  const rawValue = Number(value);
+  if (!Number.isFinite(rawValue)) return fallback;
+  if (TURN_INTERVAL_OPTIONS.includes(rawValue)) return rawValue;
+  if (rawValue <= TURN_INTERVAL_OPTIONS[0]) return TURN_INTERVAL_OPTIONS[0];
+  if (rawValue >= TURN_INTERVAL_OPTIONS[TURN_INTERVAL_OPTIONS.length - 1]) {
+    return TURN_INTERVAL_OPTIONS[TURN_INTERVAL_OPTIONS.length - 1];
+  }
+
+  let nearest = TURN_INTERVAL_OPTIONS[0];
+  let smallestDiff = Math.abs(rawValue - nearest);
+  for (const option of TURN_INTERVAL_OPTIONS.slice(1)) {
+    const diff = Math.abs(rawValue - option);
+    if (diff < smallestDiff) {
+      nearest = option;
+      smallestDiff = diff;
+    }
+  }
+  return nearest;
+}
 
 function createEmptySessionLore() {
   return {
@@ -498,9 +520,7 @@ function updateSessionSummaryControls(enabled) {
 }
 
 function getSessionSummaryInterval(stateSnapshot = getState()) {
-  const rawValue = Number(stateSnapshot.sessionSummaryTurnInterval);
-  if (!Number.isFinite(rawValue) || rawValue <= 0) return 20;
-  return rawValue;
+  return normalizeTurnIntervalChoice(stateSnapshot.sessionSummaryTurnInterval, 20);
 }
 
 function shouldAutoSummarizeStory(story, stateSnapshot = getState()) {
@@ -1195,11 +1215,13 @@ async function loadConfigurations() {
   const gemmaThinkingEnabled = normalizeGemmaThinkingEnabled(await db.getSetting('gemma_thinking_enabled', true));
   const promptDebugEnabled = await db.getSetting('prompt_debug_enabled', false);
   const historyCompressionEnabled = await db.getSetting('history_compression_enabled', true);
-  const historyTurnLimit = await db.getSetting('history_turn_limit', 10);
+  const historyTurnLimit = normalizeTurnIntervalChoice(await db.getSetting('history_turn_limit', 10), 10);
   const sessionSummaryAutoEnabled = await db.getSetting('session_summary_auto_enabled', true);
-  const sessionSummaryTurnInterval = await db.getSetting('session_summary_turn_interval', 20);
+  const sessionSummaryTurnInterval = normalizeTurnIntervalChoice(await db.getSetting('session_summary_turn_interval', 20), 20);
   const sessionSummaryModelName = await db.getSetting('session_summary_model_name', '');
   const sessionSummaryPrompt = await db.getSetting('session_summary_prompt', DEFAULT_SESSION_SUMMARY_PROMPT);
+  await db.saveSetting('history_turn_limit', historyTurnLimit);
+  await db.saveSetting('session_summary_turn_interval', sessionSummaryTurnInterval);
   
   // Settingsからタイムアウト設定値とリトライ設定値も取得してStateに同期させる
   const apiTimeout = await db.getSetting('api_timeout', 60);
@@ -1238,9 +1260,9 @@ async function loadConfigurations() {
     gemmaThinkingEnabled,
     promptDebugEnabled,
     historyCompressionEnabled,
-    historyTurnLimit: Number.isFinite(Number(historyTurnLimit)) ? Number(historyTurnLimit) : 10,
+    historyTurnLimit,
     sessionSummaryAutoEnabled,
-    sessionSummaryTurnInterval: Number.isFinite(Number(sessionSummaryTurnInterval)) ? Number(sessionSummaryTurnInterval) : 20,
+    sessionSummaryTurnInterval,
     sessionSummaryModelName: String(sessionSummaryModelName || '').trim(),
     sessionSummaryPrompt: String(sessionSummaryPrompt || DEFAULT_SESSION_SUMMARY_PROMPT),
     isSessionSummaryRunning: false
@@ -1805,8 +1827,8 @@ async function bindEvents() {
   }
   if (historyTurnLimitEl) {
     historyTurnLimitEl.onchange = (e) => {
-      const val = parseInt(e.target.value, 10);
-      const nextValue = Number.isFinite(val) ? val : 10;
+      const nextValue = normalizeTurnIntervalChoice(e.target.value, 10);
+      e.target.value = String(nextValue);
       updateState({ historyTurnLimit: nextValue });
       db.saveSetting('history_turn_limit', nextValue);
     };
@@ -1821,8 +1843,8 @@ async function bindEvents() {
   }
   if (sessionSummaryTurnIntervalEl) {
     sessionSummaryTurnIntervalEl.onchange = (e) => {
-      const val = parseInt(e.target.value, 10);
-      const nextValue = Number.isFinite(val) ? val : 20;
+      const nextValue = normalizeTurnIntervalChoice(e.target.value, 20);
+      e.target.value = String(nextValue);
       updateState({ sessionSummaryTurnInterval: nextValue });
       db.saveSetting('session_summary_turn_interval', nextValue);
     };
