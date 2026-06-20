@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks } from './ai-client.js?v=20260619a';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260620k';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -457,15 +457,21 @@ export function parseChoices(text) {
   if (!text) return { bodyText: '', choices: [] };
   const choices = [];
   const choiceLineRegex = /^\s*(?:[-*・►▶▷>]\s*)?([A-CＡ-Ｃ])\s*[\.\):：）．、]\s*(.+?)\s*$/gm;
+  const orphanChoiceLineRegex = /^\s*(?:[-*・►▶▷>]\s*)?[A-CＡ-Ｃ]\s*[\.\):：）．、]?\s*$/gmi;
+  const choiceHeaderRegex = /^\s*(?:#{1,6}\s*)?(?:[-=_─━]{3,}|選択肢|Choices?)\s*$/gmi;
   const matches = [...text.matchAll(choiceLineRegex)];
-  if (matches.length >= 2) {
+  const orphanMatches = [...text.matchAll(orphanChoiceLineRegex)];
+  const shouldStripOrphans = orphanMatches.length >= 2 || choiceHeaderRegex.test(text);
+  choiceHeaderRegex.lastIndex = 0;
+  if (matches.length >= 2 || shouldStripOrphans) {
     for (const match of matches) {
       const label = match[1].replace('Ａ', 'A').replace('Ｂ', 'B').replace('Ｃ', 'C');
       choices.push({ label, text: match[2].trim() });
     }
     const bodyText = text
       .replace(choiceLineRegex, '')
-      .replace(/^\s*(?:#{1,6}\s*)?(?:[-=_─━]{3,}|選択肢|Choices?)\s*$/gmi, '')
+      .replace(orphanChoiceLineRegex, '')
+      .replace(choiceHeaderRegex, '')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
     return { bodyText, choices };
@@ -479,6 +485,7 @@ export function parseModelOutputToSegments(text) {
   const segments = [];
   let currentDialogue = null;
   let narrationBuffer = [];
+  let narrationSourceBuffer = [];
   let pendingImage = null;
 
   const consumePendingImage = () => {
@@ -489,13 +496,17 @@ export function parseModelOutputToSegments(text) {
 
   const flushNarration = () => {
     const joined = narrationBuffer.join('\n').trim();
-    if (joined) segments.push({ type: 'narration', text: joined, image: consumePendingImage() });
+    const sourceText = narrationSourceBuffer.join('\n').trim();
+    if (joined) segments.push({ type: 'narration', text: joined, sourceText: sourceText || joined, image: consumePendingImage() });
     narrationBuffer = [];
+    narrationSourceBuffer = [];
   };
 
   const flushDialogue = () => {
     if (currentDialogue && currentDialogue.lines.length > 0) {
       if (!currentDialogue.image) currentDialogue.image = consumePendingImage();
+      currentDialogue.sourceText = (currentDialogue.sourceLines || []).join('\n').trim();
+      delete currentDialogue.sourceLines;
       segments.push(currentDialogue);
     }
     currentDialogue = null;
@@ -517,7 +528,7 @@ export function parseModelOutputToSegments(text) {
     if (envMatch) {
       flushNarration();
       flushDialogue();
-      segments.push({ type: 'narration', text: `【${envMatch[1]}】`, image: consumePendingImage() });
+      segments.push({ type: 'narration', text: `【${envMatch[1]}】`, sourceText: line, image: consumePendingImage() });
       continue;
     }
 
@@ -526,7 +537,7 @@ export function parseModelOutputToSegments(text) {
     if (boldMatch) {
       flushNarration();
       flushDialogue();
-      segments.push({ type: 'narration', text: boldMatch[1], image: consumePendingImage() });
+      segments.push({ type: 'narration', text: boldMatch[1], sourceText: line, image: consumePendingImage() });
       continue;
     }
 
@@ -536,9 +547,10 @@ export function parseModelOutputToSegments(text) {
       const actionText = trimmed.replace(/^\*|\*$/g, '').replace(/^＊|＊$/g, '').trim();
       if (currentDialogue) {
         currentDialogue.lines.push({ kind: 'action', text: actionText });
+        currentDialogue.sourceLines.push(line);
       } else {
         flushNarration();
-        segments.push({ type: 'narration', text: `*${actionText}*`, image: consumePendingImage() });
+        segments.push({ type: 'narration', text: `*${actionText}*`, sourceText: line, image: consumePendingImage() });
       }
       continue;
     }
@@ -567,7 +579,7 @@ export function parseModelOutputToSegments(text) {
     if (speaker && !['ナレーター', 'システム', '背景', 'ナレーション', '環境描写', '地の文'].includes(speaker)) {
       flushNarration();
       flushDialogue();
-      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [], image: consumePendingImage() };
+      currentDialogue = { type: 'dialogue', speaker: speaker, lines: [], sourceLines: [line], image: consumePendingImage() };
       if (action) {
         currentDialogue.lines.push({ kind: 'action', text: action });
       }
@@ -583,6 +595,7 @@ export function parseModelOutputToSegments(text) {
       if (trimmed.startsWith('「') || trimmed.includes('「') || trimmed.endsWith('」')) {
         const cleaned = trimmed.replace(/^「|」$/g, '');
         currentDialogue.lines.push({ kind: 'speech', text: `「${cleaned}」` });
+        currentDialogue.sourceLines.push(line);
         continue;
       }
       flushDialogue();
@@ -590,6 +603,7 @@ export function parseModelOutputToSegments(text) {
 
     // いずれにも当てはまらない場合はナレーションバッファへ
     narrationBuffer.push(line);
+    narrationSourceBuffer.push(line);
   }
 
   flushNarration();
@@ -859,7 +873,7 @@ export async function renderStory() {
   
   let parsedLast = { bodyText: '', choices: [] };
   if (lastIsModel) {
-    parsedLast = parseChoices(lastMsg.content);
+    parsedLast = parseChoices(stripLeakedThinkingText(lastMsg.content));
   }
 
   const allCharacters = uiMode === 'chat' ? await db.getCharacters() : [];
@@ -869,7 +883,8 @@ for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     const isLast = i === messages.length - 1;
     const isModel = msg.role === 'model';
-    const textToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
+    const rawTextToRender = (isLast && isModel) ? parsedLast.bodyText : msg.content;
+    const textToRender = isModel ? stripLeakedThinkingText(rawTextToRender) : rawTextToRender;
 
     // ★ msgWrapperの宣言は1回だけ！
     const msgWrapper = document.createElement('div');
@@ -1289,6 +1304,63 @@ async function confirmLoreDeletion(loreName) {
 }
 
 /**
+ * 吹き出し編集欄の内容を、元メッセージへ戻せる台本形式へ整える。
+ */
+function buildSegmentReplacementText(seg, editedText) {
+  const newText = String(editedText || '').trim();
+  if (seg?.type !== 'dialogue') return newText;
+
+  const speaker = String(seg.speaker || '').trim();
+  if (!speaker) return newText;
+
+  const alreadyHasSpeaker =
+    newText.startsWith(`${speaker}:`) ||
+    newText.startsWith(`${speaker}：`) ||
+    newText.startsWith(`${speaker}「`) ||
+    newText.startsWith(`${speaker}（`) ||
+    newText.startsWith(`${speaker}(`) ||
+    newText.startsWith(`[${speaker}]`);
+  if (alreadyHasSpeaker) return newText;
+
+  const lines = newText
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  let actionText = '';
+  const speechLines = [];
+  const otherLines = [];
+
+  for (const line of lines) {
+    const actionMatch = line.match(/^[*＊](.+)[*＊]$/);
+    if (actionMatch && !actionText) {
+      actionText = actionMatch[1].trim();
+      continue;
+    }
+    if (line.startsWith('「') || line.endsWith('」')) {
+      speechLines.push(line.replace(/^「|」$/g, '').trim());
+      continue;
+    }
+    otherLines.push(line);
+  }
+
+  if (speechLines.length === 0 && otherLines.length > 0) {
+    speechLines.push(otherLines.join('\n').trim());
+  }
+
+  const actionPart = actionText ? `（${actionText}）` : '';
+  if (speechLines.length === 0) {
+    return `${speaker}${actionPart}`;
+  }
+
+  const [firstSpeech, ...restSpeech] = speechLines;
+  return [
+    `${speaker}${actionPart}:「${firstSpeech}」`,
+    ...restSpeech.map(line => `「${line}」`)
+  ].join('\n');
+}
+
+/**
  * キャラクターの吹き出し（セグメント）ごとの編集モーダルを表示する関数
  */
 export async function showEditSegmentModal(msgIndex, seg) {
@@ -1367,15 +1439,23 @@ export async function showEditSegmentModal(msgIndex, seg) {
 
     let updatedContent = msg.content;
     let replaceSuccess = false;
+    const replacementText = buildSegmentReplacementText(seg, newText);
+    const sourceText = String(seg.sourceText || '').trim();
 
-    // 元のテキスト内で該当箇所を探して置換する
+    // パターン0: パーサが保持した元テキスト範囲をそのまま置換する
+    if (sourceText && updatedContent.includes(sourceText)) {
+      updatedContent = updatedContent.replace(sourceText, replacementText);
+      replaceSuccess = true;
+    }
+
+    // 元のテキスト内で該当箇所を探して置換する（旧データ・フォールバック）
     const firstLine = seg.type === 'dialogue' && seg.lines.length > 0 
       ? (seg.lines[0].kind === 'action' ? `*${seg.lines[0].text}*` : seg.lines[0].text) 
       : originalText;
 
     // パターン1: そのままの文字列でマッチする場合
-    if (updatedContent.includes(firstLine)) {
-      updatedContent = updatedContent.replace(firstLine, newText);
+    if (!replaceSuccess && updatedContent.includes(firstLine)) {
+      updatedContent = updatedContent.replace(firstLine, replacementText);
       // 複数行あった場合は、残りの古い行を削除して整合性をとる
       if (seg.type === 'dialogue' && seg.lines.length > 1) {
         for (let i = 1; i < seg.lines.length; i++) {
@@ -1387,7 +1467,7 @@ export async function showEditSegmentModal(msgIndex, seg) {
       replaceSuccess = true;
     } 
     // パターン2: [キャラクター名] 「セリフ」 の形式で生データが保存されている場合
-    else {
+    else if (!replaceSuccess) {
       const formattedFallback = `[${seg.speaker}] ${firstLine}`;
       if (updatedContent.includes(formattedFallback)) {
         updatedContent = updatedContent.replace(formattedFallback, `[${seg.speaker}] ${newText}`);

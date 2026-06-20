@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260620h';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260620h';
-import * as dropbox from './dropbox.js?v=20260620h';
+import * as ui from './ui.js?v=20260620k';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260620k';
+import * as dropbox from './dropbox.js?v=20260620k';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -39,8 +39,13 @@ let pendingDropboxAutoSync = null;
 let hasDropboxAutoSyncEventBinding = false;
 let activeDropboxSyncLabel = '';
 let dropboxSyncChain = Promise.resolve();
+let syncStatusUpdateToken = 0;
 const sessionSummaryInFlight = new Set();
 const TURN_INTERVAL_OPTIONS = [10, 20, 30, 40];
+
+function isDropboxSyncBusy() {
+  return !!(isSyncInProgress || isDropboxAutoSyncRunning || activeDropboxSyncLabel || pendingDropboxAutoSync);
+}
 
 async function runExclusiveDropboxSync(label, task) {
   const waitForPrevious = dropboxSyncChain;
@@ -3226,6 +3231,11 @@ function updateSyncStatusIndicator(status) {
   const iconEl = indicator.querySelector('.material-symbols-outlined');
   if (!iconEl) return;
 
+  if (status === 'idle' && isDropboxSyncBusy()) {
+    status = 'syncing';
+  }
+
+  const token = ++syncStatusUpdateToken;
   indicator.classList.remove('hidden');
   indicator.className = 'sync-status-indicator';
 
@@ -3240,6 +3250,7 @@ function updateSyncStatusIndicator(status) {
       indicator.classList.add('sync-success');
       indicator.title = '同期完了';
       setTimeout(() => {
+        if (token !== syncStatusUpdateToken || isDropboxSyncBusy()) return;
         indicator.classList.remove('sync-success');
         indicator.classList.add('sync-idle');
         iconEl.textContent = 'cloud_done';
@@ -3379,7 +3390,7 @@ function setupVisibilitySync() {
 // タブ復帰だけでは同期しない。同期は起動時・チャット更新時・明示操作に限定する。
     // Chrome などのフォーカス変更で過剰同期が走るのを避けるため、ここでは表示だけ整える。
     if (await dropbox.isConnected()) {
-      updateSyncStatusIndicator('idle');
+      updateSyncStatusIndicator(isDropboxSyncBusy() ? 'syncing' : 'idle');
     }
 
   });

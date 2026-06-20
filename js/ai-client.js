@@ -2131,6 +2131,7 @@ export function stripLeakedThinkingText(text) {
   if (!text || typeof text !== 'string') return text;
 
   let working = text.trim();
+  working = stripLeakedFunctionCallText(working);
 
   const draftMatch = working.match(/Drafting the scene:\s*/i);
   if (draftMatch) {
@@ -2165,7 +2166,34 @@ export function stripLeakedThinkingText(text) {
   }
 
   const stripped = lines.slice(storyStart).join('\n').trim();
-  return stripped.length >= 40 ? stripped : working;
+  return stripped.length >= 40 ? stripLeakedFunctionCallText(stripped) : working;
+}
+
+function stripLeakedFunctionCallText(text) {
+  if (!text || typeof text !== 'string') return text;
+  let working = text;
+  const functionNames = [
+    'update_session_lore',
+    'update_world_lore',
+    'search_lorebook',
+    'get_lore_entry',
+    'search_character_library',
+    'get_character_profile',
+    'search_web'
+  ];
+
+  for (const name of functionNames) {
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const callRegex = new RegExp(`(?:^|\\n)\\s*${escapedName}\\s*\\([\\s\\S]*?\\)\\s*(?=\\n\\s*(?:[【\\[]|[^\\n]{1,30}[：:]|[^\\n]{1,30}「|$))`, 'g');
+    working = working.replace(callRegex, '\n');
+  }
+
+  return working
+    .split('\n')
+    .filter(line => !/^\s*(?:functionCall|functionResponse|tool[_ ]?call|tool[_ ]?response)\b/i.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function extractLeakedThinkingAndStory(text) {
