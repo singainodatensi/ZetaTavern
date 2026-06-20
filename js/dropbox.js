@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260620e';
+import { getSetting, saveSetting } from './db.js?v=20260620h';
 
 // ============================================================
 // 定数
@@ -174,21 +174,6 @@ function _buildDropboxCorsSafeFetch(domain, endpoint, accessToken, options = {})
   const requestUrl = new URL(`https://${domain}.dropboxapi.com/2${endpoint}`);
   const rawHeaders = options.headers || {};
   const method = String(options.method || 'POST').toUpperCase();
-
-  if (domain === 'content' && endpoint === '/files/upload') {
-    return {
-      url: requestUrl.toString(),
-      options: {
-        ...options,
-        method,
-        mode: 'cors',
-        headers: {
-          ...rawHeaders,
-          Authorization: `Bearer ${accessToken}`,
-        },
-      },
-    };
-  }
 
   const corsSafeOptions = {
     ...options,

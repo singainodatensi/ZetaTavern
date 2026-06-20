@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260620e';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260620e';
-import * as dropbox from './dropbox.js?v=20260620e';
+import * as ui from './ui.js?v=20260620h';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260620h';
+import * as dropbox from './dropbox.js?v=20260620h';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -3284,8 +3284,21 @@ async function performStartupSync() {
     updateSyncStatusIndicator('syncing');
     try {
       if (await hasNewerLocalChanges()) {
-        console.log('[Dropbox StartupSync] ローカルに最新の未同期編集があります。Pullをスキップし、Pushをバックグラウンド実行します。');
-        await performDropboxPushSilent();
+        console.log('[Dropbox StartupSync] ローカルに最新の未同期編集があります。Pullをスキップし、直近ストーリーを差分Pushします。');
+        const lastActiveId = await db.getSetting('last_active_story_id', null);
+        const localStories = await db.getStories();
+        const latestStory = localStories
+          .slice()
+          .sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))[0];
+        const targetStoryId = lastActiveId || latestStory?.storyId || null;
+        const completed = targetStoryId
+          ? await performDropboxSelectiveAutoSync({ storyId: targetStoryId, syncStory: true })
+          : false;
+        if (!completed) {
+          console.warn('[Dropbox StartupSync] 差分Pushできるストーリーがないため、起動時の重いフルPushはスキップしました。手動Pushで全体同期できます。');
+          updateSyncStatusIndicator('error');
+          return;
+        }
         const now = Date.now();
         await db.saveSetting('dropbox_last_sync', now);
         const remoteManifestUpdatedAt = await dropbox.getLastRemoteManifestUpdatedAt();

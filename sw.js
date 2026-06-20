@@ -1,4 +1,4 @@
-const CACHE_NAME = 'zetatavern-cache-v95';
+const CACHE_NAME = 'zetatavern-cache-v96';
 const urlsToCache = [
   './',
   './index.html',
@@ -16,6 +16,7 @@ const urlsToCache = [
 ];
 
 self.addEventListener('install', event => {
+  self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => {
@@ -28,6 +29,12 @@ self.addEventListener('install', event => {
 self.addEventListener('fetch', event => {
   const req = event.request;
   const url = new URL(req.url);
+
+  // Dropbox / AI API / temporary download URLs などの外部通信は、
+  // Service Worker で 504 に置き換えずブラウザの通常通信に任せる。
+  if (url.origin !== self.location.origin) {
+    return;
+  }
 
   // HTML / JS は常にネットワーク優先（OAuth 修正や古い SW キャッシュ対策）
   const isAppShell =
@@ -80,6 +87,6 @@ self.addEventListener('activate', event => {
           }
         })
       );
-    })
+    }).then(() => self.clients.claim())
   );
 });
