@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260620c';
+import { getSetting, saveSetting } from './db.js?v=20260620d';
 
 // ============================================================
 // 定数
@@ -49,7 +49,7 @@ const V2_LORE_DIR     = `${V2_ROOT}/lores`;
 const V2_CHAR_DIR     = `${V2_ROOT}/characters`;
 const V2_STORY_DIR    = `${V2_ROOT}/stories`;
 const MESSAGE_CHUNK_SIZE = 100;
-const DROPBOX_RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const DROPBOX_RETRYABLE_STATUSES = new Set([401, 408, 429, 500, 502, 503, 504]);
 let lastRemoteManifestInfo = null;
 const ensuredFolderPaths = new Set();
 let cachedTokens = undefined;
@@ -279,7 +279,7 @@ async function _refreshAccessToken(refreshToken) {
 
 /**
  * Dropbox API への共通リクエスト関数。
- * 401 を受けた場合は一度だけトークンをリフレッシュしてリトライする。
+ * 401 を受けた場合はトークンをリフレッシュして短い間隔でリトライする。
  *
  * @param {'api'|'content'} domain
  * @param {string} endpoint
@@ -307,11 +307,13 @@ async function _request(domain, endpoint, options = {}, retryCount = 0) {
     const response = await fetch(request.url, request.options);
 
     if (!response.ok) {
-      // 401 → トークンリフレッシュ → 1回だけリトライ
-      if (response.status === 401 && retryCount === 0) {
-        console.log('[Dropbox] 401 受信。トークンをリフレッシュしてリトライ...');
+      // 401 → トークンリフレッシュ → 短い間隔でリトライ。
+      // Dropbox の CORS-safe 経路では、更新直後のトークンでもごく短時間 401 を返すことがある。
+      if (response.status === 401 && retryCount < 2) {
+        console.log(`[Dropbox] 401 受信。トークンをリフレッシュしてリトライ... (${retryCount + 1}/2)`);
         tokens = await _refreshAccessToken(tokens.refresh_token);
-        return _request(domain, endpoint, options, 1);
+        await _sleep(350 * (retryCount + 1));
+        return _request(domain, endpoint, options, retryCount + 1);
       }
 
       const errMsg = await _readDropboxErrorResponse(response);
