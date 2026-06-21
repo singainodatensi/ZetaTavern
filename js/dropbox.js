@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260620k';
+import { getSetting, saveSetting } from './db.js?v=20260621b';
 
 // ============================================================
 // 定数
@@ -652,6 +652,12 @@ export async function getRemoteManifestInfo() {
   return lastRemoteManifestInfo;
 }
 
+export async function getRemoteManifestSnapshot() {
+  const { manifest } = await loadManifestWithFallback();
+  if (!_isUsableV2Manifest(manifest)) return null;
+  return structuredClone(manifest);
+}
+
 export async function getLastRemoteManifestUpdatedAt() {
   return Number(lastRemoteManifestInfo?.updatedAt || 0);
 }
@@ -995,10 +1001,23 @@ async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) 
   };
 }
 
-async function downloadV2Data({ localAssetIds, onProgress }) {
+function hasRemoteEntryChanged(currentEntry, previousEntry) {
+  if (!currentEntry || !previousEntry) return true;
+  return (
+    String(currentEntry.path || '') !== String(previousEntry.path || '') ||
+    String(currentEntry.metaPath || '') !== String(previousEntry.metaPath || '') ||
+    String(currentEntry.dirPath || '') !== String(previousEntry.dirPath || '') ||
+    Number(currentEntry.updatedAt || 0) !== Number(previousEntry.updatedAt || 0) ||
+    Number(currentEntry.messageCount || 0) !== Number(previousEntry.messageCount || 0) ||
+    Number(currentEntry.count || 0) !== Number(previousEntry.count || 0)
+  );
+}
+
+async function downloadV2Data({ localAssetIds, onProgress, previousManifest = null, differential = false }) {
   const progress = msg => { if (onProgress) onProgress(msg); };
   const { manifest, source } = await loadManifestWithFallback();
   if (!_isUsableV2Manifest(manifest)) return null;
+  const canUseDelta = differential && _isUsableV2Manifest(previousManifest);
   lastRemoteManifestInfo = {
     updatedAt: Number(manifest.updatedAt || 0),
     schemaVersion: Number(manifest.schemaVersion || 0),
@@ -1010,20 +1029,40 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
   } else {
     progress('同期目次を取得しました。差分を復元中...');
   }
+  progress(canUseDelta ? '差分Pull判定: 前回manifestと比較します。' : '差分Pull判定: 前回manifestがないため全体取得します。');
   const settingsPayload = await downloadJson(manifest.settingsPath || V2_SETTINGS, '設定 settings.json');
   const settings = settingsPayload?.settings || {};
   let lores = [];
+  const delta = canUseDelta
+    ? {
+      stories: [],
+      deletedStoryIds: Object.keys(previousManifest?.stories || {}).filter(id => !manifest?.stories?.[id]),
+      characters: [],
+      deletedCharacterIds: Object.keys(previousManifest?.characters || {}).filter(id => !manifest?.characters?.[id]),
+      loreFranchises: [],
+      deletedLoreFranchises: Object.keys(previousManifest?.loreFiles || {})
+        .filter(key => !manifest?.loreFiles?.[key])
+        .map(key => getLoreFranchiseLabel(previousManifest.loreFiles[key]?.franchise))
+    }
+    : null;
   const loreFiles = manifest.loreFiles && typeof manifest.loreFiles === 'object'
-    ? Object.values(manifest.loreFiles)
+    ? Object.entries(manifest.loreFiles)
     : [];
   if (loreFiles.length > 0) {
-    for (let index = 0; index < loreFiles.length; index++) {
-      const entry = loreFiles[index];
+    const targetLoreFiles = canUseDelta
+      ? loreFiles.filter(([key, entry]) => hasRemoteEntryChanged(entry, previousManifest?.loreFiles?.[key]))
+      : loreFiles;
+    if (canUseDelta) {
+      progress(`差分Pull判定: ロア ${targetLoreFiles.length}/${loreFiles.length} ファイルを取得対象にしました。`);
+    }
+    for (let index = 0; index < targetLoreFiles.length; index++) {
+      const [, entry] = targetLoreFiles[index];
       const franchiseLabel = getLoreFranchiseLabel(entry?.franchise);
-      progress(`ロアブック ${index + 1}/${loreFiles.length} を取得中... (${franchiseLabel})`);
+      progress(`ロアブック ${index + 1}/${targetLoreFiles.length} を取得中... (${franchiseLabel})`);
       const lorePayload = await downloadJson(entry?.path, `ロアブック ${franchiseLabel}`);
       if (Array.isArray(lorePayload?.lores)) {
         lores.push(...lorePayload.lores);
+        if (delta) delta.loreFranchises.push(franchiseLabel);
       }
     }
   } else {
@@ -1033,19 +1072,34 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
   }
 
   const characters = [];
-  const characterEntries = Object.values(manifest.characters || {});
-  for (let index = 0; index < characterEntries.length; index++) {
-    const entry = characterEntries[index];
-    progress(`キャラクター ${index + 1}/${characterEntries.length} を取得中... (${entry?.name || 'unknown'})`);
+  const characterEntries = Object.entries(manifest.characters || {});
+  const targetCharacterEntries = canUseDelta
+    ? characterEntries.filter(([characterId, entry]) => hasRemoteEntryChanged(entry, previousManifest?.characters?.[characterId]))
+    : characterEntries;
+  if (canUseDelta) {
+    progress(`差分Pull判定: キャラクター ${targetCharacterEntries.length}/${characterEntries.length} 件を取得対象にしました。`);
+  }
+  for (let index = 0; index < targetCharacterEntries.length; index++) {
+    const [characterId, entry] = targetCharacterEntries[index];
+    progress(`キャラクター ${index + 1}/${targetCharacterEntries.length} を取得中... (${entry?.name || 'unknown'})`);
     const character = await downloadJson(entry.path, `キャラクター ${entry?.name || entry?.path || index + 1}`);
-    if (character) characters.push(character);
+    if (character) {
+      characters.push(character);
+      if (delta) delta.characters.push(characterId);
+    }
   }
 
   const stories = [];
-  const storyEntries = Object.values(manifest.stories || {});
-  for (let storyIndex = 0; storyIndex < storyEntries.length; storyIndex++) {
-    const entry = storyEntries[storyIndex];
-    progress(`ストーリー ${storyIndex + 1}/${storyEntries.length} を取得中... (${entry?.title || 'untitled'})`);
+  const storyEntries = Object.entries(manifest.stories || {});
+  const targetStoryEntries = canUseDelta
+    ? storyEntries.filter(([storyId, entry]) => hasRemoteEntryChanged(entry, previousManifest?.stories?.[storyId]))
+    : storyEntries;
+  if (canUseDelta) {
+    progress(`差分Pull判定: ストーリー ${targetStoryEntries.length}/${storyEntries.length} 件を取得対象にしました。`);
+  }
+  for (let storyIndex = 0; storyIndex < targetStoryEntries.length; storyIndex++) {
+    const [storyId, entry] = targetStoryEntries[storyIndex];
+    progress(`ストーリー ${storyIndex + 1}/${targetStoryEntries.length} を取得中... (${entry?.title || 'untitled'})`);
     const meta = await downloadJson(entry.metaPath, `ストーリーmeta ${entry?.title || entry?.metaPath || storyIndex + 1}`);
     if (!meta) continue;
     const messages = [];
@@ -1059,6 +1113,7 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
       if (Array.isArray(chunk?.messages)) messages.push(...chunk.messages);
     }
     stories.push({ ...meta, messages });
+    if (delta) delta.stories.push(storyId);
   }
 
   const requiredAssetIds = new Set();
@@ -1079,7 +1134,7 @@ async function downloadV2Data({ localAssetIds, onProgress }) {
     }
   }
 
-  return { stories, characters, lores, settings, newAssets };
+  return { stories, characters, lores, settings, newAssets, manifest: structuredClone(manifest), delta };
 }
 
 // ============================================================
@@ -1342,6 +1397,7 @@ export async function pushToDropbox({ stories, characters, lores, settings, asse
     };
 
     progress('プッシュ完了！');
+    return manifest;
   } finally {
     try {
       await deleteLockFile();
@@ -1598,11 +1654,11 @@ export async function pushLoreDeltaToDropbox({ lores, settings = {}, franchises 
  * @param {Function} [opts.onProgress]
  * @returns {{ stories: Array, characters: Array, lores: Array, settings: object, newAssets: Array<{assetId, blob}> }}
  */
-export async function pullFromDropbox({ localAssetIds, onProgress }) {
+export async function pullFromDropbox({ localAssetIds, onProgress, previousManifest = null, differential = false }) {
   const progress = msg => { console.log('[Dropbox Pull]', msg); if (onProgress) onProgress(msg); };
 
   progress('クラウドからデータを取得中...');
-  const v2Data = await downloadV2Data({ localAssetIds, onProgress });
+  const v2Data = await downloadV2Data({ localAssetIds, onProgress, previousManifest, differential });
   if (v2Data) {
     progress('プル完了！');
     return v2Data;

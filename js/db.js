@@ -294,6 +294,22 @@ export async function saveCharacter(character) {
   }
 }
 
+export async function saveCharacterFromSync(character) {
+  if (!character.characterId) {
+    character.characterId = crypto.randomUUID();
+  }
+  if (!character.timestamp) {
+    character.timestamp = Date.now();
+  }
+  try {
+    await put('characters', character);
+    return character.characterId;
+  } catch (err) {
+    console.error('Error saving synced character:', err);
+    throw err;
+  }
+}
+
 export async function deleteCharacter(characterId) {
   try {
     const char = await getCharacter(characterId);
@@ -341,6 +357,22 @@ export async function saveStory(story) {
     return story.storyId;
   } catch (err) {
     console.error('Error saving story:', err);
+    throw err;
+  }
+}
+
+export async function saveStoryFromSync(story) {
+  if (!story.storyId) {
+    story.storyId = crypto.randomUUID();
+  }
+  if (!story.timestamp) {
+    story.timestamp = Date.now();
+  }
+  try {
+    await put('stories', story);
+    return story.storyId;
+  } catch (err) {
+    console.error('Error saving synced story:', err);
     throw err;
   }
 }

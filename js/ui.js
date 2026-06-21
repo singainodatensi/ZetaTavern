@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260620k';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260621b';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
