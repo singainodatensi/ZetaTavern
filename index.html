@@ -21,7 +21,7 @@
 
   <script>
     (function () {
-      var buildVersion = '20260621b';
+      var buildVersion = '20260623d';
       var url = new URL(window.location.href);
       if (url.searchParams.get('v') !== buildVersion) {
         url.searchParams.set('v', buildVersion);
@@ -32,7 +32,7 @@
   </script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260621b" defer></script>
+  <script type="module" src="js/app.js?v=20260623d" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -314,6 +314,7 @@
             <div class="lore-tabs-header">
               <button class="lore-tab-btn active" id="lorebook-tab-world">作品ロア (World Lore)</button>
               <button class="lore-tab-btn" id="lorebook-tab-session">セッションロア (Session Lore)</button>
+              <button class="lore-tab-btn" id="lorebook-tab-research">リサーチメモ (Research)</button>
             </div>
 
             <div class="library-filter-bar" id="lorebook-filters-row">

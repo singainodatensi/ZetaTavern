@@ -1519,6 +1519,42 @@ function createEmptySessionLore() {
   };
 }
 
+function normalizeStoryPlanList(items = [], limit = 8) {
+  const source = Array.isArray(items)
+    ? items
+    : String(items || '').split(/\r?\n|,/);
+  return Array.from(new Set(source
+    .map(item => String(item || '').trim())
+    .filter(Boolean))).slice(0, limit);
+}
+
+function createEmptyStoryPlan() {
+  return {
+    short_term: [],
+    mid_term: [],
+    long_term: [],
+    research_needs: [],
+    updatedAt: 0
+  };
+}
+
+function ensureStoryPlanStructure(story) {
+  if (!story) return createEmptyStoryPlan();
+  const plan = story.story_plan && typeof story.story_plan === 'object'
+    ? story.story_plan
+    : {};
+  story.story_plan = {
+    ...createEmptyStoryPlan(),
+    ...plan,
+    short_term: normalizeStoryPlanList(plan.short_term, 8),
+    mid_term: normalizeStoryPlanList(plan.mid_term, 8),
+    long_term: normalizeStoryPlanList(plan.long_term, 8),
+    research_needs: normalizeStoryPlanList(plan.research_needs, 10),
+    updatedAt: Number.isFinite(Number(plan.updatedAt)) ? Number(plan.updatedAt) : 0
+  };
+  return story.story_plan;
+}
+
 function ensureSessionLoreStructure(story) {
   if (!story) return createEmptySessionLore();
   const sessionLore = story.session_lore && typeof story.session_lore === 'object'
@@ -1593,6 +1629,24 @@ async function applySessionLoreUpdate(args, story) {
       }
     }
   }
+}
+
+async function applyStoryPlanUpdate(args, story) {
+  const plan = ensureStoryPlanStructure(story);
+  if (args.short_term) {
+    plan.short_term = normalizeStoryPlanList(args.short_term, 8);
+  }
+  if (args.mid_term) {
+    plan.mid_term = normalizeStoryPlanList(args.mid_term, 8);
+  }
+  if (args.long_term) {
+    plan.long_term = normalizeStoryPlanList(args.long_term, 8);
+  }
+  if (args.research_needs) {
+    plan.research_needs = normalizeStoryPlanList(args.research_needs, 10);
+  }
+  plan.updatedAt = Date.now();
+  return plan;
 }
 
 async function applyWorldLoreUpdate(args, story) {
@@ -1975,6 +2029,44 @@ export async function buildSystemInstruction(story, options = {}) {
     instruction += `・直近の会話だけを細かく参照し、それ以前の流れは要約ベースで一貫性を維持すること。\n\n`;
   }
 
+  const storyPlan = ensureStoryPlanStructure(story);
+  const hasStoryPlan =
+    storyPlan.short_term.length > 0 ||
+    storyPlan.mid_term.length > 0 ||
+    storyPlan.long_term.length > 0 ||
+    storyPlan.research_needs.length > 0;
+  if (hasStoryPlan) {
+    instruction += `【ストーリープラン / Story Plan】\n`;
+    instruction += `・これは確定プロットではなく、現在の進行方針と準備メモである。ユーザーの行動が優先され、必要なら自然に修正してよい。\n`;
+    instruction += `・短期目標は直近の場面運び、中期目標は数場面先の回収、長期目標は物語全体の方向性として扱うこと。\n`;
+    instruction += `・調査ニーズは、ロアブック、キャラクターライブラリ、検索メモ、search_web を使うべき候補である。既知情報が足りない場合は、本文を書く前に参照・検索してから展開を肉付けすること。\n`;
+    if (storyPlan.short_term.length > 0) {
+      instruction += `・短期目標:\n`;
+      storyPlan.short_term.forEach(item => {
+        instruction += `  - ${item}\n`;
+      });
+    }
+    if (storyPlan.mid_term.length > 0) {
+      instruction += `・中期目標:\n`;
+      storyPlan.mid_term.forEach(item => {
+        instruction += `  - ${item}\n`;
+      });
+    }
+    if (storyPlan.long_term.length > 0) {
+      instruction += `・長期目標:\n`;
+      storyPlan.long_term.forEach(item => {
+        instruction += `  - ${item}\n`;
+      });
+    }
+    if (storyPlan.research_needs.length > 0) {
+      instruction += `・調査ニーズ:\n`;
+      storyPlan.research_needs.forEach(item => {
+        instruction += `  - ${item}\n`;
+      });
+    }
+    instruction += `\n`;
+  }
+
   const searchMemoryBlock = buildSearchMemoryInstructionBlock(story);
   if (searchMemoryBlock) {
     instruction += searchMemoryBlock;
@@ -1993,6 +2085,12 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- update_session_lore.long_term_events は長期記憶であり、誰とどう出会ったか、どの陣営に関わることになったか、重要な宣言、関係の転換点など、後の物語理解に不可欠な出来事だけを残すこと。\n`;
   instruction += `- update_session_lore.active_flags は未回収の目標、伏線、約束、向かうべき場所、保留案件だけを入れ、解決済みのものは削除すること。\n`;
   instruction += `- モブとの一時会話や、その場限りの軽い注意喚起は long_term_events に入れないこと。ネームド人物との初接触、救助、契約、所属変化は優先して残すこと。\n`;
+  instruction += `- ストーリーの進行方向、次に出す人物・場所・事件、必要な下調べが見えてきた場合は update_story_plan を呼び、短期・中期・長期目標と調査ニーズを更新すること。\n`;
+  instruction += `- update_story_plan は確定プロットではない。ユーザーの選択や行動が変わったら、古い方針に固執せず、自然な方針へ更新すること。\n`;
+  instruction += `- 調査ニーズには、今後の描写を作品固有にするために確認したい人物、組織、地名、制度、イベント、敵対勢力、ユニット、商会、拠点などを具体名で入れること。\n`;
+  instruction += `- update_story_plan を呼ぶべき具体例: 新しい場所へ移動した / 新しい重要人物と出会った / ユーザーが目的地・行動方針・所属・協力相手を決めた / 未回収フラグが増えた・解決した / 次に出すべき原作キャラ・組織・イベントが見えた / 会話が停滞し、次の展開を作る必要がある / 検索やロア参照で今後使えそうな設定が分かった。\n`;
+  instruction += `- update_story_plan を呼ばなくてよい例: 単なる雑談 / 感情描写だけで状況が動いていない / 既存方針と変化がない / 同じ場面の細かい返答だけ。\n`;
+  instruction += `- update_story_plan は毎ターン必須ではないが、上記の更新条件に当てはまる場合は本文を書く前に優先して呼ぶこと。\n`;
   instruction += `- update_world_lore は安定設定だけに使い、セッション情報の代用にしないこと。\n`;
   instruction += `- update_world_lore は「確定登録」ではなく「ワールドロア候補の提案」として扱われる。安定設定だと強く判断できるものだけを提案すること。\n\n`;
   instruction += `【検索と展開設計のルール】\n`;
@@ -2174,6 +2272,7 @@ function stripLeakedFunctionCallText(text) {
   let working = text;
   const functionNames = [
     'update_session_lore',
+    'update_story_plan',
     'update_world_lore',
     'search_lorebook',
     'get_lore_entry',
@@ -3589,6 +3688,34 @@ export async function generateStoryResponse(story) {
           required: ['summary']
         }
       }, {
+        name: 'update_story_plan',
+        description: '今後のストーリー進行方針を更新します。確定プロットではなく、短期・中期・長期の展開候補と、先に調べるべき原作要素や設定を整理してください。場面転換、新しい重要人物の登場、ユーザーの目的・所属・協力相手の決定、未回収フラグの増減、次に出すべき原作要素や調査対象が見えた時は、本文を書く前に優先して呼び出してください。単なる雑談や既存方針と変化がない場合は呼び出さなくて構いません。',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            short_term: {
+              type: 'ARRAY',
+              description: '直近1〜2場面で進めたいこと。会話の切り上げ、移動、次に出す小さな事件、次に話題へ出す人物など。',
+              items: { type: 'STRING' }
+            },
+            mid_term: {
+              type: 'ARRAY',
+              description: '数場面先で回収したい展開。サブヒロイン登場、イベント参加、依頼達成、関係変化、伏線回収など。',
+              items: { type: 'STRING' }
+            },
+            long_term: {
+              type: 'ARRAY',
+              description: '物語全体の方向性。主人公が関わる陣営、恋愛・友情の軸、長期目標、背景で進む原作イベントなど。',
+              items: { type: 'STRING' }
+            },
+            research_needs: {
+              type: 'ARRAY',
+              description: '今後の描写を作品固有にするため、ロアブック・キャラクターライブラリ・search_webで確認すべき項目。人物、組織、地名、制度、イベント、ユニット、敵対勢力など。',
+              items: { type: 'STRING' }
+            }
+          }
+        }
+      }, {
         name: 'update_world_lore',
         description: '作品世界で安定している設定をワールドロア候補として提案します。地名、学校名、組織名、家名、居住地、制度、世界ルール、陣営、固有用語など、セッションをまたいでも有効な情報だけを扱います。名称は日本語の代表表記だけを使い、英語併記や括弧つき併記は避けてください。',
         parameters: {
@@ -3774,6 +3901,16 @@ export async function generateStoryResponse(story) {
                 });
               } else if (name === 'update_session_lore') {
                 await applySessionLoreUpdate(args, story);
+                storyChanged = true;
+                functionResponses.push({
+                  functionResponse: {
+                    name,
+                    id: functionCallId,
+                    response: { result: 'success' }
+                  }
+                });
+              } else if (name === 'update_story_plan') {
+                await applyStoryPlanUpdate(args, story);
                 storyChanged = true;
                 functionResponses.push({
                   functionResponse: {

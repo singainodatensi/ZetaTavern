@@ -2822,6 +2822,30 @@ body {
   line-height: 1.6;
 }
 
+.session-lore-help {
+  margin: 0 0 12px;
+  color: var(--text-sub);
+  line-height: 1.7;
+  font-size: 12px;
+}
+
+.session-plan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.session-plan-field > span {
+  color: var(--text-main);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.session-plan-textarea {
+  min-height: 76px;
+}
+
 .session-event-list {
   list-style: none;
   display: flex;
@@ -2884,6 +2908,82 @@ body {
   width: auto;
   min-width: 92px;
   padding: 0 14px;
+}
+
+.research-note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.research-note-card {
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.research-note-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.research-note-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.research-note-title-row h4 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text-main);
+}
+
+.research-note-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.research-note-query,
+.research-note-summary {
+  margin: 8px 0 0;
+  color: var(--text-sub);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.research-note-summary {
+  color: var(--text-main);
+}
+
+.research-note-urls {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.research-note-urls a {
+  color: var(--primary);
+}
+
+.research-note-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 /* Relationship / Affinity rows */

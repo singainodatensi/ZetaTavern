@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260621b';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260621b';
-import * as dropbox from './dropbox.js?v=20260621b';
+import * as ui from './ui.js?v=20260623d';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260623d';
+import * as dropbox from './dropbox.js?v=20260623d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -110,6 +110,42 @@ function createEmptySessionLore() {
     open_threads: [],
     key_events: []
   };
+}
+
+function normalizeStoryPlanList(items = [], limit = 8) {
+  const source = Array.isArray(items)
+    ? items
+    : String(items || '').split(/\r?\n|,/);
+  return Array.from(new Set(source
+    .map(item => String(item || '').trim())
+    .filter(Boolean))).slice(0, limit);
+}
+
+function createEmptyStoryPlan() {
+  return {
+    short_term: [],
+    mid_term: [],
+    long_term: [],
+    research_needs: [],
+    updatedAt: 0
+  };
+}
+
+function ensureStoryPlanStructure(story) {
+  if (!story) return createEmptyStoryPlan();
+  const plan = story.story_plan && typeof story.story_plan === 'object'
+    ? story.story_plan
+    : {};
+  story.story_plan = {
+    ...createEmptyStoryPlan(),
+    ...plan,
+    short_term: normalizeStoryPlanList(plan.short_term, 8),
+    mid_term: normalizeStoryPlanList(plan.mid_term, 8),
+    long_term: normalizeStoryPlanList(plan.long_term, 8),
+    research_needs: normalizeStoryPlanList(plan.research_needs, 10),
+    updatedAt: Number.isFinite(Number(plan.updatedAt)) ? Number(plan.updatedAt) : 0
+  };
+  return story.story_plan;
 }
 
 function createSessionSummarySegment({
@@ -1612,6 +1648,7 @@ async function bindEvents() {
   const loreFilterSelect = document.getElementById('lore-filter-select');
   const tabWorld = document.getElementById('lorebook-tab-world');
   const tabSession = document.getElementById('lorebook-tab-session');
+  const tabResearch = document.getElementById('lorebook-tab-research');
 
   if (loreAddBtn) {
     loreAddBtn.onclick = () => ui.showLoreEditModal(null);
@@ -1632,6 +1669,9 @@ async function bindEvents() {
   }
   if (tabSession) {
     tabSession.onclick = () => ui.renderLorebook('session');
+  }
+  if (tabResearch) {
+    tabResearch.onclick = () => ui.renderLorebook('research');
   }
 
   // Mobile drawer trigger (left — story list)
@@ -2359,6 +2399,7 @@ async function createNewStory() {
       }
     ],
     session_lore: createEmptySessionLore(),
+    story_plan: createEmptyStoryPlan(),
     characterMemory: {},
     relationshipMemory: {},
     lore_candidates: [],

@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260621b';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260623d';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -73,6 +73,46 @@ function formatSessionSummaryTimestamp(value) {
   } catch (_) {
     return '未実行';
   }
+}
+
+function normalizeStoryPlanList(items = [], limit = 8) {
+  const source = Array.isArray(items)
+    ? items
+    : String(items || '').split(/\r?\n|,/);
+  return Array.from(new Set(source
+    .map(item => String(item || '').trim())
+    .filter(Boolean))).slice(0, limit);
+}
+
+function createEmptyStoryPlan() {
+  return {
+    short_term: [],
+    mid_term: [],
+    long_term: [],
+    research_needs: [],
+    updatedAt: 0
+  };
+}
+
+function ensureStoryPlanStructure(story) {
+  if (!story) return createEmptyStoryPlan();
+  const plan = story.story_plan && typeof story.story_plan === 'object'
+    ? story.story_plan
+    : {};
+  story.story_plan = {
+    ...createEmptyStoryPlan(),
+    ...plan,
+    short_term: normalizeStoryPlanList(plan.short_term, 8),
+    mid_term: normalizeStoryPlanList(plan.mid_term, 8),
+    long_term: normalizeStoryPlanList(plan.long_term, 8),
+    research_needs: normalizeStoryPlanList(plan.research_needs, 10),
+    updatedAt: Number.isFinite(Number(plan.updatedAt)) ? Number(plan.updatedAt) : 0
+  };
+  return story.story_plan;
+}
+
+function storyPlanListToText(items = []) {
+  return normalizeStoryPlanList(items, 12).join('\n');
 }
 
 function normalizeLoreSyncFranchises(values = []) {
@@ -3562,7 +3602,7 @@ let lorebookRenderVersion = 0;
 
 /**
  * ロアブック画面のメインレンダラー。
- * @param {string|null} mode - 'world' | 'session' | null（現在のモードを維持）
+ * @param {string|null} mode - 'world' | 'session' | 'research' | null（現在のモードを維持）
  */
 export async function renderLorebook(mode = null) {
   if (mode !== null) currentLorebookMode = mode;
@@ -3573,8 +3613,10 @@ export async function renderLorebook(mode = null) {
   // タブUIのactive状態を更新
   const tabWorld = document.getElementById('lorebook-tab-world');
   const tabSession = document.getElementById('lorebook-tab-session');
+  const tabResearch = document.getElementById('lorebook-tab-research');
   if (tabWorld) tabWorld.classList.toggle('active', currentLorebookMode === 'world');
   if (tabSession) tabSession.classList.toggle('active', currentLorebookMode === 'session');
+  if (tabResearch) tabResearch.classList.toggle('active', currentLorebookMode === 'research');
 
   // 追加ボタン・フィルターバーの表示制御
   const addBtn = document.getElementById('lore-add-btn');
@@ -3583,6 +3625,10 @@ export async function renderLorebook(mode = null) {
     if (addBtn) addBtn.style.display = 'none';
     if (filtersRow) filtersRow.style.display = 'none';
     await _renderSessionLore(container, renderVersion);
+  } else if (currentLorebookMode === 'research') {
+    if (addBtn) addBtn.style.display = 'none';
+    if (filtersRow) filtersRow.style.display = 'none';
+    await _renderResearchNotes(container, renderVersion);
   } else {
     if (addBtn) addBtn.style.display = '';
     if (filtersRow) filtersRow.style.display = '';
@@ -3928,6 +3974,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     ? sessionLore.active_flags
     : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []);
   const relationshipMemory = activeStory.relationshipMemory || {};
+  const storyPlan = ensureStoryPlanStructure(activeStory);
   const totalTurns = countUserTurnChunks(activeStory.messages || []);
   const summaryStatusLabel = sessionLore.last_summary_status === 'error'
     ? '失敗'
@@ -3995,6 +4042,39 @@ async function _renderSessionLore(container, renderVersion = 0) {
           <button id="session-lore-save-current-state-btn" class="sidebar-session-link-btn" type="button">
             <span class="material-symbols-outlined">save</span>
             <span>現在状況を保存</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  html += `
+    <div class="session-lore-block">
+      <div class="session-lore-block-header">
+        <span class="material-symbols-outlined">route</span>
+        <h4>ストーリープラン・進行方針</h4>
+      </div>
+      <div class="session-lore-block-body">
+        <p class="session-lore-help">確定プロットではなく、AIストーリーテラーが先を見据えて展開や調査を準備するためのメモです。1行に1項目ずつ入力できます。</p>
+        <label class="session-plan-field">
+          <span>短期目標</span>
+          <textarea id="story-plan-short-term-input" class="session-lore-textarea session-plan-textarea" rows="3" placeholder="例: 現在の会話を切り上げ、次の場所へ自然に移動する">${escapeHTML(storyPlanListToText(storyPlan.short_term))}</textarea>
+        </label>
+        <label class="session-plan-field">
+          <span>中期目標</span>
+          <textarea id="story-plan-mid-term-input" class="session-lore-textarea session-plan-textarea" rows="3" placeholder="例: ヒロインの友人を登場させ、関係性に軽い波を作る">${escapeHTML(storyPlanListToText(storyPlan.mid_term))}</textarea>
+        </label>
+        <label class="session-plan-field">
+          <span>長期目標</span>
+          <textarea id="story-plan-long-term-input" class="session-lore-textarea session-plan-textarea" rows="3" placeholder="例: 主人公が陣営やユニットに関わる理由を強める">${escapeHTML(storyPlanListToText(storyPlan.long_term))}</textarea>
+        </label>
+        <label class="session-plan-field">
+          <span>調査ニーズ</span>
+          <textarea id="story-plan-research-needs-input" class="session-lore-textarea session-plan-textarea" rows="3" placeholder="例: 原作の商会 / ユニットメンバー / 地域名 / 次に出せる敵対勢力">${escapeHTML(storyPlanListToText(storyPlan.research_needs))}</textarea>
+        </label>
+        <div class="session-lore-actions">
+          <button id="story-plan-save-btn" class="sidebar-session-link-btn" type="button">
+            <span class="material-symbols-outlined">save</span>
+            <span>進行方針を保存</span>
           </button>
         </div>
       </div>
@@ -4143,6 +4223,13 @@ async function _renderSessionLore(container, renderVersion = 0) {
     requestDropboxAutoSync(activeStory.storyId);
   };
 
+  const persistStoryPlanChanges = async () => {
+    await db.saveStory(activeStory);
+    const stories = await db.getStories();
+    updateState({ stories });
+    requestDropboxAutoSync(activeStory.storyId);
+  };
+
   const ensureEditableSessionLore = () => {
     if (!activeStory.session_lore) {
       activeStory.session_lore = {
@@ -4211,6 +4298,24 @@ async function _renderSessionLore(container, renderVersion = 0) {
       ensureEditableSessionLore();
       activeStory.session_lore.current_state = currentStateInput.value.trim();
       await persistSessionLoreChanges();
+      await renderLorebook('session');
+    };
+  }
+
+  const storyPlanSaveBtn = container.querySelector('#story-plan-save-btn');
+  const storyPlanShortTermInput = container.querySelector('#story-plan-short-term-input');
+  const storyPlanMidTermInput = container.querySelector('#story-plan-mid-term-input');
+  const storyPlanLongTermInput = container.querySelector('#story-plan-long-term-input');
+  const storyPlanResearchNeedsInput = container.querySelector('#story-plan-research-needs-input');
+  if (storyPlanSaveBtn) {
+    storyPlanSaveBtn.onclick = async () => {
+      const editablePlan = ensureStoryPlanStructure(activeStory);
+      editablePlan.short_term = normalizeStoryPlanList(storyPlanShortTermInput?.value || '', 8);
+      editablePlan.mid_term = normalizeStoryPlanList(storyPlanMidTermInput?.value || '', 8);
+      editablePlan.long_term = normalizeStoryPlanList(storyPlanLongTermInput?.value || '', 8);
+      editablePlan.research_needs = normalizeStoryPlanList(storyPlanResearchNeedsInput?.value || '', 10);
+      editablePlan.updatedAt = Date.now();
+      await persistStoryPlanChanges();
       await renderLorebook('session');
     };
   }
@@ -4293,6 +4398,195 @@ async function _renderSessionLore(container, renderVersion = 0) {
       activeStory.session_lore.recent_turning_points.splice(index, 1);
       await persistSessionLoreChanges();
       await renderLorebook('session');
+    };
+  });
+}
+
+function normalizeResearchNotes(story) {
+  if (!story || typeof story !== 'object') return [];
+  if (!Array.isArray(story.research_notes)) story.research_notes = [];
+  const manualNotes = story.research_notes
+    .filter(note => note && typeof note === 'object')
+    .map(note => ({
+      id: note.id || `research_${crypto.randomUUID()}`,
+      storage: 'research_notes',
+      franchise: String(note.franchise || story.franchise || '共通').trim() || '共通',
+      topic: String(note.topic || note.name || note.query || '無題のリサーチ').trim() || '無題のリサーチ',
+      query: String(note.query || '').trim(),
+      summary: String(note.summary || note.content?.summary || '').trim(),
+      source: String(note.source || note.provider || 'manual').trim() || 'manual',
+      status: String(note.status || 'active').trim() || 'active',
+      urls: Array.isArray(note.urls) ? note.urls.filter(Boolean) : [],
+      createdAt: Number(note.createdAt || note.timestamp || Date.now()),
+      updatedAt: Number(note.updatedAt || note.createdAt || Date.now()),
+      lastUsedAt: Number(note.lastUsedAt || 0)
+    }));
+  story.research_notes = manualNotes.map(({ storage, ...note }) => note);
+
+  const searchMemoryNotes = (Array.isArray(story.search_memory) ? story.search_memory : [])
+    .filter(note => note && typeof note === 'object')
+    .map(note => ({
+      id: note.id || `search_${crypto.randomUUID()}`,
+      storage: 'search_memory',
+      franchise: String(note.franchise || story.franchise || '共通').trim() || '共通',
+      topic: String(note.topicKey || note.query || '検索メモ').trim() || '検索メモ',
+      query: String(note.query || '').trim(),
+      summary: String(note.summary || '').trim(),
+      source: String(note.provider || note.source || 'search_web').trim() || 'search_web',
+      status: String(note.status || 'active').trim() || 'active',
+      urls: Array.isArray(note.urls) ? note.urls.filter(Boolean) : [],
+      createdAt: Number(note.createdAt || Date.now()),
+      updatedAt: Number(note.updatedAt || note.createdAt || Date.now()),
+      lastUsedAt: Number(note.lastUsedAt || 0)
+    }));
+
+  const seen = new Set();
+  return [...manualNotes, ...searchMemoryNotes].filter(note => {
+    const key = `${note.storage}:${note.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function formatResearchTimestamp(value) {
+  const timestamp = Number(value || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '未記録';
+  try {
+    return new Date(timestamp).toLocaleString('ja-JP');
+  } catch (_) {
+    return '未記録';
+  }
+}
+
+async function persistResearchNotes(story) {
+  await db.saveStory(story);
+  const stories = await db.getStories();
+  updateState({ stories });
+  requestDropboxAutoSync(story.storyId, { syncStory: true });
+}
+
+async function _renderResearchNotes(container, renderVersion = 0) {
+  const state = getState();
+  const activeStory = state.currentStory;
+
+  if (!activeStory) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="material-symbols-outlined">travel_explore</span>
+        <p>アクティブなストーリーがありません</p>
+        <p style="font-size:12px;opacity:0.6;">ストーリーを選択すると、そのストーリー用のリサーチメモを確認できます。</p>
+      </div>`;
+    return;
+  }
+
+  const notes = normalizeResearchNotes(activeStory)
+    .slice()
+    .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+  if (renderVersion !== lorebookRenderVersion) return;
+
+  const notesHtml = notes.length > 0
+    ? notes.map(note => {
+      const urlsHtml = note.urls.length > 0
+        ? `<div class="research-note-urls">${note.urls.slice(0, 5).map(url => {
+          const safeUrl = escapeHTML(String(url));
+          return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeUrl}</a>`;
+        }).join('')}</div>`
+        : '';
+      return `
+        <div class="research-note-card" data-note-id="${escapeHTML(note.id)}">
+          <div class="research-note-header">
+            <div class="research-note-title-row">
+              <span class="material-symbols-outlined">travel_explore</span>
+              <h4>${escapeHTML(note.topic)}</h4>
+              <span class="lore-candidate-chip">${escapeHTML(note.franchise)}</span>
+              <span class="lore-candidate-chip">${escapeHTML(note.source)}</span>
+              <span class="lore-candidate-chip">${escapeHTML(note.status)}</span>
+            </div>
+            <div class="research-note-actions">
+              <button class="sidebar-session-link-btn research-promote-btn" type="button" data-id="${escapeHTML(note.id)}">
+                <span class="material-symbols-outlined">auto_stories</span>
+                <span>ワールドロア化</span>
+              </button>
+              <button class="secondary-btn research-delete-btn" type="button" data-id="${escapeHTML(note.id)}">
+                削除
+              </button>
+            </div>
+          </div>
+          ${note.query ? `<p class="research-note-query"><strong>検索クエリ:</strong> ${escapeHTML(note.query)}</p>` : ''}
+          <p class="research-note-summary">${escapeHTML(note.summary || '要約はありません。')}</p>
+          ${urlsHtml}
+          <div class="research-note-meta">
+            <span>作成: ${escapeHTML(formatResearchTimestamp(note.createdAt))}</span>
+            <span>更新: ${escapeHTML(formatResearchTimestamp(note.updatedAt))}</span>
+            ${note.lastUsedAt ? `<span>最終使用: ${escapeHTML(formatResearchTimestamp(note.lastUsedAt))}</span>` : ''}
+          </div>
+        </div>`;
+    }).join('')
+    : `
+      <div class="empty-state">
+        <span class="material-symbols-outlined">travel_explore</span>
+        <p>リサーチメモはまだありません</p>
+        <p style="font-size:12px;opacity:0.6;">AI検索で得た未確定の参考情報を、ここで確認・整理できるようにします。</p>
+      </div>`;
+
+  container.innerHTML = `
+    <div class="session-lore-panel research-notes-panel">
+      <div class="session-lore-story-badge">
+        <span class="material-symbols-outlined">menu_book</span>
+        <span>${escapeHTML(activeStory.title || '無題のストーリー')}</span>
+      </div>
+      <div class="session-lore-block">
+        <div class="session-lore-block-header">
+          <span class="material-symbols-outlined">info</span>
+          <h4>未確定の参考情報</h4>
+        </div>
+        <div class="session-lore-block-body">
+          <p style="opacity:0.75;margin:0;">リサーチメモはAI検索や調査で得た参考情報です。公式設定として採用する前に内容を確認してください。</p>
+        </div>
+      </div>
+      <div class="research-note-list">${notesHtml}</div>
+    </div>`;
+
+  container.querySelectorAll('.research-delete-btn').forEach(button => {
+    button.onclick = async () => {
+      const noteId = button.dataset.id;
+      const note = notes.find(item => item.id === noteId);
+      if (!note) return;
+      if (!confirm(`リサーチメモ「${note.topic}」を削除しますか？`)) return;
+      if (note.storage === 'search_memory') {
+        activeStory.search_memory = (Array.isArray(activeStory.search_memory) ? activeStory.search_memory : [])
+          .filter(item => item.id !== noteId);
+      } else {
+        activeStory.research_notes = (Array.isArray(activeStory.research_notes) ? activeStory.research_notes : [])
+          .filter(item => item.id !== noteId);
+      }
+      await persistResearchNotes(activeStory);
+      await renderLorebook('research');
+    };
+  });
+
+  container.querySelectorAll('.research-promote-btn').forEach(button => {
+    button.onclick = async () => {
+      const noteId = button.dataset.id;
+      const note = notes.find(item => item.id === noteId);
+      if (!note) return;
+      const lore = {
+        franchise: note.franchise || activeStory.franchise || '共通',
+        type: 'term',
+        name: note.topic,
+        tags: [note.topic, note.franchise].filter(Boolean).slice(0, 5),
+        content: {
+          summary: note.summary || '',
+          profile: note.summary || '',
+          speech: '',
+          relationships: note.query ? `検索クエリ: ${note.query}` : ''
+        },
+        source: `research:${note.source || 'manual'}`,
+        verified: false,
+        status: 'completed'
+      };
+      showLoreEditModal(lore, { fromResearchNote: true, researchNoteId: note.id });
     };
   });
 }
@@ -4511,11 +4805,26 @@ export function showLoreEditModal(lore = null, options = {}) {
       const stories = await db.getStories();
       updateState({ stories });
     }
+    if (options.fromResearchNote && currentStory && Array.isArray(currentStory.research_notes)) {
+      let note = currentStory.research_notes.find(item => item.id === options.researchNoteId);
+      if (!note && Array.isArray(currentStory.search_memory)) {
+        note = currentStory.search_memory.find(item => item.id === options.researchNoteId);
+      }
+      if (note) {
+        note.status = 'promoted';
+        note.promotedLoreName = itemToSave.name;
+        note.promotedLoreId = itemToSave.id || '';
+        note.updatedAt = Date.now();
+        await db.saveStory(currentStory);
+        const stories = await db.getStories();
+        updateState({ stories });
+      }
+    }
 
     modal.remove();
     renderLorebook();
     requestDropboxAutoSync(currentStory?.storyId || null, {
-      syncStory: !!options.fromCandidate && !!currentStory?.storyId,
+      syncStory: !!(options.fromCandidate || options.fromResearchNote) && !!currentStory?.storyId,
       syncLores: true,
       loreFranchises: [...new Set([previousFranchise, itemToSave.franchise || '共通'])]
     });
