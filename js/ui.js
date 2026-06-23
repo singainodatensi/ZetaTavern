@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260623d';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260623e';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 // ====== AIディレクタープリセットデータ ======
@@ -4033,23 +4033,6 @@ async function _renderSessionLore(container, renderVersion = 0) {
   html += `
     <div class="session-lore-block">
       <div class="session-lore-block-header">
-        <span class="material-symbols-outlined">my_location</span>
-        <h4>現在の場面</h4>
-      </div>
-      <div class="session-lore-block-body">
-        <textarea id="session-lore-editor-current-state" class="session-lore-textarea" rows="4" placeholder="主人公が今どこで、誰と、何をしている最中かを整理します。">${escapeHTML(sessionLore.current_state || '')}</textarea>
-        <div class="session-lore-actions">
-          <button id="session-lore-save-current-state-btn" class="sidebar-session-link-btn" type="button">
-            <span class="material-symbols-outlined">save</span>
-            <span>現在状況を保存</span>
-          </button>
-        </div>
-      </div>
-    </div>`;
-
-  html += `
-    <div class="session-lore-block">
-      <div class="session-lore-block-header">
         <span class="material-symbols-outlined">route</span>
         <h4>ストーリープラン・進行方針</h4>
       </div>
@@ -4106,39 +4089,6 @@ async function _renderSessionLore(container, renderVersion = 0) {
         <div class="session-lore-add-row">
           <input id="session-lore-new-open-thread-input" class="session-lore-input" type="text" placeholder="例: 王都へ向かう / 試練のため聖域へ向かう">
           <button id="session-lore-add-open-thread-btn" class="sidebar-session-link-btn" type="button">
-            <span class="material-symbols-outlined">add</span>
-            <span>追加</span>
-          </button>
-        </div>
-      </div>
-    </div>`;
-
-  const turningPoints = Array.isArray(sessionLore.recent_turning_points)
-    ? sessionLore.recent_turning_points.map(normalizeSessionLoreEventForDisplay).filter(Boolean)
-    : [];
-  html += `
-    <div class="session-lore-block">
-      <div class="session-lore-block-header">
-        <span class="material-symbols-outlined">fork_right</span>
-        <h4>最近の出来事 (${turningPoints.length}件)</h4>
-      </div>
-      <div class="session-lore-block-body">`;
-  if (turningPoints.length > 0) {
-    html += `<ul class="session-event-list">${turningPoints.map((e, index) => `
-      <li>
-        <span class="session-event-text">${escapeHTML(e)}</span>
-        <button class="session-turning-point-delete-btn" type="button" data-index="${index}" title="転換点を削除">
-          <span class="material-symbols-outlined">close</span>
-        </button>
-      </li>
-    `).join('')}</ul>`;
-  } else {
-    html += `<p style="opacity:0.5;">まだ最近の出来事は記録されていません。</p>`;
-  }
-  html += `
-        <div class="session-lore-add-row">
-          <input id="session-lore-new-turning-point-input" class="session-lore-input" type="text" placeholder="例: 村へ移動中 / ダンス練習を見学した">
-          <button id="session-lore-add-turning-point-btn" class="sidebar-session-link-btn" type="button">
             <span class="material-symbols-outlined">add</span>
             <span>追加</span>
           </button>
@@ -4291,17 +4241,6 @@ async function _renderSessionLore(container, renderVersion = 0) {
     };
   }
 
-  const currentStateInput = container.querySelector('#session-lore-editor-current-state');
-  const saveCurrentStateBtn = container.querySelector('#session-lore-save-current-state-btn');
-  if (saveCurrentStateBtn && currentStateInput) {
-    saveCurrentStateBtn.onclick = async () => {
-      ensureEditableSessionLore();
-      activeStory.session_lore.current_state = currentStateInput.value.trim();
-      await persistSessionLoreChanges();
-      await renderLorebook('session');
-    };
-  }
-
   const storyPlanSaveBtn = container.querySelector('#story-plan-save-btn');
   const storyPlanShortTermInput = container.querySelector('#story-plan-short-term-input');
   const storyPlanMidTermInput = container.querySelector('#story-plan-mid-term-input');
@@ -4350,20 +4289,6 @@ async function _renderSessionLore(container, renderVersion = 0) {
     };
   }
 
-  const newTurningPointInput = container.querySelector('#session-lore-new-turning-point-input');
-  const addTurningPointBtn = container.querySelector('#session-lore-add-turning-point-btn');
-  if (addTurningPointBtn && newTurningPointInput) {
-    addTurningPointBtn.onclick = async () => {
-      const value = newTurningPointInput.value.trim();
-      if (!value) return;
-      ensureEditableSessionLore();
-      const existingItems = Array.isArray(activeStory.session_lore.recent_turning_points) ? activeStory.session_lore.recent_turning_points : [];
-      activeStory.session_lore.recent_turning_points = Array.from(new Set([value, ...existingItems])).slice(0, 8);
-      await persistSessionLoreChanges();
-      await renderLorebook('session');
-    };
-  }
-
   container.querySelectorAll('.session-event-delete-btn').forEach(button => {
     button.onclick = async () => {
       const index = Number(button.dataset.index);
@@ -4390,16 +4315,6 @@ async function _renderSessionLore(container, renderVersion = 0) {
     };
   });
 
-  container.querySelectorAll('.session-turning-point-delete-btn').forEach(button => {
-    button.onclick = async () => {
-      const index = Number(button.dataset.index);
-      if (!Number.isInteger(index) || index < 0) return;
-      if (!activeStory.session_lore || !Array.isArray(activeStory.session_lore.recent_turning_points)) return;
-      activeStory.session_lore.recent_turning_points.splice(index, 1);
-      await persistSessionLoreChanges();
-      await renderLorebook('session');
-    };
-  });
 }
 
 function normalizeResearchNotes(story) {

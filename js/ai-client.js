@@ -1600,16 +1600,10 @@ async function applySessionLoreUpdate(args, story) {
     sessionLore.summary = args.summary;
     sessionLore.summary_source = 'ai';
   }
-  if (args.current_state) {
-    sessionLore.current_state = String(args.current_state || '').trim();
-  }
   if (args.active_flags || args.open_threads) {
     const nextFlags = args.active_flags || args.open_threads || [];
     sessionLore.active_flags = normalizeSessionLoreList(nextFlags, 10);
     sessionLore.open_threads = [...sessionLore.active_flags];
-  }
-  if (args.recent_turning_points) {
-    sessionLore.recent_turning_points = normalizeSessionLoreList(args.recent_turning_points, 8);
   }
   if (args.long_term_events || args.key_events) {
     const nextEvents = args.long_term_events || args.key_events || [];
@@ -1999,18 +1993,9 @@ export async function buildSystemInstruction(story, options = {}) {
     if (sessionLore.summary_checkpoint_turn) {
       instruction += `・圧縮済みユーザーターン数: ${sessionLore.summary_checkpoint_turn}\n`;
     }
-    if (sessionLore.current_state) {
-      instruction += `・現在の場面: ${sessionLore.current_state}\n`;
-    }
     if (sessionLore.active_flags && sessionLore.active_flags.length > 0) {
       instruction += `・未回収フラグ・伏線:\n`;
       sessionLore.active_flags.forEach(item => {
-        instruction += `  - ${item}\n`;
-      });
-    }
-    if (sessionLore.recent_turning_points && sessionLore.recent_turning_points.length > 0) {
-      instruction += `・最近の出来事:\n`;
-      sessionLore.recent_turning_points.forEach(item => {
         instruction += `  - ${item}\n`;
       });
     }
@@ -2081,7 +2066,6 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- 逆に、作品全体で共有される安定設定をセッションロアの要点として消費しないこと。\n\n`;
   instruction += `- 大きな出来事、関係性の変化、新規オリジナル人物の登場があったターンでは、本文を書く前に update_session_lore を優先して呼ぶこと。\n`;
   instruction += `- update_session_lore.summary は、履歴圧縮後でも単独で状況が通じる正式な進行要約として扱うこと。主人公が今どこで何をしているか、誰とどんな状態か、未解決の懸案は何かまで分かるように更新すること。\n`;
-  instruction += `- update_session_lore.recent_turning_points は短期ログであり、直近のやり取りや移動、戦闘、会話進行を記録すること。\n`;
   instruction += `- update_session_lore.long_term_events は長期記憶であり、誰とどう出会ったか、どの陣営に関わることになったか、重要な宣言、関係の転換点など、後の物語理解に不可欠な出来事だけを残すこと。\n`;
   instruction += `- update_session_lore.active_flags は未回収の目標、伏線、約束、向かうべき場所、保留案件だけを入れ、解決済みのものは削除すること。\n`;
   instruction += `- モブとの一時会話や、その場限りの軽い注意喚起は long_term_events に入れないこと。ネームド人物との初接触、救助、契約、所属変化は優先して残すこと。\n`;
@@ -3644,7 +3628,7 @@ export async function generateStoryResponse(story) {
         }
       }, {
         name: 'update_session_lore',
-        description: 'このセッション固有の進行記録を更新します。現在の状況、進行中のイベント、主人公との関係変化、今回の行動でのみ意味を持つ出来事、セッションで新しく生まれたオリジナルキャラクターや即興設定だけを記録してください。地名・組織名・作品世界の安定設定はここに入れません。',
+        description: 'このセッション固有の進行記録を更新します。圧縮あらすじ、未回収フラグ、長期記憶イベント、主人公との関係変化、今回の行動でのみ意味を持つ出来事、セッションで新しく生まれたオリジナルキャラクターや即興設定だけを記録してください。地名・組織名・作品世界の安定設定はここに入れません。',
         parameters: {
           type: 'OBJECT',
           properties: {
@@ -3652,18 +3636,9 @@ export async function generateStoryResponse(story) {
               type: 'STRING',
               description: '履歴圧縮後でも意味が通る「現在状況の要約」。2〜4文程度で、主人公が今どこで何をしているか、誰とどういう状態か、未解決の懸案は何かが単独で分かるように書く。単なる一行感想や単発イベント名ではなく、後から読んだAIが流れを復元できる粒度にする。'
             },
-            current_state: {
-              type: 'STRING',
-              description: '現在の場面を1〜2文で要約。主人公が今どこで、誰と、何をしている最中かを簡潔に書く。'
-            },
             active_flags: {
               type: 'ARRAY',
               description: '未解決の懸案、保留中の約束、今後回収すべき伏線や目標の一覧。回収済みのものは含めない。',
-              items: { type: 'STRING' }
-            },
-            recent_turning_points: {
-              type: 'ARRAY',
-              description: '最近起きた出来事や状況変化の一覧。短期ログとして扱い、直近数件に絞る。',
               items: { type: 'STRING' }
             },
             affinity_updates: {
