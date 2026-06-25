@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260623e';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260623e';
-import * as dropbox from './dropbox.js?v=20260623e';
+import * as ui from './ui.js?v=20260625d';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260625d';
+import * as dropbox from './dropbox.js?v=20260625d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -310,10 +310,29 @@ const DEFAULT_MODEL_OPTIONS = [
   { value: 'gemini-3-flash-preview', label: 'gemini-3-flash-preview (Preview・検索対応)' },
   { value: 'gemma-4-31b-it', label: 'gemma-4-31b-it (Gemma 4・高推論・無料)' },
   { value: 'gemma-4-26b-a4b-it', label: 'gemma-4-26b-a4b-it (Gemma 4・軽量・無料)' },
-  { value: 'gemma-3-27b-it', label: 'gemma-3-27b-it (Gemma 3・高推論)' }
+  { value: 'gemma-3-27b-it', label: 'gemma-3-27b-it (Gemma 3・高推論)' },
+  { value: 'llama-3.1-8b-instant', label: 'llama-3.1-8b-instant (Groq・高速)' },
+  { value: 'llama-3.3-70b-versatile', label: 'llama-3.3-70b-versatile (Groq・高性能)' },
+  { value: 'openai/gpt-oss-20b', label: 'openai/gpt-oss-20b (Groq・OSS)' },
+  { value: 'openai/gpt-oss-120b', label: 'openai/gpt-oss-120b (Groq・大型OSS)' },
+  { value: 'qwen/qwen3-32b', label: 'qwen/qwen3-32b (Groq・Qwen)' }
 ];
 
 const DEFAULT_MODEL_VALUES = DEFAULT_MODEL_OPTIONS.map(option => option.value);
+const DEFAULT_GROQ_MODEL_NAME = 'llama-3.1-8b-instant';
+const DEFAULT_GEMINI_MODEL_NAME = 'gemini-2.5-flash';
+const GROQ_MODEL_VALUES = new Set([
+  'llama-3.1-8b-instant',
+  'llama-3.3-70b-versatile',
+  'openai/gpt-oss-20b',
+  'openai/gpt-oss-120b',
+  'qwen/qwen3-32b'
+]);
+
+function isGroqModelName(modelName = '') {
+  const normalized = String(modelName || '').trim();
+  return GROQ_MODEL_VALUES.has(normalized);
+}
 const GEMINI3_THINKING_OPTIONS = [
   { value: 'minimal', label: 'Minimal (最小限)' },
   { value: 'low', label: 'Low (軽め)' },
@@ -1337,8 +1356,16 @@ if (document.readyState === 'loading') {
 async function loadConfigurations() {
   const provider = await db.getSetting('api_provider', 'gemini');
   const key = await db.getSetting('api_key', '');
+  const groqApiKey = await db.getSetting('groq_api_key', '');
   const tavilyApiKey = await db.getSetting('tavily_api_key', '');
-  const model = await db.getSetting('model_name', 'gemini-2.5-flash');
+  let model = await db.getSetting('model_name', 'gemini-2.5-flash');
+  if (provider === 'groq' && !isGroqModelName(model)) {
+    model = DEFAULT_GROQ_MODEL_NAME;
+    await db.saveSetting('model_name', model);
+  } else if (provider !== 'groq' && isGroqModelName(model)) {
+    model = DEFAULT_GEMINI_MODEL_NAME;
+    await db.saveSetting('model_name', model);
+  }
   const searchModel = await db.getSetting('search_model_name', '');
   const searchSynthesisModel = await db.getSetting('search_synthesis_model_name', '');
   const webSearchProvider = await db.getSetting('web_search_provider', 'auto');
@@ -1379,6 +1406,7 @@ async function loadConfigurations() {
   updateState({
     apiProvider: provider,
     apiKey: key,
+    groqApiKey,
     tavilyApiKey,
     modelName: model,
     searchModelName: searchModel,
@@ -1409,6 +1437,7 @@ async function loadConfigurations() {
   // Prefill settings form
   const provEl = document.getElementById('api-provider-select');
   const keyEl = document.getElementById('api-key-input');
+  const groqKeyEl = document.getElementById('groq-api-key-input');
   const tavilyKeyEl = document.getElementById('tavily-api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
@@ -1433,6 +1462,7 @@ async function loadConfigurations() {
 
   if (provEl) provEl.value = provider;
   if (keyEl) keyEl.value = key;
+  if (groqKeyEl) groqKeyEl.value = groqApiKey || '';
   if (tavilyKeyEl) tavilyKeyEl.value = tavilyApiKey || '';
   if (choicesEl) choicesEl.checked = choices;
   if (autoscrollEl) autoscrollEl.checked = autoscroll;
@@ -1814,6 +1844,7 @@ async function bindEvents() {
   // 4. Save Settings Changes
   const provEl = document.getElementById('api-provider-select');
   const keyEl = document.getElementById('api-key-input');
+  const groqKeyEl = document.getElementById('groq-api-key-input');
   const tavilyKeyEl = document.getElementById('tavily-api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
@@ -1840,10 +1871,24 @@ async function bindEvents() {
   const sessionSummaryPromptEl = document.getElementById('session-summary-prompt-input');
 
   if (provEl) {
-    provEl.onchange = (e) => {
+    provEl.onchange = async (e) => {
       const val = e.target.value;
-      updateState({ apiProvider: val });
-      db.saveSetting('api_provider', val);
+      const updates = { apiProvider: val };
+      await db.saveSetting('api_provider', val);
+
+      const currentModel = String(getState().modelName || modelEl?.value || '').trim();
+      if (val === 'groq' && !isGroqModelName(currentModel)) {
+        updates.modelName = DEFAULT_GROQ_MODEL_NAME;
+        if (modelEl) modelEl.value = DEFAULT_GROQ_MODEL_NAME;
+        await db.saveSetting('model_name', DEFAULT_GROQ_MODEL_NAME);
+      } else if (val !== 'groq' && isGroqModelName(currentModel)) {
+        updates.modelName = DEFAULT_GEMINI_MODEL_NAME;
+        if (modelEl) modelEl.value = DEFAULT_GEMINI_MODEL_NAME;
+        await db.saveSetting('model_name', DEFAULT_GEMINI_MODEL_NAME);
+      }
+
+      updateState(updates);
+      populateThinkingSelectForModel(updates.modelName || currentModel, getState());
     };
   }
   if (keyEl) {
@@ -1852,6 +1897,14 @@ async function bindEvents() {
       updateState({ apiKey: val });
       db.saveSetting('api_key', val);
       localStorage.setItem('zetatavern_api_key', val);
+    };
+  }
+  if (groqKeyEl) {
+    groqKeyEl.oninput = (e) => {
+      const val = String(e.target.value || '').trim();
+      updateState({ groqApiKey: val });
+      db.saveSetting('groq_api_key', val);
+      localStorage.setItem('zetatavern_groq_api_key', val);
     };
   }
   if (tavilyKeyEl) {

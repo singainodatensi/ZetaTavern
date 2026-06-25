@@ -21,7 +21,7 @@
 
   <script>
     (function () {
-      var buildVersion = '20260623e';
+      var buildVersion = '20260625d';
       var url = new URL(window.location.href);
       if (url.searchParams.get('v') !== buildVersion) {
         url.searchParams.set('v', buildVersion);
@@ -32,7 +32,7 @@
   </script>
   
   <!-- App Modules -->
-  <script type="module" src="js/app.js?v=20260623e" defer></script>
+  <script type="module" src="js/app.js?v=20260625d" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -350,6 +350,7 @@
                 <label for="api-provider-select">APIプロバイダー</label>
                 <select id="api-provider-select">
                   <option value="gemini">Google Gemini API (推奨)</option>
+                  <option value="groq">Groq API (試験)</option>
                 </select>
               </div>
 
@@ -365,6 +366,12 @@
               </div>
 
               <div class="form-group">
+                <label for="groq-api-key-input">Groq APIキー</label>
+                <input type="password" id="groq-api-key-input" placeholder="gsk_..." autocomplete="off" spellcheck="false">
+                <small style="color: var(--text-sub); display: block; margin-top: 4px;">Groq API を選択した時に使います。試験導入のため、現時点では本文生成が中心です。</small>
+              </div>
+
+              <div class="form-group">
                 <label for="model-name-select">使用モデル</label>
                 <select id="model-name-select">
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (無料枠多め・高速)</option>
@@ -375,6 +382,11 @@
                   <option value="gemma-4-31b-it">gemma-4-31b-it (Gemma 4・高推論・無料)</option>
                   <option value="gemma-4-26b-a4b-it">gemma-4-26b-a4b-it (Gemma 4・軽量・無料)</option>
                   <option value="gemma-3-27b-it">gemma-3-27b-it (Gemma 3・高推論)</option>
+                  <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (Groq・高速)</option>
+                  <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile (Groq・高性能)</option>
+                  <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (Groq・OSS)</option>
+                  <option value="openai/gpt-oss-120b">openai/gpt-oss-120b (Groq・大型OSS)</option>
+                  <option value="qwen/qwen3-32b">qwen/qwen3-32b (Groq・Qwen)</option>
                 </select>
               </div>
                 <div class="form-group">

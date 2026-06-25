@@ -44,6 +44,15 @@ function hasCharacterLoreConflict(lore, characters, franchise) {
 }
 
 const DEFAULT_SEARCH_MODEL_NAME = 'gemini-2.5-flash-lite';
+const GROQ_CHAT_COMPLETIONS_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const DEFAULT_GROQ_MODEL_NAME = 'llama-3.1-8b-instant';
+const GROQ_MODEL_NAMES = new Set([
+  'llama-3.1-8b-instant',
+  'llama-3.3-70b-versatile',
+  'openai/gpt-oss-20b',
+  'openai/gpt-oss-120b',
+  'qwen/qwen3-32b'
+]);
 const DEFAULT_SESSION_SUMMARY_PROMPT = `あなたはプロの編集者です。以下の会話履歴を、第三者の視点から見た物語の「あらすじ」として要約してください。
 「承知しました」等のAIとしての応答は不要です。要約文のみ出力して下さい。
 
@@ -71,6 +80,15 @@ const webSearchCooldownUntilByProvider = {
   tavily: 0
 };
 const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['auto', 'tavily', 'google', 'duckduckgo', 'off']);
+
+function isGroqProvider(provider = '') {
+  return String(provider || '').trim().toLowerCase() === 'groq';
+}
+
+function resolveGroqModelName(modelName = '') {
+  const normalized = String(modelName || '').trim();
+  return GROQ_MODEL_NAMES.has(normalized) ? normalized : DEFAULT_GROQ_MODEL_NAME;
+}
 
 function selectSearchCapableModel(modelName) {
   const requested = (modelName || '').trim();
@@ -395,7 +413,9 @@ const PROACTIVE_REFERENCE_STOPWORDS = new Set([
   '場所', '情報', '内容', '話', '今回', '次', '今', 'さっき', '感じ', 'ところ',
   '相手', '自分', '普通', '一般', '説明', '詳細', '名前', '存在', '仲間',
   '講義', '授業', '自宅', '家', '部屋', '学校', '先生', '好き', '恋愛', '放課後',
-  '時間', '今日', '明日', '昨日', '仕事', '生活', '会場', '現場'
+  '時間', '今日', '明日', '昨日', '仕事', '生活', '会場', '現場',
+  '典型', '反応', '描写', '際', '協力者', '執着心', '正体', '疑い', 'ライバル',
+  '結構', '検索', 'クエリ', '概要', '補足'
 ]);
 
 const KNOWN_WORLD_SEARCH_TERMS = new Set([
@@ -646,6 +666,15 @@ function addUsageMetadata(accumulator, usageMetadata) {
   accumulator.toolUsePromptTokenCount += Number(usageMetadata.toolUsePromptTokenCount || 0);
   accumulator.cachedContentTokenCount += Number(usageMetadata.cachedContentTokenCount || 0);
   accumulator.totalTokenCount += Number(usageMetadata.totalTokenCount || 0);
+  return accumulator;
+}
+
+function addOpenAIUsageMetadata(accumulator, usage = {}) {
+  if (!accumulator || !usage) return accumulator;
+  accumulator.requestCount += 1;
+  accumulator.promptTokenCount += Number(usage.prompt_tokens || usage.promptTokens || 0);
+  accumulator.candidatesTokenCount += Number(usage.completion_tokens || usage.completionTokens || 0);
+  accumulator.totalTokenCount += Number(usage.total_tokens || usage.totalTokens || 0);
   return accumulator;
 }
 
@@ -1267,10 +1296,11 @@ function extractReferenceCandidatesFromText(text) {
   const katakana = source.match(/[\u30a0-\u30ffー]{2,20}/g) || [];
   const kanji = source.match(/[\u4e00-\u9faf]{2,12}/g) || [];
   const mixedJapanese = source.match(/(?:[\u4e00-\u9faf]+[ぁ-んァ-ヶー][\u3040-\u30ff\u4e00-\u9fafー]{1,18}|[ぁ-んァ-ヶー]+[\u4e00-\u9faf][\u3040-\u30ff\u4e00-\u9fafー]{1,18})/g) || [];
+  const titledJapanese = source.match(/[\u3040-\u30ff\u4e00-\u9fafA-Za-z0-9☆★・！!？?ー]{2,30}/g) || [];
   const english = source.match(/[A-Z][a-zA-Z0-9:_-]{2,20}/g) || [];
 
-  for (const rawWord of [...katakana, ...kanji, ...mixedJapanese, ...english]) {
-    const word = normalizeLoreEntryName(rawWord).trim();
+  for (const rawWord of [...titledJapanese, ...katakana, ...kanji, ...mixedJapanese, ...english]) {
+    const word = cleanSearchPlanningTerm(normalizeLoreEntryName(rawWord)).trim();
     if (!word || word.length < 2) continue;
     if (PROACTIVE_REFERENCE_STOPWORDS.has(word)) continue;
     words.add(word);
@@ -1279,13 +1309,33 @@ function extractReferenceCandidatesFromText(text) {
   return Array.from(words);
 }
 
+function cleanSearchPlanningTerm(term) {
+  let value = normalizeLoreEntryName(term).trim();
+  if (!value) return '';
+  value = value
+    .replace(/[「」『』【】]/g, '')
+    .replace(/(?:について|に関して|とは|って|を教えて|を調べて|を確認して|のこと|の話)$/g, '')
+    .replace(/(?:を|が|は|に|で|へ|と|から|まで)$/g, '')
+    .trim();
+  return value;
+}
+
 function isLikelyGenericSearchTerm(term) {
-  const value = normalizeLoreEntryName(term);
+  const value = cleanSearchPlanningTerm(term);
   if (!value) return true;
   if (PROACTIVE_REFERENCE_STOPWORDS.has(value)) return true;
   if (/^[\u3040-\u309fー]+$/.test(value)) return true;
   if (/^(それ|これ|あれ|どれ|ここ|そこ|あそこ|誰|何|どこ|いつ|なに|みんな|お前ら)$/.test(value)) return true;
   if (/^[\u4e00-\u9faf]{1,2}$/.test(value) && !KNOWN_WORLD_SEARCH_TERMS.has(value)) return true;
+  return false;
+}
+
+function isLikelyTitleLikeSearchTerm(term) {
+  const value = cleanSearchPlanningTerm(term);
+  if (!value) return false;
+  if (/[☆★]/.test(value)) return true;
+  if (/[ぁ-ん]/.test(value) && /[ァ-ヶー]/.test(value) && value.length >= 5) return true;
+  if (/[A-Za-z0-9]/.test(value) && /[\u3040-\u30ff\u4e00-\u9faf]/.test(value) && value.length >= 4) return true;
   return false;
 }
 
@@ -1304,6 +1354,42 @@ function filterSearchPlanningTerms(terms = []) {
   return uniqueNonEmpty(terms).filter(term => !isLikelyGenericSearchTerm(term));
 }
 
+function normalizeSearchPlanTopic(rawTopic, story, searchContext) {
+  const value = normalizeLoreEntryName(rawTopic).trim();
+  if (!value) return '';
+
+  const scopedAnchors = collectStoryScopedSearchAnchors(story, value);
+  if (scopedAnchors.length > 0) {
+    return normalizeLoreEntryName(scopedAnchors[0]).slice(0, 40);
+  }
+
+  const candidates = filterSearchPlanningTerms([
+    ...collectKnownWorldSearchTerms(value),
+    ...extractReferenceCandidatesFromText(value)
+  ]).filter(term => {
+    const normalized = normalizeLoreEntryName(term);
+    return normalized && normalized !== normalizeLoreEntryName(searchContext);
+  });
+
+  if (candidates.length > 0) {
+    return normalizeLoreEntryName(candidates[0]).slice(0, 40);
+  }
+
+  if (value.length <= 20 && !isLikelyGenericSearchTerm(value)) {
+    return value;
+  }
+  return '';
+}
+
+function buildFocusedSearchQuery(topic, searchContext, extraTerms = []) {
+  const focusedTopic = normalizeLoreEntryName(topic).trim();
+  const context = normalizeLoreEntryName(searchContext).trim();
+  const extras = filterSearchPlanningTerms(extraTerms)
+    .filter(term => term !== focusedTopic && term !== context)
+    .slice(0, 2);
+  return [focusedTopic, ...extras, context].filter(Boolean).join(' ').trim();
+}
+
 function collectStoryScopedSearchAnchors(story, text) {
   const source = String(text || '');
   if (!source || !story) return [];
@@ -1316,6 +1402,21 @@ function collectStoryScopedSearchAnchors(story, text) {
     const name = String(character?.name || '').trim();
     if (name && source.includes(name)) {
       anchors.push(name);
+      continue;
+    }
+    const tags = Array.isArray(character?.tags) ? character.tags : [];
+    for (const rawAlias of tags) {
+      const alias = String(rawAlias || '').trim();
+      if (alias && alias.length >= 2 && source.includes(alias)) {
+        anchors.push(name || alias);
+        break;
+      }
+    }
+    if (name && /[\u4e00-\u9faf]{4,}/.test(name)) {
+      const segments = [name.slice(0, 2), name.slice(-2)];
+      if (segments.some(segment => segment.length >= 2 && source.includes(segment))) {
+        anchors.push(name);
+      }
     }
   }
 
@@ -1759,6 +1860,14 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。メタな思考過程や英語は一切出力しない。\n`;
   instruction += `- 執筆ルールの文字数目安に従い、本文を十分な長さで書く。\n\n`;
 
+  instruction += `【固有名詞の明示ルール】\n`;
+  instruction += `- 作品名、作中作品名、ゲーム名、キャラクター名、学校名、組織名、地名、イベント名、商品名など、分かっている固有名詞は代名詞でぼかさず明示すること。\n`;
+  instruction += `- 「あの名作ゲーム」「例の新作」「あの子」「その店」「あの組織」のような曖昧な代名詞だけで済ませてはいけない。読者が名前を把握できるよう、初出または重要場面では正式名や通称を出すこと。\n`;
+  instruction += `- モデル自身の記憶や自信は根拠として扱わない。検索メモ、キャラクターライブラリ、ロアブック、直近会話に根拠がない固有名詞や作中作品は、初回に参照・検索してから使うこと。\n`;
+  instruction += `- 固有名詞が不明な場合は、適当にぼかして続けるのではなく、キャラクターライブラリ、ロアブック、検索メモ、必要なら search_web で確認してから使うこと。\n`;
+  instruction += `- 作中ゲーム・作中アニメ・雑誌・イベント名など、モデルがハルシネーションしやすい固有名詞は特に確認を優先すること。\n`;
+  instruction += `- どうしても確認できない場合のみ、本文では「まだ名前の分からない〜」のように不明であることを明示し、知っているふりをしないこと。\n\n`;
+
   if ((story.imageBaseUrl || '').trim()) {
     instruction += `【画像表示トークンのルール】\n`;
     instruction += `- 画像を表示したい本文の直前に、制御行として \`@img:キャラクター名|衣装名|ファイル名\` を1行だけ出力できます。\n`;
@@ -1791,6 +1900,7 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `【重要：世界観の正確な描写と参照ツールの使い分け】\n`;
   instruction += `実在の作品名（アニメ、漫画等）をベースにした世界観の場合、安易にオリジナルの敵、魔法、地名、設定を捏造してはいけません。\n`;
   instruction += `キャラクターライブラリやロアブックに登録済みの内容は、必要になった時に参照ツールで検索・取得してから使ってください。\n`;
+  instruction += `原作に存在する作中作品、ゲーム、雑誌、イベント、ユニット、組織などは、検索メモ・ロア・キャラ設定などの根拠を確認したうえで固有名詞で出してください。名前を出せないほど曖昧なら参照・検索して確認してください。\n`;
   instruction += `原作キャラや原作世界を使う時は、「その人物/用語そのもの」だけでなく、「周辺人物」「所属」「拠点」「制度」「同席しやすい存在」まで確認してから描写すること。\n`;
   instruction += `- 人物情報は search_character_library / get_character_profile を優先して使うこと。\n`;
   instruction += `- 世界設定や用語は search_lorebook / get_lore_entry を優先して使うこと。\n`;
@@ -2072,6 +2182,7 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- ストーリーの進行方向、次に出す人物・場所・事件、必要な下調べが見えてきた場合は update_story_plan を呼び、短期・中期・長期目標と調査ニーズを更新すること。\n`;
   instruction += `- update_story_plan は確定プロットではない。ユーザーの選択や行動が変わったら、古い方針に固執せず、自然な方針へ更新すること。\n`;
   instruction += `- 調査ニーズには、今後の描写を作品固有にするために確認したい人物、組織、地名、制度、イベント、敵対勢力、ユニット、商会、拠点などを具体名で入れること。\n`;
+  instruction += `- 調査ニーズに「あの作品」「新作ゲーム」「名作」「協力者の反応」のような曖昧語や説明文だけを入れてはいけない。可能な限り固有名詞、または「高坂桐乃」「星くず☆うぃっちメルル」のような検索可能な名詞句で書くこと。\n`;
   instruction += `- update_story_plan を呼ぶべき具体例: 新しい場所へ移動した / 新しい重要人物と出会った / ユーザーが目的地・行動方針・所属・協力相手を決めた / 未回収フラグが増えた・解決した / 次に出すべき原作キャラ・組織・イベントが見えた / 会話が停滞し、次の展開を作る必要がある / 検索やロア参照で今後使えそうな設定が分かった。\n`;
   instruction += `- update_story_plan を呼ばなくてよい例: 単なる雑談 / 感情描写だけで状況が動いていない / 既存方針と変化がない / 同じ場面の細かい返答だけ。\n`;
   instruction += `- update_story_plan は毎ターン必須ではないが、上記の更新条件に当てはまる場合は本文を書く前に優先して呼ぶこと。\n`;
@@ -2277,6 +2388,20 @@ function stripLeakedFunctionCallText(text) {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function extractOpenAITextAndThoughtFromContent(content) {
+  let working = String(content || '').trim();
+  let thought = null;
+  const thinkMatch = working.match(/<think>([\s\S]*?)<\/think>/i);
+  if (thinkMatch) {
+    thought = thinkMatch[1].trim();
+    working = `${working.slice(0, thinkMatch.index)}${working.slice(thinkMatch.index + thinkMatch[0].length)}`.trim();
+  }
+  return {
+    thought,
+    text: stripLeakedThinkingText(working)
+  };
 }
 
 function extractLeakedThinkingAndStory(text) {
@@ -2533,7 +2658,8 @@ function buildSearchPlanningPrompt(story, selectedMessages = []) {
   return `
 あなたはユーザー体感型ストーリーのための「検索計画プランナー」です。
 次の本文を書く前に、原作ならではの世界観・組織・同行者・拠点・制度・事件進行を自然に反映させるため、外部Web検索が必要かを判定してください。
-検索が不要なら無理に探さず、必要な場合だけ1件に絞ってください。
+未確認の原作固有要素が次の場面に関わるなら、ユーザーが明示的に検索を頼んでいなくても積極的に1件だけ検索候補を出してください。
+既存メモやローカル参照だけで十分な場合だけ、検索不要と判断してください。
 
 作品タグ: ${franchise || '未設定'}
 検索用別名: ${franchiseContext || 'なし'}
@@ -2553,10 +2679,12 @@ ${searchMemory || 'なし'}
 - 作品固有の制度・組織・拠点・依頼文化・陣営・同行者・敵対勢力・原作イベント進行を描くと場面が豊かになるなら検索候補にする。
 - ユーザーが明示的に質問していなくても、次の展開の整合性や作品らしさに必要なら検索してよい。
 - ただし、既存の検索メモ、キャラクターライブラリ、ロアブックで十分なら needsSearch を false にする。
+- モデル自身が「知っている」と感じるだけでは検索不要にしてはいけない。検索メモ・ロアブック・キャラクターライブラリに根拠がない固有名詞、特に作中ゲーム・作中作品・イベント名は初回確認の候補にする。
 - 一般名詞だけをそのまま調べるのではなく、作品名・人物名・所属・目的を含む具体的な検索語にする。
 - 人物なら「同行者」「所属」「拠点」、制度なら「依頼」「商会」「騎士団」など、次の場面に必要な観点を query に含める。
+- 「あの名作ゲーム」「例の新作」「協力者を突き止める際の執着心」のような説明文・代名詞を query にしてはいけない。必ず短い固有名詞または検索可能な名詞句へ圧縮する。
 - 悪い検索語の例: 「マジ アーカイブ VTuber」「ゴミ 犯罪者 Re:ゼロ」
-- 良い検索語の例: 「城ヶ崎美嘉 活動内容 アイドルマスターシンデレラガールズ」「プリシラ陣営 関係者 Re:ゼロから始める異世界生活」
+- 良い検索語の例: 「城ヶ崎美嘉 活動内容 アイドルマスターシンデレラガールズ」「プリシラ陣営 関係者 Re:ゼロから始める異世界生活」「星くず☆うぃっちメルル 俺の妹がこんなに可愛いわけがない」
 
 JSONのみを返してください:
 {
@@ -2591,12 +2719,38 @@ function shouldUseExternalProviderPlanning(provider, tavilyApiKey = '') {
 function buildExternalProviderSearchPlan(story, selectedMessages = []) {
   const latestUserMessage = [...selectedMessages].reverse().find(message => message?.role === 'user');
   const latestText = String(latestUserMessage?.content || '').trim();
-  if (!latestText) return null;
 
   const franchise = String(story?.franchise || '').trim();
   const franchiseContext = String(story?.franchiseContext || '').trim();
   const searchContext = franchiseContext || franchise;
   if (!searchContext) return null;
+
+  const storyPlan = ensureStoryPlanStructure(story);
+  const pendingResearchNeeds = storyPlan.research_needs
+    .map(item => normalizeSearchPlanTopic(item, story, searchContext))
+    .filter(Boolean)
+    .filter(term => !isLikelyGenericSearchTerm(term))
+    .filter(term => !findSearchMemoryMatch(story, {
+      topicKey: term,
+      query: [term, searchContext].filter(Boolean).join(' '),
+      franchise: searchContext
+    }));
+  if (pendingResearchNeeds.length > 0) {
+    const topicKey = normalizeLoreEntryName(pendingResearchNeeds[0] || '').slice(0, 60);
+    const query = buildFocusedSearchQuery(topicKey, searchContext);
+    if (topicKey && query) {
+      return {
+        topicKey,
+        query,
+        purpose: 'ストーリープラン上、今後の展開を作品固有にするための下調べ',
+        sceneGoal: '次の展開で使う人物・組織・地名・制度を事前に把握する',
+        reason: 'story_plan.research_needs に未検索の調査ニーズがあるため',
+        franchise: searchContext
+      };
+    }
+  }
+
+  if (!latestText) return null;
 
   const scopedAnchors = collectStoryScopedSearchAnchors(story, latestText);
   const knownWorldTerms = collectKnownWorldSearchTerms(latestText);
@@ -2607,14 +2761,15 @@ function buildExternalProviderSearchPlan(story, selectedMessages = []) {
   ]);
   const searchHintPattern = /(教えて|とは|って|誰|どこ|何|なに|どういう|詳細|説明|調べ|検索|依頼|護衛|討伐|商会|騎士団|屋敷|学園|学校|王都|王選|陣営|魔女教|精霊|加護|白鯨|ギルド)/;
   const hasStrongAnchor = scopedAnchors.length > 0 || knownWorldTerms.length > 0;
-  const shouldSearch = (candidateTerms.length > 0 && searchHintPattern.test(latestText) && hasStrongAnchor)
-    || candidateTerms.some(term => KNOWN_WORLD_SEARCH_TERMS.has(term));
+  const shouldSearch = (candidateTerms.length > 0 && (
+    searchHintPattern.test(latestText) ||
+    hasStrongAnchor ||
+    candidateTerms.some(term => isLikelyTitleLikeSearchTerm(term))
+  )) || candidateTerms.some(term => KNOWN_WORLD_SEARCH_TERMS.has(term));
   if (!shouldSearch) return null;
 
   const topicKey = normalizeLoreEntryName(candidateTerms[0] || '').slice(0, 60);
-  const queryHead = candidateTerms.slice(0, 2).join(' ');
-  if (!queryHead) return null;
-  const query = [queryHead, searchContext].filter(Boolean).join(' ').trim();
+  const query = buildFocusedSearchQuery(topicKey, searchContext, candidateTerms.slice(1));
   if (!query) return null;
 
   const isQuestion = /(教えて|とは|って|誰|どこ|何|なに|どういう|詳細|説明|調べ|検索)/.test(latestText);
@@ -2637,7 +2792,9 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
   const provider = normalizeWebSearchProvider(appState.webSearchProvider);
-  if (!apiKey || provider === 'off') return null;
+  if (provider === 'off') return null;
+  const usesExternalProviderPlanning = shouldUseExternalProviderPlanning(provider, tavilyApiKey);
+  if (!apiKey && !usesExternalProviderPlanning) return null;
 
   const hasFranchiseContext = Boolean(
     String(story?.franchise || '').trim() ||
@@ -2649,7 +2806,7 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
   const latestUserMessage = [...selectedMessages].reverse().find(message => message?.role === 'user');
   if (!latestUserMessage?.content) return null;
 
-  if (shouldUseExternalProviderPlanning(provider, tavilyApiKey)) {
+  if (usesExternalProviderPlanning) {
     return buildExternalProviderSearchPlan(story, selectedMessages);
   }
 
@@ -2783,6 +2940,24 @@ function buildTavilySummary(payload, query, franchise) {
   return lines.join('\n').trim().slice(0, 1400);
 }
 
+function isLowValueSearchSummary(text, query, franchise) {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  const queryTerms = filterSearchPlanningTerms(extractReferenceCandidatesFromText(query));
+  const hasSpecificQueryTerm = queryTerms.some(term =>
+    normalizeLoreEntryName(term).length >= 3 && value.includes(term)
+  );
+  const genericSourceOnly =
+    /Wikipedia|Prime Video|百度百科|テレビアニメ|ライトノベル|著者|初登場/.test(value) &&
+    !hasSpecificQueryTerm;
+  const isSeriesOverview =
+    franchise &&
+    value.includes(franchise) &&
+    /(作品|シリーズ|ライトノベル|アニメ|物語|ストーリー|主人公)/.test(value) &&
+    !hasSpecificQueryTerm;
+  return genericSourceOnly || isSeriesOverview;
+}
+
 async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
   const searchQuery = [query, franchise].filter(Boolean).join(' ');
   const response = await fetch('https://api.tavily.com/search', {
@@ -2823,6 +2998,18 @@ async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
 
   const payload = await response.json().catch(() => null);
   const text = buildTavilySummary(payload, query, franchise);
+  if (isLowValueSearchSummary(text, query, franchise)) {
+    return {
+      provider: 'tavily',
+      found: false,
+      status: 200,
+      modelName: '',
+      text: '',
+      groundingQueries: [],
+      usageCredits: Number(payload?.usage?.credits || 0),
+      message: '検索結果が作品概要や一般的なページに偏っており、ストーリー用メモとして十分ではありませんでした。'
+    };
+  }
     return {
       provider: 'tavily',
       found: Boolean(text),
@@ -3453,11 +3640,141 @@ export async function generateSessionChapterSummary(story, options = {}) {
 }
 
 /**
+ * Sends messages to Groq's OpenAI-compatible Chat Completions API.
+ * Trial provider path: story text generation only, without local function calling.
+ */
+async function generateGroqStoryResponse(story, appState = getState()) {
+  const apiKey = String(appState.groqApiKey || await getGroqApiKeyFromStorage()).trim();
+  if (!apiKey) {
+    throw new Error('Groq APIキーが設定されていません。設定画面で登録してください。');
+  }
+
+  const parsedTimeout = parseInt(appState.apiTimeout, 10);
+  const parsedRetries = parseInt(appState.apiRetries, 10);
+  const timeoutSeconds = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 60;
+  const maxRetries = Number.isFinite(parsedRetries) && parsedRetries > 0 ? parsedRetries : 1;
+
+  const modelName = resolveGroqModelName(appState.modelName);
+  const usageAccumulator = createUsageAccumulator('story', modelName);
+  usageAccumulator.searchProviderLabel = 'Groq';
+  usageAccumulator.googleSearchAvailable = false;
+
+  const historyCompressionEnabled = appState.historyCompressionEnabled !== false;
+  const configuredHistoryTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
+  const effectiveHistoryTurnLimit = historyCompressionEnabled ? configuredHistoryTurnLimit : 0;
+  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], effectiveHistoryTurnLimit);
+  usageAccumulator.historyCompressionEnabled = historyCompressionEnabled;
+  usageAccumulator.historyTurnLimit = effectiveHistoryTurnLimit;
+  usageAccumulator.omittedTurns = omittedTurns;
+
+  const systemInstruction = await buildSystemInstruction(story, {
+    omittedTurns,
+    historyTurnLimit: effectiveHistoryTurnLimit,
+    googleSearchEnabled: false,
+    gemmaThinkEnabled: false
+  });
+  const messages = [
+    { role: 'system', content: systemInstruction },
+    ...selectedMessages.map(msg => ({
+      role: msg.role === 'user' ? 'user' : 'assistant',
+      content: String(msg.aiContent || msg.content || '')
+    }))
+  ];
+  const debugContents = selectedMessages.map(msg => ({
+    role: msg.role === 'user' ? 'user' : 'model',
+    parts: [{ text: msg.aiContent || msg.content || '' }]
+  }));
+
+  const mainController = new AbortController();
+  updateState({ activeAbortController: mainController });
+
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    attempt++;
+    const attemptController = new AbortController();
+    const onMainAbort = () => attemptController.abort();
+    mainController.signal.addEventListener('abort', onMainAbort);
+    const timeoutId = setTimeout(() => {
+      attemptController.abort();
+    }, timeoutSeconds * 1000);
+
+    try {
+      accumulatePromptDebug(usageAccumulator, {
+        systemInstruction,
+        contents: debugContents,
+        tools: []
+      });
+
+      const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages,
+          temperature: 0.9,
+          top_p: 0.95,
+          max_completion_tokens: 8192
+        }),
+        signal: attemptController.signal
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const message = errorData?.error?.message || errorData?.message || `HTTP status ${response.status}`;
+        throw new Error(`Groq API Error: ${message}`);
+      }
+
+      const result = await response.json();
+      addOpenAIUsageMetadata(usageAccumulator, result?.usage);
+      const content = result?.choices?.[0]?.message?.content || '';
+      const extracted = extractOpenAITextAndThoughtFromContent(content);
+
+      clearTimeout(timeoutId);
+      mainController.signal.removeEventListener('abort', onMainAbort);
+
+      if (!extracted.text) {
+        throw new Error('Groq APIから有効なテキストが得られませんでした。');
+      }
+
+      updateState({ activeAbortController: null });
+      const usage = publishUsageSnapshot(usageAccumulator);
+      return { ...extracted, usage };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      mainController.signal.removeEventListener('abort', onMainAbort);
+
+      if (mainController.signal.aborted) {
+        updateState({ activeAbortController: null });
+        throw new Error('ユーザーにより生成が中止されました。');
+      }
+
+      console.warn(`Groq API call attempt ${attempt} failed:`, err);
+      if (attempt >= maxRetries) {
+        updateState({ activeAbortController: null });
+        throw err;
+      }
+      const delay = Math.pow(2, attempt) * 1000;
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+
+  updateState({ activeAbortController: null });
+  throw new Error('Groq応答の生成が開始されませんでした。リトライ回数の設定を確認してください。');
+}
+
+/**
  * Sends messages to Gemini API.
  * Supports timeout, retries, and manual stop.
  */
 export async function generateStoryResponse(story) {
   const appState = getState();
+  if (isGroqProvider(appState.apiProvider)) {
+    return generateGroqStoryResponse(story, appState);
+  }
+
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
 
   if (!apiKey) {
@@ -3607,7 +3924,7 @@ export async function generateStoryResponse(story) {
         }
       }, {
         name: 'search_web',
-        description: 'Google Search を使って外部情報を確認します。ローカルのキャラクターライブラリやロアブックで不足する原作設定、周辺人物、所属、拠点、制度、時事的な事実確認に使ってください。',
+        description: '設定されたWeb検索プロバイダを使って外部情報を確認します。ローカルのキャラクターライブラリやロアブックで不足する原作設定、周辺人物、所属、拠点、制度、時事的な事実確認に使ってください。',
         parameters: {
           type: 'OBJECT',
           properties: {
@@ -4005,6 +4322,10 @@ export async function generateStoryResponse(story) {
  */
 async function getApiKeyFromStorage() {
   return localStorage.getItem('zetatavern_api_key') || '';
+}
+
+async function getGroqApiKeyFromStorage() {
+  return localStorage.getItem('zetatavern_groq_api_key') || '';
 }
 
 function resolveSearchSynthesisModelName(appState) {

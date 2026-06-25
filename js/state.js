@@ -7,6 +7,7 @@ const state = {
   // Configs
   apiProvider: 'gemini',
   apiKey: '',
+  groqApiKey: '',
   tavilyApiKey: '',
   modelName: 'gemini-2.5-flash',
   searchModelName: '',
