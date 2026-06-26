@@ -7,43 +7,8 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260625d';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260626c';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
-
-// ====== AIディレクタープリセットデータ ======
-export const DIRECTOR_PRESETS = {
-  romcom_subtle: {
-    label: "🌸 微炭酸ラブコメ",
-    description: "感情の秘匿と繊細な距離感の変動を楽しむ日常系",
-    params: { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 }
-  },
-  dark_suspense: {
-    label: "💀 ダークサスペンス",
-    description: "常に死や裏切りの気配が漂う、不穏な群像劇",
-    params: { momentum: 70, autonomy: 90, worldTone: 90, backgroundTension: 90, romanticVisibility: 10, relationshipDrift: 80, intrusionRate: 60 }
-  },
-  battle_shounen: {
-    label: "🔥 異能バトル",
-    description: "日常と非日常が交錯し、劇的な事件が連続する展開",
-    params: { momentum: 85, autonomy: 60, worldTone: 50, backgroundTension: 50, romanticVisibility: 40, relationshipDrift: 40, intrusionRate: 90 }
-  },
-  cozy_slice_of_life: {
-    label: "🍵 ほのぼの日常",
-    description: "大きな事件は起きない、徹底的に平和で優しい世界",
-    params: { momentum: 20, autonomy: 60, worldTone: 0, backgroundTension: 0, romanticVisibility: 30, relationshipDrift: 20, intrusionRate: 0 }
-  }
-};
-
-const DIRECTOR_PARAMS = [
-  { id: 'momentum', label: '展開の推進力', minLabel: '受動的・日常', maxLabel: '能動的・劇的' },
-  { id: 'autonomy', label: 'NPCの自律性', minLabel: '主人公フォーカス', maxLabel: '独立した群像劇' },
-  { id: 'worldTone', label: '世界の温度', minLabel: '優しい・甘め', maxLabel: 'シビア・残酷' },
-  { id: 'backgroundTension', label: '不穏さ・緊張感', minLabel: '平和・安心', maxLabel: '常に張り詰める' },
-  { id: 'romanticVisibility', label: '恋愛・好意の露出', minLabel: '秘匿・行間', maxLabel: '直接的・露骨' },
-  { id: 'relationshipDrift', label: '関係性の変動幅', minLabel: '固定的・安定', maxLabel: '疑心暗鬼・急接近' },
-  { id: 'intrusionRate', label: '非日常の侵入頻度', minLabel: '平穏な連続', maxLabel: '唐突な事件・異変' }
-];
-// ===========================================
 
 const blobUrlCache = new Map();
 
@@ -2875,35 +2840,6 @@ export async function showStorySettingsModal() {
           </div>
         </fieldset>
 
-        <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px; margin-top: 12px; margin-bottom: 12px;">
-          <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">🎬 AIディレクター設定（演出傾向）</legend>
-          
-          <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;">
-            <label style="font-size: 12px; font-weight: bold;">プリセット (Preset)</label>
-            <select id="director-preset-select" style="padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; background: var(--bg-input, transparent); color: inherit;">
-              <option value="custom">⚙️ カスタム (手動調整)</option>
-              ${Object.entries(DIRECTOR_PRESETS).map(([key, p]) => `<option value="${key}">${p.label}</option>`).join('')}
-            </select>
-            <div id="director-preset-desc" style="font-size: 11px; color: var(--text-sub); min-height: 14px;"></div>
-          </div>
-
-          <div id="director-sliders-container" style="display: flex; flex-direction: column; gap: 12px;">
-            ${DIRECTOR_PARAMS.map(p => `
-              <div style="display: flex; flex-direction: column; gap: 4px;">
-                <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: bold;">
-                  <span>${p.label}</span>
-                  <span id="val-${p.id}">50</span>
-                </div>
-                <input type="range" id="slider-${p.id}" class="director-slider" data-id="${p.id}" min="0" max="100" value="50">
-                <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-sub);">
-                  <span>${p.minLabel}</span><span>${p.maxLabel}</span>
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        </fieldset>
-
-
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">作品名タグ (Franchise)</label>
           <input type="text" id="story-franchise-modal-input" value="${escapeHTML(currentStory.franchise || '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
@@ -2966,55 +2902,6 @@ export async function showStorySettingsModal() {
   const avatarPreview = modal.querySelector('#story-p-avatar-preview');
   const adjustBtnContainer = modal.querySelector('#story-p-adjust-btn-container');
 
-  // --- ★ AIディレクターUIの連動処理 ---
-  const presetSelect = modal.querySelector('#director-preset-select');
-  const presetDesc = modal.querySelector('#director-preset-desc');
-  const sliders = modal.querySelectorAll('.director-slider');
-  
-  // 現在の設定値を読み込む（なければデフォルトのラブコメ設定）
-  const currentSettings = currentStory.directorSettings || DIRECTOR_PRESETS.romcom_subtle.params;
-  
-  // スライダーに初期値をセット
-  sliders.forEach(slider => {
-    const id = slider.dataset.id;
-    slider.value = currentSettings[id] !== undefined ? currentSettings[id] : 50;
-    modal.querySelector(`#val-${id}`).textContent = slider.value;
-  });
-
-  // プリセットが手動でいじられているか判定してセレクトボックスを合わせる
-  const isMatchingPreset = Object.entries(DIRECTOR_PRESETS).find(([_, p]) => 
-    Object.entries(p.params).every(([key, val]) => currentSettings[key] == val)
-  );
-  if (isMatchingPreset) {
-    presetSelect.value = isMatchingPreset[0];
-    presetDesc.textContent = isMatchingPreset[1].description;
-  } else {
-    presetSelect.value = 'custom';
-    presetDesc.textContent = 'スライダーを手動で調整中...';
-  }
-
-  // スライダーを動かしたら「カスタム」に変更し、数値をリアルタイム更新
-  sliders.forEach(slider => {
-    slider.addEventListener('input', (e) => {
-      modal.querySelector(`#val-${e.target.dataset.id}`).textContent = e.target.value;
-      presetSelect.value = 'custom';
-      presetDesc.textContent = 'スライダーを手動で調整中...';
-    });
-  });
-
-  // プリセットを選んだら、スライダーの値を一斉に自動変更（スナップ）する
-  presetSelect.addEventListener('change', (e) => {
-    const presetKey = e.target.value;
-    if (presetKey === 'custom') return;
-    const pData = DIRECTOR_PRESETS[presetKey];
-    presetDesc.textContent = pData.description;
-    sliders.forEach(slider => {
-      const id = slider.dataset.id;
-      slider.value = pData.params[id];
-      modal.querySelector(`#val-${id}`).textContent = slider.value;
-    });
-  });
-
   const closeModal = () => modal.remove();
   closeBtn.onclick = closeModal;
   cancelBtn.onclick = closeModal;
@@ -3062,12 +2949,6 @@ saveBtn.onclick = async () => {
     const promptText = modal.querySelector('#story-prompt-input').value.trim();
     const tagsText = modal.querySelector('#story-tags-input').value.trim();
     
-    // ★ スライダーの値をごっそり取得してJSON化
-    const directorSettings = {};
-    modal.querySelectorAll('.director-slider').forEach(slider => {
-      directorSettings[slider.dataset.id] = parseInt(slider.value, 10);
-    });
-
     try {
       let avatarAssetId = currentStory.protagonist?.avatarAssetId || '';
       if (newAvatarBlob) {
@@ -3084,9 +2965,6 @@ saveBtn.onclick = async () => {
       currentStory.storytellerPrompt = promptText;
       currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
       currentStory.characters = buildStoryCharacterRefs(currentStory, await db.getCharacters());
-      
-      // ★ 保存（前回のmomentumやworldToneは廃止し、これに統合）
-      currentStory.directorSettings = directorSettings;
 
       await db.saveStory(currentStory);
       const updatedStories = await db.getStories();

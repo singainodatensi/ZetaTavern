@@ -306,7 +306,6 @@ ZetaTavern は、単なるチャット UI ではありません。
 - `storytellerPrompt`
 - `worldPrompt`
 - `tags[]`
-- `directorSettings`
 - `protagonist`
 - `characters[]`
 - `messages[]`
@@ -314,6 +313,10 @@ ZetaTavern は、単なるチャット UI ではありません。
 - `relationshipMemory`
 - `session_lore`
 - `lore_candidates`
+
+ストーリーの雰囲気、ジャンル、展開速度、恋愛濃度などは、個別スライダーではなく `worldPrompt` と `storytellerPrompt` に文章で書きます。これにより、AIは世界観設定を中心にテイストを判断します。
+
+`tags[]` に `テスト` または `test` が含まれるストーリーは、動作確認用のテストモードとして扱われます。この場合、AI はストーリーテラーではなく通常の対話型AIとして振る舞い、シナリオ本文、キャラクター台詞、選択肢、セッションロア更新、ストーリープラン更新を原則行いません。エラー報告や検索テストをしやすくするための例外モードです。
 
 ### キャラクターライブラリとストーリー内キャラの違い
 

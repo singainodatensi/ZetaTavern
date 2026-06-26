@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260625d';
+import { getSetting, saveSetting } from './db.js?v=20260626c';
 
 // ============================================================
 // 定数

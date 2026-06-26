@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260625d';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260625d';
-import * as dropbox from './dropbox.js?v=20260625d';
+import * as ui from './ui.js?v=20260626c';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260626c';
+import * as dropbox from './dropbox.js?v=20260626c';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -2431,8 +2431,6 @@ async function createNewStory() {
     storytellerPrompt: '', // ★デフォルトの長い指示はコアに移動したため空でOK
     worldPrompt: DEFAULT_WORLD_PROMPT,
     tags: [],
-    // ★ プリセットデータの初期値を丸ごとセットする（デフォルトはラブコメ）
-    directorSettings: { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 },
     protagonist: {
       name: '主人公',
       avatarAssetId: '',

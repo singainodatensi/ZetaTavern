@@ -19,6 +19,16 @@ function normalizeLoreKey(value) {
   return (value || '').trim().toLowerCase();
 }
 
+function hasStoryTag(story, target) {
+  const normalizedTarget = normalizeLoreKey(target);
+  if (!normalizedTarget || !Array.isArray(story?.tags)) return false;
+  return story.tags.some(tag => normalizeLoreKey(tag) === normalizedTarget);
+}
+
+function isTestConversationMode(story) {
+  return hasStoryTag(story, 'テスト') || hasStoryTag(story, 'test');
+}
+
 function isCharacterInFranchise(character, franchise) {
   const normalizedFranchise = normalizeLoreKey(franchise);
   if (!normalizedFranchise) return true;
@@ -415,7 +425,8 @@ const PROACTIVE_REFERENCE_STOPWORDS = new Set([
   '講義', '授業', '自宅', '家', '部屋', '学校', '先生', '好き', '恋愛', '放課後',
   '時間', '今日', '明日', '昨日', '仕事', '生活', '会場', '現場',
   '典型', '反応', '描写', '際', '協力者', '執着心', '正体', '疑い', 'ライバル',
-  '結構', '検索', 'クエリ', '概要', '補足'
+  '結構', '検索', 'クエリ', '概要', '補足', 'テスト', '実験', '検索機能',
+  'セッションロア', '更新', '見た', 'Tavily', '検索エンジン', '設定', 'はず'
 ]);
 
 const KNOWN_WORLD_SEARCH_TERMS = new Set([
@@ -1390,6 +1401,57 @@ function buildFocusedSearchQuery(topic, searchContext, extraTerms = []) {
   return [focusedTopic, ...extras, context].filter(Boolean).join(' ').trim();
 }
 
+function isMetaSearchTestQuery(query) {
+  const value = String(query || '').trim();
+  if (!value) return false;
+  return /(検索クエリ|検索機能|検索エンジン|セッションロア|Tavily|テスト|実験|デバッグ|設定になっている|使えるはず|ローカル)/i.test(value);
+}
+
+function normalizeSearchWebQuery(rawQuery, story, franchise) {
+  const source = String(rawQuery || '')
+    .replace(/検索クエリ[:：]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!source) return { query: '', rejected: true, reason: 'empty' };
+
+  const searchContext = String(franchise || story?.franchiseContext || story?.franchise || '').trim();
+  const scopedAnchors = collectStoryScopedSearchAnchors(story, source);
+  const knownWorldTerms = collectKnownWorldSearchTerms(source);
+  const extractedTerms = extractReferenceCandidatesFromText(source);
+  const candidateTerms = filterSearchPlanningTerms([
+    ...scopedAnchors,
+    ...knownWorldTerms,
+    ...extractedTerms
+  ]).filter(term => term !== normalizeLoreEntryName(searchContext));
+
+  const hasUsefulAnchor = candidateTerms.some(term =>
+    isLikelyTitleLikeSearchTerm(term) ||
+    KNOWN_WORLD_SEARCH_TERMS.has(term) ||
+    scopedAnchors.includes(term) ||
+    normalizeLoreEntryName(term).length >= 4
+  );
+
+  if (isMetaSearchTestQuery(source) && !hasUsefulAnchor) {
+    return { query: '', rejected: true, reason: 'meta_test_query' };
+  }
+
+  if (source.length > 45 && candidateTerms.length > 0) {
+    const query = buildFocusedSearchQuery(candidateTerms[0], searchContext, candidateTerms.slice(1));
+    return { query, rejected: !query, reason: query ? 'normalized_long_query' : 'no_focused_query' };
+  }
+
+  if (candidateTerms.length > 0 && (isMetaSearchTestQuery(source) || source.length > 28)) {
+    const query = buildFocusedSearchQuery(candidateTerms[0], searchContext, candidateTerms.slice(1));
+    return { query, rejected: !query, reason: query ? 'normalized_candidate_query' : 'no_focused_query' };
+  }
+
+  const cleaned = cleanSearchPlanningTerm(source);
+  if (!cleaned || isLikelyGenericSearchTerm(cleaned)) {
+    return { query: '', rejected: true, reason: 'generic_query' };
+  }
+  return { query: cleaned, rejected: false, reason: 'as_is' };
+}
+
 function collectStoryScopedSearchAnchors(story, text) {
   const source = String(text || '');
   if (!source || !story) return [];
@@ -1843,18 +1905,37 @@ async function applyWorldLoreUpdate(args, story) {
  */
 export async function buildSystemInstruction(story, options = {}) {
   if (!story) return '';
-  const allCharacters = await getCharactersList();
   const webSearchEnabled = options.googleSearchEnabled === true;
   const gemmaThinkEnabled = options.gemmaThinkEnabled === true;
 
-  // ★ momentum と worldTone を取り出すように追加
-  const { storytellerPrompt, worldPrompt, protagonist, characterMemory, relationshipMemory, momentum, worldTone } = story;
+  const { storytellerPrompt, worldPrompt, protagonist, characterMemory, relationshipMemory } = story;
+  if (isTestConversationMode(story)) {
+    let instruction = `# 役割\n`;
+    instruction += `あなたはZetaTavernの動作確認を支援する通常の対話型AIです。\n`;
+    instruction += `現在のストーリーには「テスト」タグが付いています。この場合、ゲームマスターやストーリーテラーとして物語を進行せず、ユーザーの質問、検証、エラー報告、ログ確認に直接答えてください。\n\n`;
+    instruction += `【テストモードのルール】\n`;
+    instruction += `- シナリオ、地の文、キャラクター台詞、選択肢A/B/Cを生成しない。\n`;
+    instruction += `- ユーザーの不具合報告、ログ、エラーメッセージ、設定確認に対して、通常の対話型AIとして簡潔に回答する。\n`;
+    instruction += `- 推測と確認済みの事実を分けて説明する。原因が複数考えられる場合は、可能性の高い順に述べる。\n`;
+    instruction += `- Web検索が必要な場合は search_web を使えることがある。検索に失敗した場合は、失敗理由や代替確認方法を隠さず説明する。\n`;
+    instruction += `- セッションロア、ストーリープラン、ワールドロア、キャラクター設定の更新は行わない。ユーザーが明示的に求めた場合も、まず提案として説明する。\n`;
+    instruction += `- 返答は日本語で行う。\n\n`;
+    instruction += `【現在のテスト対象】\n`;
+    instruction += `・ストーリー名: ${story.title || story.name || '未設定'}\n`;
+    instruction += `・タグ: ${(Array.isArray(story.tags) && story.tags.length > 0) ? story.tags.join(', ') : 'なし'}\n`;
+    if (webSearchEnabled) {
+      instruction += `・Web検索: 利用可能\n`;
+    }
+    return instruction;
+  }
+
+  const allCharacters = await getCharactersList();
   const showChoices = getState().showChoices;
 
   // 1. Core Role and Instructions (固定のエンジン哲学)
   let instruction = `# 役割\n`;
   instruction += `あなたは卓越したゲームマスターであり、物語の演出家です。\n`;
-  instruction += `以下の【GM哲学】、【演出モジュール】、および登録された【登場人物】に従い、インタラクティブな群像劇を展開してください。\n\n`;
+  instruction += `以下の【GM哲学】、【世界観設定】、【追加のローカルルール】、および登録された【登場人物】に従い、インタラクティブな群像劇を展開してください。\n\n`;
 
   instruction += `【出力形式（厳守・最優先）】\n`;
   instruction += `- プレイヤーに見せるのは**日本語の物語本文**（と選択肢）だけ。メタな思考過程や英語は一切出力しない。\n`;
@@ -1933,68 +2014,6 @@ export async function buildSystemInstruction(story, options = {}) {
     instruction += `- ユーザーが明示的に聞いていなくても、場面の整合性や作品らしさに必要なら検索してよい。\n`;
     instruction += `- ただし、同じ主題をむやみに繰り返し検索せず、検索メモとローカル参照を優先して使うこと。\n\n`;
   }
-  // === 新設：AIディレクターモジュール（パラメータの翻訳） ===
-  const curSettings = story.directorSettings || { momentum: 40, autonomy: 80, worldTone: 10, backgroundTension: 0, romanticVisibility: 20, relationshipDrift: 60, intrusionRate: 0 };
-
-  instruction += `【演出モジュール（現在のセッション設定）】\n`;
-
-  // 1. Momentum (展開の推進力)
-  instruction += `■ 展開の推進力: `;
-  if (curSettings.momentum >= 70) {
-    instruction += `[劇的・能動的] AIの裁量で積極的にアクシデント、ハプニング、対立を発生させ、物語を停滞させずユーザーに行動を迫ること。\n`;
-  } else if (curSettings.momentum <= 30) {
-    instruction += `[日常・受動的] ユーザーの行動を待ち、日常や会話の解像度を上げることに注力。AIから急激な場面転換や事件は起こさないこと。\n`;
-  } else {
-    instruction += `[標準的] 基本はユーザーの行動に応じるが、物語が完全に停滞した時のみ、軽い変化やイベントを起こすこと。\n`;
-  }
-
-  // 2. World Tone (世界の温度)
-  instruction += `■ 世界の温度: `;
-  if (curSettings.worldTone <= 30) {
-    instruction += `[優しい・甘め] NPCは基本的に好意的・寛容であり、失敗しても致命的な結果にはならない。安心感を与える空気感を維持すること。\n`;
-  } else if (curSettings.worldTone >= 70) {
-    instruction += `[シビア・残酷] 世界はユーザーに冷酷である。NPCの裏切り、理不尽な暴力、致命的な失敗が起こり得る。甘い選択には厳しい代償で応じること。\n`;
-  } else {
-    instruction += `[現実的] 現実的な因果関係。好意には好意で、敵対には敵対で世界が妥当なリアクションを返すこと。\n`;
-  }
-
-  // 3. Autonomy (NPCの自律性)
-  instruction += `■ NPCの自律性: `;
-  if (curSettings.autonomy >= 70) {
-    instruction += `[独立した群像劇] NPCは主人公の指示待ちにならず、独自の行動原理で動く。NPC同士の会話、意見の対立、主人公の知らない場所での行動も積極的に描くこと。\n`;
-  } else if (curSettings.autonomy <= 30) {
-    instruction += `[主人公フォーカス] NPCは主に主人公に向けてアクションを行い、主人公の行動に対するリアクションを中心に描写すること。\n`;
-  } else {
-    instruction += `[標準的] 基本は主人公との関係を中心に描くが、時折NPC独自の意思や行動も見せること。\n`;
-  }
-
-  // 4. Background Tension (不穏さ)
-  if (curSettings.backgroundTension >= 70) {
-    instruction += `■ 不穏さ: 画面の端々に、不穏な空気、見えない悪意、あるいは説明のつかない違和感を常に漂わせること。\n`;
-  } else if (curSettings.backgroundTension <= 30) {
-    instruction += `■ 不穏さ: 緊迫感はなく、徹底的に平和で安心できる空気感をベースとすること。\n`;
-  }
-
-  // 5. Romantic Visibility (恋愛・好意の露出)
-  instruction += `■ 恋愛・好意の露出: `;
-  if (curSettings.romanticVisibility <= 30) {
-    instruction += `[秘匿・行間] 好意や恋愛感情は直接言葉に出さず、視線の泳ぎ、僅かな焦り、距離感の躊躇いなど、秘匿された感情として繊細に描写すること。\n`;
-  } else if (curSettings.romanticVisibility >= 70) {
-    instruction += `[直接的・露骨] 好意や感情は隠さず、直接的な言葉や大胆なスキンシップとして明確に表現すること。\n`;
-  } else {
-    instruction += `[自然な表現] 状況や親密度に応じて、自然な形で好意や感情を表現すること。\n`;
-  }
-
-  // 6. Relationship Drift (関係性の変動)
-  if (curSettings.relationshipDrift >= 70) {
-    instruction += `■ 関係性の変動: キャラクター同士の好感度や信頼関係は固定ではない。ちょっとしたすれ違いで疑心暗鬼になったり急接近したりと、関係性をダイナミックに揺さぶること。\n`;
-  }
-
-  // 7. Intrusion Rate (非日常の侵入)
-  if (curSettings.intrusionRate >= 70) {
-    instruction += `■ 非日常の侵入: 平和な日常描写の最中であっても、唐突に非日常（敵の襲撃、異変、事件のトリガー）を侵入させ、空気を一変させること。\n`;
-  }
-  instruction += `\n`;
   // 既存のストーリーテラープロンプト（ユーザーが書いたローカルルール）
   if (storytellerPrompt) {
     instruction += `【追加のローカルルール（独自設定）】\n${storytellerPrompt}\n\n`;
@@ -2904,12 +2923,35 @@ async function maybePrimeStorySearchMemory(story, selectedMessages = [], usageAc
   return { result, plan };
 }
 
+function isNoisyTavilyResult(item, query, franchise) {
+  const title = String(item?.title || '').trim();
+  const content = String(item?.content || '').trim();
+  const url = String(item?.url || '').trim();
+  const combined = `${title}\n${content}\n${url}`;
+  const queryTerms = filterSearchPlanningTerms(extractReferenceCandidatesFromText(query));
+  const hasSpecificQueryTerm = queryTerms.some(term =>
+    normalizeLoreEntryName(term).length >= 3 && combined.includes(term)
+  );
+
+  if (/ChatGPT|テスト|ベータテスト|体験記事|語りあうテスト/i.test(combined)) return true;
+  if (/note\.com|ameblo\.jp|chiebukuro|知恵袋|5ch|2ch|reddit/i.test(url)) return true;
+  if (/感想|レビュー|考察|妄想|二次創作|SS|小説を書/i.test(title) && !hasSpecificQueryTerm) return true;
+  if (/Prime Video|Netflix|Hulu|U-NEXT|Disney\+|百度百科/i.test(combined) && !hasSpecificQueryTerm) return true;
+  if (franchise && combined.includes(franchise) && /(作品|シリーズ|アニメ|ライトノベル|配信|発売|商品|おもちゃ)/.test(combined) && !hasSpecificQueryTerm) {
+    return true;
+  }
+  return false;
+}
+
 function buildTavilySummary(payload, query, franchise) {
   const answer = String(payload?.answer || '').trim();
-  const results = Array.isArray(payload?.results) ? payload.results.slice(0, 3) : [];
+  const rawResults = Array.isArray(payload?.results) ? payload.results : [];
+  const results = rawResults
+    .filter(item => !isNoisyTavilyResult(item, query, franchise))
+    .slice(0, 3);
   const lines = [];
 
-  if (answer) {
+  if (answer && results.length > 0 && !isLowValueSearchSummary(answer, query, franchise)) {
     lines.push(`概要: ${answer}`);
   } else if (results.length > 0) {
     const lead = [String(results[0]?.title || '').trim(), String(results[0]?.content || '').trim()]
@@ -2919,8 +2961,6 @@ function buildTavilySummary(payload, query, franchise) {
     if (lead) {
       lines.push(`概要: ${lead}`);
     }
-  } else {
-    lines.push(`概要: ${[query, franchise].filter(Boolean).join(' / ')}`);
   }
 
   if (results.length > 0) {
@@ -3200,9 +3240,11 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
-  const query = String(args?.query || '').trim();
+  const rawQuery = String(args?.query || '').trim();
   const purpose = String(args?.purpose || '').trim();
   const franchise = String(args?.franchise || story?.franchise || '').trim();
+  const normalizedQuery = normalizeSearchWebQuery(rawQuery, story, franchise);
+  const query = normalizedQuery.query;
   const provider = normalizeWebSearchProvider(appState.webSearchProvider);
   const cacheKey = JSON.stringify({
     provider,
@@ -3215,7 +3257,14 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
     return { found: false, query, message: 'APIキーが設定されていません。' };
   }
   if (!query) {
-    return { found: false, query: '', message: 'query is required' };
+    return {
+      found: false,
+      query: rawQuery,
+      normalizedQuery: '',
+      rejected: true,
+      reason: normalizedQuery.reason || 'query is required',
+      message: '検索クエリがメタ発言または一般語だけだったため、Web検索を実行しませんでした。'
+    };
   }
   if (provider === 'off') {
     return {
@@ -3328,6 +3377,7 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
     ...result,
     found: result?.found === true,
     query,
+    rawQuery,
     purpose,
     franchise,
     provider: result?.provider || provider
@@ -3797,11 +3847,14 @@ export async function generateStoryResponse(story) {
   const configuredHistoryTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
   const effectiveHistoryTurnLimit = historyCompressionEnabled ? configuredHistoryTurnLimit : 0;
   const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], effectiveHistoryTurnLimit);
+  const testConversationMode = isTestConversationMode(story);
   usageAccumulator.historyCompressionEnabled = historyCompressionEnabled;
   usageAccumulator.historyTurnLimit = effectiveHistoryTurnLimit;
   usageAccumulator.omittedTurns = omittedTurns;
 
-  await maybePrimeStorySearchMemory(story, selectedMessages, usageAccumulator);
+  if (!testConversationMode) {
+    await maybePrimeStorySearchMemory(story, selectedMessages, usageAccumulator);
+  }
 
   const systemInstruction = await buildSystemInstruction(story, {
     omittedTurns,
@@ -3809,7 +3862,7 @@ export async function generateStoryResponse(story) {
     googleSearchEnabled,
     gemmaThinkEnabled: normalizeGemmaThinkingEnabled(appState.gemmaThinkingEnabled)
   });
-  const shouldOfferGoogleSearchForTurn = isServerSideGoogleSearchEnabledForTurn(story, systemInstruction, modelName);
+  const shouldOfferGoogleSearchForTurn = !testConversationMode && isServerSideGoogleSearchEnabledForTurn(story, systemInstruction, modelName);
   usageAccumulator.googleSearchAvailable = googleSearchEnabled;
   let runtimeSystemInstruction = systemInstruction;
 
@@ -4035,12 +4088,16 @@ export async function generateStoryResponse(story) {
         }
       }];
 
+      const activeFunctionDeclarations = testConversationMode
+        ? functionDeclarations.filter(fn => fn.name === 'search_web')
+        : functionDeclarations;
+
       const tools = [];
       if (shouldOfferGoogleSearchForTurn) {
         tools.push({ googleSearch: {} });
       }
-      if (functionDeclarations.length > 0) {
-        tools.push({ functionDeclarations });
+      if (activeFunctionDeclarations.length > 0) {
+        tools.push({ functionDeclarations: activeFunctionDeclarations });
       }
 
       if (shouldOfferGoogleSearchForTurn) {
