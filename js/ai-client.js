@@ -426,7 +426,9 @@ const PROACTIVE_REFERENCE_STOPWORDS = new Set([
   '時間', '今日', '明日', '昨日', '仕事', '生活', '会場', '現場',
   '典型', '反応', '描写', '際', '協力者', '執着心', '正体', '疑い', 'ライバル',
   '結構', '検索', 'クエリ', '概要', '補足', 'テスト', '実験', '検索機能',
-  'セッションロア', '更新', '見た', 'Tavily', '検索エンジン', '設定', 'はず'
+  'セッションロア', '更新', '見た', 'Tavily', '検索エンジン', '設定', 'はず',
+  'このまま', '強気', '攻め', '攻め続け', '反撃', 'チャンス', '見抜き',
+  '見抜く', '突く', '狙う', '狙い', 'アガリ'
 ]);
 
 const KNOWN_WORLD_SEARCH_TERMS = new Set([
@@ -1314,14 +1316,36 @@ function extractReferenceCandidatesFromText(text) {
     const word = cleanSearchPlanningTerm(normalizeLoreEntryName(rawWord)).trim();
     if (!word || word.length < 2) continue;
     if (PROACTIVE_REFERENCE_STOPWORDS.has(word)) continue;
+    if (isLikelyActionSearchPhrase(word)) continue;
     words.add(word);
   }
 
   return Array.from(words);
 }
 
+function stripChoiceSelectionPrefix(value) {
+  return String(value || '').replace(/^\s*(?:[-*・►▶▷>]\s*)?[A-CＡ-Ｃ]\s*[\.\):：）．、]\s*/, '').trim();
+}
+
+function isChoiceSelectionText(text) {
+  return /^\s*(?:[-*・►▶▷>]\s*)?[A-CＡ-Ｃ]\s*[\.\):：）．、]\s*\S+/.test(String(text || ''));
+}
+
+function isLikelyActionSearchPhrase(term) {
+  const value = stripChoiceSelectionPrefix(normalizeLoreEntryName(term)).trim();
+  if (!value) return false;
+  if (value.length >= 10 && /(?:を|が|は|に|で|へ|と|から|まで|より|なら|ので|ため)/.test(value)) return true;
+  return isNarrativeActionSearchText(value);
+}
+
+function isNarrativeActionSearchText(term) {
+  const value = stripChoiceSelectionPrefix(normalizeLoreEntryName(term)).trim();
+  if (!value) return false;
+  return /(?:このまま|強気|攻め続け|攻める|見抜き|見抜く|反撃|チャンス|突く|狙う|狙い|アガリ|様子を見る|話しかけ|聞いてみ|向かう|行ってみ|続ける|試す|判断したい|確認したい|助ける|守る|追いかける|追う|探る|誘う|断る|受ける|待つ|見る|選ぶ|報告する)/.test(value);
+}
+
 function cleanSearchPlanningTerm(term) {
-  let value = normalizeLoreEntryName(term).trim();
+  let value = stripChoiceSelectionPrefix(normalizeLoreEntryName(term)).trim();
   if (!value) return '';
   value = value
     .replace(/[「」『』【】]/g, '')
@@ -1362,7 +1386,24 @@ function collectKnownWorldSearchTerms(text) {
 }
 
 function filterSearchPlanningTerms(terms = []) {
-  return uniqueNonEmpty(terms).filter(term => !isLikelyGenericSearchTerm(term));
+  return uniqueNonEmpty(terms).filter(term => !isLikelyGenericSearchTerm(term) && !isLikelyActionSearchPhrase(term));
+}
+
+function isStoryContextOnlySearchTerm(term, story, searchContext) {
+  const normalizedTerm = normalizeLoreEntryName(term);
+  if (!normalizedTerm) return true;
+  const contextValues = [
+    searchContext,
+    story?.franchise,
+    story?.franchiseContext,
+    ...(Array.isArray(story?.tags) ? story.tags : [])
+  ].map(value => normalizeLoreEntryName(value)).filter(Boolean);
+
+  return contextValues.some(context =>
+    normalizedTerm === context ||
+    context.includes(normalizedTerm) ||
+    normalizedTerm.includes(context)
+  );
 }
 
 function normalizeSearchPlanTopic(rawTopic, story, searchContext) {
@@ -1379,7 +1420,7 @@ function normalizeSearchPlanTopic(rawTopic, story, searchContext) {
     ...extractReferenceCandidatesFromText(value)
   ]).filter(term => {
     const normalized = normalizeLoreEntryName(term);
-    return normalized && normalized !== normalizeLoreEntryName(searchContext);
+    return normalized && !isStoryContextOnlySearchTerm(normalized, story, searchContext);
   });
 
   if (candidates.length > 0) {
@@ -1408,10 +1449,10 @@ function isMetaSearchTestQuery(query) {
 }
 
 function normalizeSearchWebQuery(rawQuery, story, franchise) {
-  const source = String(rawQuery || '')
+  const source = stripChoiceSelectionPrefix(String(rawQuery || '')
     .replace(/検索クエリ[:：]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim());
   if (!source) return { query: '', rejected: true, reason: 'empty' };
 
   const searchContext = String(franchise || story?.franchiseContext || story?.franchise || '').trim();
@@ -1422,7 +1463,7 @@ function normalizeSearchWebQuery(rawQuery, story, franchise) {
     ...scopedAnchors,
     ...knownWorldTerms,
     ...extractedTerms
-  ]).filter(term => term !== normalizeLoreEntryName(searchContext));
+  ]).filter(term => !isStoryContextOnlySearchTerm(term, story, searchContext));
 
   const hasUsefulAnchor = candidateTerms.some(term =>
     isLikelyTitleLikeSearchTerm(term) ||
@@ -1433,6 +1474,10 @@ function normalizeSearchWebQuery(rawQuery, story, franchise) {
 
   if (isMetaSearchTestQuery(source) && !hasUsefulAnchor) {
     return { query: '', rejected: true, reason: 'meta_test_query' };
+  }
+
+  if (isNarrativeActionSearchText(source)) {
+    return { query: '', rejected: true, reason: 'action_choice_query' };
   }
 
   if (source.length > 45 && candidateTerms.length > 0) {
@@ -2003,6 +2048,7 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- 汎用的な日常のつなぎで、固有設定を出す必要がない場合\n`;
   instruction += `【検索語の作り方】\n`;
   instruction += `- ユーザーの入力文をそのまま検索してはいけない。\n`;
+  instruction += `- ユーザーがA/B/Cの選択肢を選んだだけの入力は検索トリガーにしない。選択肢文をそのまま search_web の query にしてはいけない。\n`;
   instruction += `- 一般名詞だけをそのまま調べず、作品名・人物名・所属・目的を含む具体的な検索語に変換すること。\n`;
   instruction += `- 悪い例: 「マジ アーカイブ VTuber」 / 「ゴミ 犯罪者 Re:ゼロ」\n`;
   instruction += `- 良い例: 「城ヶ崎美嘉 活動内容 アイドルマスターシンデレラガールズ」 / 「プリシラ陣営 関係者 Re:ゼロから始める異世界生活」\n\n`;
@@ -2694,6 +2740,7 @@ ${searchMemory || 'なし'}
 - 原作キャラクターを新規登場させる時は、その人物だけでなく、所属、陣営、家族、相棒、同行しやすい人物、拠点まで確認対象にする。
 - 新しい場所・組織・制度・イベントを扱う時は、その作品固有の舞台情報を優先して確認する。汎用設定の代用品で埋めない。
 - ユーザーが目的を持つ行動を宣言した時は、その行動文をそのまま検索語にせず、「次の場面に必要な原作知識」を逆算して検索語を作る。
+- 最新のユーザー入力が「A.」「B.」「C.」で始まる選択肢選択の場合、それ自体を検索語にしてはいけない。選択肢の行動文だけなら needsSearch は false にする。
 - 原作キャラ同士の関係が展開に影響しそうなら、単体情報ではなく、周辺人物との関係、立場、利害、同席しやすさまで確認対象にする。
 - 作品固有の制度・組織・拠点・依頼文化・陣営・同行者・敵対勢力・原作イベント進行を描くと場面が豊かになるなら検索候補にする。
 - ユーザーが明示的に質問していなくても、次の展開の整合性や作品らしさに必要なら検索してよい。
@@ -2702,7 +2749,8 @@ ${searchMemory || 'なし'}
 - 一般名詞だけをそのまま調べるのではなく、作品名・人物名・所属・目的を含む具体的な検索語にする。
 - 人物なら「同行者」「所属」「拠点」、制度なら「依頼」「商会」「騎士団」など、次の場面に必要な観点を query に含める。
 - 「あの名作ゲーム」「例の新作」「協力者を突き止める際の執着心」のような説明文・代名詞を query にしてはいけない。必ず短い固有名詞または検索可能な名詞句へ圧縮する。
-- 悪い検索語の例: 「マジ アーカイブ VTuber」「ゴミ 犯罪者 Re:ゼロ」
+- 「優希の打ち筋を見抜き反撃のチャンスを突く」「このまま強気に攻め続ける」のような選択肢由来の行動文は query にしてはいけない。
+- 悪い検索語の例: 「マジ アーカイブ VTuber」「ゴミ 犯罪者 Re:ゼロ」「優希の打ち筋の を見抜き 反撃のチャンスを突く 咲-Saki-」
 - 良い検索語の例: 「城ヶ崎美嘉 活動内容 アイドルマスターシンデレラガールズ」「プリシラ陣営 関係者 Re:ゼロから始める異世界生活」「星くず☆うぃっちメルル 俺の妹がこんなに可愛いわけがない」
 
 JSONのみを返してください:
@@ -2770,6 +2818,9 @@ function buildExternalProviderSearchPlan(story, selectedMessages = []) {
   }
 
   if (!latestText) return null;
+  if (isChoiceSelectionText(latestText)) {
+    return null;
+  }
 
   const scopedAnchors = collectStoryScopedSearchAnchors(story, latestText);
   const knownWorldTerms = collectKnownWorldSearchTerms(latestText);
@@ -2777,7 +2828,7 @@ function buildExternalProviderSearchPlan(story, selectedMessages = []) {
     ...scopedAnchors,
     ...knownWorldTerms,
     ...extractReferenceCandidatesFromText(latestText).filter(Boolean)
-  ]);
+  ]).filter(term => !isStoryContextOnlySearchTerm(term, story, searchContext));
   const searchHintPattern = /(教えて|とは|って|誰|どこ|何|なに|どういう|詳細|説明|調べ|検索|依頼|護衛|討伐|商会|騎士団|屋敷|学園|学校|王都|王選|陣営|魔女教|精霊|加護|白鯨|ギルド)/;
   const hasStrongAnchor = scopedAnchors.length > 0 || knownWorldTerms.length > 0;
   const shouldSearch = (candidateTerms.length > 0 && (
@@ -2928,10 +2979,14 @@ function isNoisyTavilyResult(item, query, franchise) {
   const content = String(item?.content || '').trim();
   const url = String(item?.url || '').trim();
   const combined = `${title}\n${content}\n${url}`;
-  const queryTerms = filterSearchPlanningTerms(extractReferenceCandidatesFromText(query));
-  const hasSpecificQueryTerm = queryTerms.some(term =>
-    normalizeLoreEntryName(term).length >= 3 && combined.includes(term)
-  );
+  const primaryTerms = extractPrimarySearchTargetTerms(query, franchise);
+  const hasPrimaryTerm = primaryTerms.length === 0 || primaryTerms.some(term => textContainsSearchTerm(combined, term));
+  const queryTerms = primaryTerms.length > 0
+    ? primaryTerms
+    : filterSearchPlanningTerms(extractReferenceCandidatesFromText(query));
+  const hasSpecificQueryTerm = queryTerms.some(term => textContainsSearchTerm(combined, term));
+
+  if (!hasPrimaryTerm) return true;
 
   if (/ChatGPT|テスト|ベータテスト|体験記事|語りあうテスト/i.test(combined)) return true;
   if (/note\.com|ameblo\.jp|chiebukuro|知恵袋|5ch|2ch|reddit/i.test(url)) return true;
@@ -2941,6 +2996,40 @@ function isNoisyTavilyResult(item, query, franchise) {
     return true;
   }
   return false;
+}
+
+function isSearchQueryModifierTerm(term) {
+  const value = normalizeLoreEntryName(term);
+  return /^(性格|特徴|能力|口調|プロフィール|紹介|解説|詳細|設定|関係|関係性|所属|学校|役割|戦術|打ち筋|得意|弱点|名言|台詞|セリフ|声優|画像|wiki|公式)$/.test(value);
+}
+
+function textContainsSearchTerm(text, term) {
+  const source = normalizeLoreEntryName(text);
+  const value = normalizeLoreEntryName(term);
+  if (!source || !value) return false;
+  if (source.includes(value)) return true;
+  if (/[\u4e00-\u9faf]{2,}/.test(value)) {
+    const kanjiParts = value.match(/[\u4e00-\u9faf]{2,}/g) || [];
+    if (kanjiParts.some(part => source.includes(part))) return true;
+  }
+  return false;
+}
+
+function extractPrimarySearchTargetTerms(query, franchise) {
+  const franchiseTerms = [
+    franchise,
+    ...extractReferenceCandidatesFromText(franchise)
+  ].map(term => normalizeLoreEntryName(term)).filter(Boolean);
+
+  return filterSearchPlanningTerms(extractReferenceCandidatesFromText(query))
+    .map(term => normalizeLoreEntryName(term))
+    .filter(term => term && !isSearchQueryModifierTerm(term))
+    .filter(term => !franchiseTerms.some(franchiseTerm =>
+      term === franchiseTerm ||
+      franchiseTerm.includes(term) ||
+      term.includes(franchiseTerm)
+    ))
+    .slice(0, 3);
 }
 
 function buildTavilySummary(payload, query, franchise) {
@@ -2983,10 +3072,12 @@ function buildTavilySummary(payload, query, franchise) {
 function isLowValueSearchSummary(text, query, franchise) {
   const value = String(text || '').trim();
   if (!value) return true;
-  const queryTerms = filterSearchPlanningTerms(extractReferenceCandidatesFromText(query));
-  const hasSpecificQueryTerm = queryTerms.some(term =>
-    normalizeLoreEntryName(term).length >= 3 && value.includes(term)
-  );
+  const primaryTerms = extractPrimarySearchTargetTerms(query, franchise);
+  const queryTerms = primaryTerms.length > 0
+    ? primaryTerms
+    : filterSearchPlanningTerms(extractReferenceCandidatesFromText(query));
+  const hasSpecificQueryTerm = queryTerms.some(term => textContainsSearchTerm(value, term));
+  if (primaryTerms.length > 0 && !hasSpecificQueryTerm) return true;
   const genericSourceOnly =
     /Wikipedia|Prime Video|百度百科|テレビアニメ|ライトノベル|著者|初登場/.test(value) &&
     !hasSpecificQueryTerm;
