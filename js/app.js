@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260627a';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260627a';
-import * as dropbox from './dropbox.js?v=20260627a';
+import * as ui from './ui.js?v=20260627d';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260627d';
+import * as dropbox from './dropbox.js?v=20260627d';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -1358,6 +1358,7 @@ async function loadConfigurations() {
   const key = await db.getSetting('api_key', '');
   const groqApiKey = await db.getSetting('groq_api_key', '');
   const tavilyApiKey = await db.getSetting('tavily_api_key', '');
+  const searxngUrl = await db.getSetting('searxng_url', '');
   let model = await db.getSetting('model_name', 'gemini-2.5-flash');
   if (provider === 'groq' && !isGroqModelName(model)) {
     model = DEFAULT_GROQ_MODEL_NAME;
@@ -1408,6 +1409,7 @@ async function loadConfigurations() {
     apiKey: key,
     groqApiKey,
     tavilyApiKey,
+    searxngUrl,
     modelName: model,
     searchModelName: searchModel,
     searchSynthesisModelName: searchSynthesisModel,
@@ -1439,6 +1441,7 @@ async function loadConfigurations() {
   const keyEl = document.getElementById('api-key-input');
   const groqKeyEl = document.getElementById('groq-api-key-input');
   const tavilyKeyEl = document.getElementById('tavily-api-key-input');
+  const searxngUrlEl = document.getElementById('searxng-url-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
   const searchSynthesisModelEl = document.getElementById('search-synthesis-model-name-select');
@@ -1464,6 +1467,7 @@ async function loadConfigurations() {
   if (keyEl) keyEl.value = key;
   if (groqKeyEl) groqKeyEl.value = groqApiKey || '';
   if (tavilyKeyEl) tavilyKeyEl.value = tavilyApiKey || '';
+  if (searxngUrlEl) searxngUrlEl.value = searxngUrl || '';
   if (choicesEl) choicesEl.checked = choices;
   if (autoscrollEl) autoscrollEl.checked = autoscroll;
   if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
@@ -1504,7 +1508,7 @@ async function loadConfigurations() {
   populateModelSelect(modelEl, normalizedCustomModels, { selectedValue: model });
   populateModelSelect(searchModelEl, normalizedCustomModels, {
     includeFollowOption: true,
-    followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
+    followOptionLabel: '使用モデルに追従',
     selectedValue: searchModel
   });
   populateModelSelect(searchSynthesisModelEl, normalizedCustomModels, {
@@ -1850,6 +1854,7 @@ async function bindEvents() {
   const searchModelEl = document.getElementById('search-model-name-select');
   const searchSynthesisModelEl = document.getElementById('search-synthesis-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
+  const searxngUrlEl = document.getElementById('searxng-url-input');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★自動スクロールDOM
   const customModelInput = document.getElementById('custom-model-input');
@@ -1912,6 +1917,13 @@ async function bindEvents() {
       const val = String(e.target.value || '').trim();
       updateState({ tavilyApiKey: val });
       db.saveSetting('tavily_api_key', val);
+    };
+  }
+  if (searxngUrlEl) {
+    searxngUrlEl.oninput = (e) => {
+      const val = String(e.target.value || '').trim();
+      updateState({ searxngUrl: val });
+      db.saveSetting('searxng_url', val);
     };
   }
   if (modelEl) {
@@ -2090,7 +2102,7 @@ async function bindEvents() {
       populateModelSelect(modelEl, normalizedCustomModels, { selectedValue: newModel });
       populateModelSelect(searchModelEl, normalizedCustomModels, {
         includeFollowOption: true,
-        followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
+        followOptionLabel: '使用モデルに追従',
         selectedValue: getState().searchModelName || ''
       });
       populateModelSelect(searchSynthesisModelEl, normalizedCustomModels, {
@@ -2152,7 +2164,7 @@ async function bindEvents() {
       });
       populateModelSelect(searchModelEl, customModels, {
         includeFollowOption: true,
-        followOptionLabel: '使用モデルに追従 (非Gemini時は Flash-Lite にフォールバック)',
+        followOptionLabel: '使用モデルに追従',
         selectedValue: updates.searchModelName !== undefined ? updates.searchModelName : getState().searchModelName
       });
       populateModelSelect(searchSynthesisModelEl, customModels, {

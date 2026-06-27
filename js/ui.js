@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260627a';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260627d';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 const blobUrlCache = new Map();
@@ -164,6 +164,7 @@ function formatSearchProviderLabel(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'google') return 'Google';
   if (normalized === 'tavily') return 'Tavily';
+  if (normalized === 'searxng') return 'SearXNG';
   if (normalized === 'duckduckgo') return 'DuckDuckGo';
   if (normalized === 'off') return 'OFF';
   return 'Auto';

@@ -89,7 +89,7 @@ const webSearchCooldownUntilByProvider = {
   google: 0,
   tavily: 0
 };
-const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['auto', 'tavily', 'google', 'duckduckgo', 'off']);
+const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['auto', 'tavily', 'searxng', 'google', 'duckduckgo', 'off']);
 
 function isGroqProvider(provider = '') {
   return String(provider || '').trim().toLowerCase() === 'groq';
@@ -103,13 +103,7 @@ function resolveGroqModelName(modelName = '') {
 function selectSearchCapableModel(modelName) {
   const requested = (modelName || '').trim();
   if (!requested) return DEFAULT_SEARCH_MODEL_NAME;
-
-  const normalized = requested.toLowerCase();
-  if (normalized.includes('gemini')) {
-    return requested;
-  }
-
-  return DEFAULT_SEARCH_MODEL_NAME;
+  return requested;
 }
 
 function resolveSearchModelName(appState) {
@@ -126,6 +120,7 @@ function normalizeWebSearchProvider(value) {
 function getWebSearchProviderLabel(value) {
   const normalized = normalizeWebSearchProvider(value);
   if (normalized === 'tavily') return 'Tavily';
+  if (normalized === 'searxng') return 'SearXNG';
   if (normalized === 'google') return 'Google';
   if (normalized === 'duckduckgo') return 'DuckDuckGo';
   if (normalized === 'off') return 'OFF';
@@ -2778,6 +2773,7 @@ JSONのみを返してください:
 function shouldUseExternalProviderPlanning(provider, tavilyApiKey = '') {
   const normalizedProvider = normalizeWebSearchProvider(provider);
   if (normalizedProvider === 'tavily') return true;
+  if (normalizedProvider === 'searxng') return true;
   if (normalizedProvider === 'duckduckgo') return true;
   if (normalizedProvider === 'auto' && String(tavilyApiKey || '').trim()) return true;
   return false;
@@ -2861,10 +2857,13 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
+  const searxngUrl = String(appState.searxngUrl || '').trim();
   const provider = normalizeWebSearchProvider(appState.webSearchProvider);
   if (provider === 'off') return null;
   const usesExternalProviderPlanning = shouldUseExternalProviderPlanning(provider, tavilyApiKey);
-  if (!apiKey && !usesExternalProviderPlanning) return null;
+  if (!apiKey) {
+    return usesExternalProviderPlanning ? buildExternalProviderSearchPlan(story, selectedMessages) : null;
+  }
 
   const hasFranchiseContext = Boolean(
     String(story?.franchise || '').trim() ||
@@ -2875,10 +2874,6 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
 
   const latestUserMessage = [...selectedMessages].reverse().find(message => message?.role === 'user');
   if (!latestUserMessage?.content) return null;
-
-  if (usesExternalProviderPlanning) {
-    return buildExternalProviderSearchPlan(story, selectedMessages);
-  }
 
   const modelName = resolveSearchModelName(appState);
   const prompt = buildSearchPlanningPrompt(story, selectedMessages);
@@ -2998,6 +2993,54 @@ function isNoisyTavilyResult(item, query, franchise) {
   return false;
 }
 
+function classifySearchSourceTrust(item = {}) {
+  const title = String(item?.title || '').trim();
+  const url = String(item?.url || '').trim();
+  const host = (() => {
+    try {
+      return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    } catch (_) {
+      return url.toLowerCase();
+    }
+  })();
+  const combined = `${title}\n${url}`.toLowerCase();
+
+  if (
+    /toei-anim\.co\.jp|toei\.co\.jp|asahi\.co\.jp|tv-asahi\.co\.jp|precure-web\.com|marv\.jp|bandai\.co\.jp|bandaicandy\.happinetonline\.com/.test(host) ||
+    /公式|official/.test(combined)
+  ) {
+    return { rank: 'A', label: '公式・一次情報' };
+  }
+  if (
+    /animatetimes\.com|natalie\.mu|oricon\.co\.jp|mantan-web\.jp|animeanime\.jp|famitsu\.com|4gamer\.net|dengekionline\.com|crunchyroll\.com|annict\.com|myanimelist\.net|anilist\.co/.test(host)
+  ) {
+    return { rank: 'B', label: '大手ニュース・DB' };
+  }
+  if (
+    /wikipedia\.org|fandom\.com|namu\.wiki|namuwiki|wiki|wikidb|atwiki|seesaawiki|monaca/i.test(host) ||
+    /wiki|ウィキ|ナムウィキ|fandom/i.test(combined)
+  ) {
+    return { rank: 'C', label: 'Wiki・コミュニティ' };
+  }
+  if (/note\.com|ameblo\.jp|blog|chiebukuro|知恵袋|5ch|2ch|reddit|x\.com|twitter\.com/.test(host)) {
+    return { rank: 'D', label: '個人・SNS・掲示板' };
+  }
+  return { rank: 'B', label: '一般Web情報' };
+}
+
+function summarizeSearchTrust(results = []) {
+  const counts = { A: 0, B: 0, C: 0, D: 0 };
+  for (const item of results) {
+    const trust = classifySearchSourceTrust(item);
+    if (counts[trust.rank] !== undefined) counts[trust.rank]++;
+  }
+  if (counts.A > 0) return { rank: 'A', label: '公式・一次情報あり', counts };
+  if (counts.B > 0) return { rank: 'B', label: '大手/一般Web情報中心', counts };
+  if (counts.C > 0) return { rank: 'C', label: 'Wiki・コミュニティ中心', counts };
+  if (counts.D > 0) return { rank: 'D', label: '個人・SNS・掲示板中心', counts };
+  return { rank: 'U', label: '信頼度未判定', counts };
+}
+
 function isSearchQueryModifierTerm(term) {
   const value = normalizeLoreEntryName(term);
   return /^(性格|特徴|能力|口調|プロフィール|紹介|解説|詳細|設定|関係|関係性|所属|学校|役割|戦術|打ち筋|得意|弱点|名言|台詞|セリフ|声優|画像|wiki|公式)$/.test(value);
@@ -3039,6 +3082,7 @@ function buildTavilySummary(payload, query, franchise) {
     .filter(item => !isNoisyTavilyResult(item, query, franchise))
     .slice(0, 3);
   const lines = [];
+  const trustSummary = summarizeSearchTrust(results);
 
   if (answer && results.length > 0 && !isLowValueSearchSummary(answer, query, franchise)) {
     lines.push(`概要: ${answer}`);
@@ -3053,20 +3097,44 @@ function buildTavilySummary(payload, query, franchise) {
   }
 
   if (results.length > 0) {
+    lines.push(`信頼度: ${trustSummary.rank} (${trustSummary.label})`);
+    if (trustSummary.rank === 'C' || trustSummary.rank === 'D' || trustSummary.rank === 'U') {
+      lines.push('注意: 公式・一次情報では未確認。物語で使う場合は暫定情報として扱い、公式設定として断定しない。');
+    }
     lines.push('補足:');
     for (const item of results) {
+      const trust = classifySearchSourceTrust(item);
       const snippet = [String(item?.title || '').trim(), String(item?.content || '').trim()]
         .filter(Boolean)
         .join(' - ')
         .replace(/\s+/g, ' ')
         .slice(0, 220);
       if (snippet) {
-        lines.push(`- ${snippet}`);
+        lines.push(`- [${trust.rank}:${trust.label}] ${snippet}`);
       }
     }
   }
 
   return lines.join('\n').trim().slice(0, 1400);
+}
+
+function buildTavilyRejectedMessage(payload, query, franchise, acceptedCount = 0) {
+  const rawResults = Array.isArray(payload?.results) ? payload.results : [];
+  const acceptedResults = rawResults.filter(item => !isNoisyTavilyResult(item, query, franchise));
+  const trustSummary = summarizeSearchTrust(acceptedResults);
+  const primaryTerms = extractPrimarySearchTargetTerms(query, franchise);
+  const targetText = primaryTerms.length > 0 ? `対象語「${primaryTerms.join(' / ')}」` : `検索語「${query}」`;
+  const titles = rawResults
+    .map(item => String(item?.title || '').trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  const titleText = titles.length > 0 ? ` 候補: ${titles.join(' / ')}` : '';
+  const trustText = acceptedCount > 0 ? ` 信頼度: ${trustSummary.rank} (${trustSummary.label})。` : '';
+
+  if (rawResults.length > 0) {
+    return `Tavily は ${rawResults.length} 件の候補を返しましたが、${targetText}に一致する採用候補は ${acceptedCount} 件でした。${trustText}誤情報混入を避けるため、ストーリー用メモには採用しません。${titleText}`;
+  }
+  return 'Tavily から検索候補が返りませんでした。';
 }
 
 function isLowValueSearchSummary(text, query, franchise) {
@@ -3129,7 +3197,28 @@ async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
 
   const payload = await response.json().catch(() => null);
   const text = buildTavilySummary(payload, query, franchise);
+  const rawResults = Array.isArray(payload?.results) ? payload.results : [];
+  const acceptedResults = rawResults.filter(item => !isNoisyTavilyResult(item, query, franchise));
+  const acceptedCount = acceptedResults.length;
+  const trustSummary = summarizeSearchTrust(acceptedResults);
   if (isLowValueSearchSummary(text, query, franchise)) {
+    if (text && acceptedCount > 0) {
+      return {
+        provider: 'tavily',
+        found: true,
+        status: 200,
+        modelName: '',
+        text: `${text}\n\n注記: Tavilyの検索結果は断片的です。採用候補 ${acceptedCount}/${rawResults.length} 件、信頼度 ${trustSummary.rank} (${trustSummary.label})。重要設定として使う前に追加確認してください。`,
+        groundingQueries: [],
+        candidateCount: rawResults.length,
+        acceptedCandidateCount: acceptedCount,
+        sourceTrustRank: trustSummary.rank,
+        sourceTrustLabel: trustSummary.label,
+        weakResult: true,
+        usageCredits: Number(payload?.usage?.credits || 0),
+        message: 'Tavily の結果は弱めですが、対象語に一致する候補があるため暫定メモとして採用しました。'
+      };
+    }
     return {
       provider: 'tavily',
       found: false,
@@ -3137,8 +3226,12 @@ async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
       modelName: '',
       text: '',
       groundingQueries: [],
+      candidateCount: rawResults.length,
+      acceptedCandidateCount: acceptedCount,
+      sourceTrustRank: trustSummary.rank,
+      sourceTrustLabel: trustSummary.label,
       usageCredits: Number(payload?.usage?.credits || 0),
-      message: '検索結果が作品概要や一般的なページに偏っており、ストーリー用メモとして十分ではありませんでした。'
+      message: buildTavilyRejectedMessage(payload, query, franchise, acceptedCount)
     };
   }
     return {
@@ -3148,8 +3241,126 @@ async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
       modelName: '',
       text,
     groundingQueries: [],
+    sourceTrustRank: trustSummary.rank,
+    sourceTrustLabel: trustSummary.label,
     usageCredits: Number(payload?.usage?.credits || 0),
     message: text ? '' : 'Tavily から十分な要約を取得できませんでした。'
+  };
+}
+
+function normalizeSearxngBaseUrl(value = '') {
+  const trimmed = String(value || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (!/^https?:\/\//i.test(trimmed)) return `https://${trimmed}`;
+  return trimmed;
+}
+
+function buildSearxngSummary(payload, query, franchise) {
+  const rawResults = Array.isArray(payload?.results) ? payload.results : [];
+  const results = rawResults
+    .map(item => ({
+      title: String(item?.title || '').trim(),
+      content: String(item?.content || item?.snippet || '').trim(),
+      url: String(item?.url || '').trim(),
+      engine: String(item?.engine || item?.engines?.[0] || '').trim()
+    }))
+    .filter(item => !isNoisyTavilyResult(item, query, franchise))
+    .slice(0, 4);
+  const trustSummary = summarizeSearchTrust(results);
+  const lines = [];
+
+  if (results.length > 0) {
+    const lead = [results[0].title, results[0].content]
+      .filter(Boolean)
+      .join(' - ')
+      .replace(/\s+/g, ' ')
+      .slice(0, 260);
+    if (lead) {
+      lines.push(`概要: ${lead}`);
+    }
+    lines.push(`信頼度: ${trustSummary.rank} (${trustSummary.label})`);
+    if (trustSummary.rank === 'C' || trustSummary.rank === 'D' || trustSummary.rank === 'U') {
+      lines.push('注意: 公式・一次情報では未確認。物語で使う場合は暫定情報として扱い、公式設定として断定しない。');
+    }
+    lines.push('補足:');
+    for (const item of results) {
+      const trust = classifySearchSourceTrust(item);
+      const engine = item.engine ? ` / ${item.engine}` : '';
+      const snippet = [item.title, item.content]
+        .filter(Boolean)
+        .join(' - ')
+        .replace(/\s+/g, ' ')
+        .slice(0, 220);
+      if (snippet) {
+        lines.push(`- [${trust.rank}:${trust.label}${engine}] ${snippet}`);
+      }
+    }
+  }
+
+  return {
+    text: lines.join('\n').trim().slice(0, 1400),
+    rawCount: rawResults.length,
+    acceptedCount: results.length,
+    trustSummary
+  };
+}
+
+async function runSearxngLookup({ baseUrl, query, franchise }) {
+  const normalizedBaseUrl = normalizeSearxngBaseUrl(baseUrl);
+  if (!normalizedBaseUrl) {
+    return {
+      provider: 'searxng',
+      found: false,
+      message: 'SearXNG インスタンスURLが未設定です。'
+    };
+  }
+
+  const searchQuery = [query, franchise].filter(Boolean).join(' ');
+  const url = `${normalizedBaseUrl}/search?q=${encodeURIComponent(searchQuery)}&format=json&language=ja-JP&categories=general`;
+  let response = null;
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+  } catch (err) {
+    return {
+      provider: 'searxng',
+      found: false,
+      status: 0,
+      failureKind: 'network',
+      message: `SearXNG への接続に失敗しました: ${err?.message || err}`
+    };
+  }
+
+  if (!response.ok) {
+    return {
+      provider: 'searxng',
+      found: false,
+      status: response.status,
+      failureKind: response.status === 403 ? 'json_api_disabled_or_forbidden' : '',
+      message: response.status === 403
+        ? 'SearXNG のJSON APIが無効、またはCORS/アクセス制限で拒否されました。'
+        : `HTTP status ${response.status}`
+    };
+  }
+
+  const payload = await response.json().catch(() => null);
+  const summary = buildSearxngSummary(payload, query, franchise);
+  return {
+    provider: 'searxng',
+    found: Boolean(summary.text),
+    status: 200,
+    text: summary.text,
+    modelName: '',
+    groundingQueries: [],
+    candidateCount: summary.rawCount,
+    acceptedCandidateCount: summary.acceptedCount,
+    sourceTrustRank: summary.trustSummary.rank,
+    sourceTrustLabel: summary.trustSummary.label,
+    message: summary.text
+      ? ''
+      : `SearXNG は ${summary.rawCount} 件の候補を返しましたが、対象語に一致する採用候補は ${summary.acceptedCount} 件でした。`
   };
 }
 
@@ -3331,6 +3542,7 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
+  const searxngUrl = String(appState.searxngUrl || '').trim();
   const rawQuery = String(args?.query || '').trim();
   const purpose = String(args?.purpose || '').trim();
   const franchise = String(args?.franchise || story?.franchise || '').trim();
@@ -3412,6 +3624,13 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
         franchise
       });
     }
+    if (providerName === 'searxng') {
+      return runSearxngLookup({
+        baseUrl: searxngUrl,
+        query,
+        franchise
+      });
+    }
     if (providerName === 'google') {
       const cooldownMs = getWebSearchCooldownRemainingMs('google');
       if (cooldownMs > 0) {
@@ -3436,7 +3655,7 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
   };
 
   const providerOrder = provider === 'auto'
-    ? [tavilyApiKey ? 'tavily' : '', 'google', 'duckduckgo'].filter(Boolean)
+    ? [tavilyApiKey ? 'tavily' : '', searxngUrl ? 'searxng' : '', 'google', 'duckduckgo'].filter(Boolean)
     : [provider];
   let result = null;
 
