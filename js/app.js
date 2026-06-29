@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260627d';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260627d';
-import * as dropbox from './dropbox.js?v=20260627d';
+import * as ui from './ui.js?v=20260628a';
+import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260628a';
+import * as dropbox from './dropbox.js?v=20260628a';
 import { buildStoryCharacterRefs } from './story-characters.js';
 
 // Default Storyteller instructions preset matching the Storyteller rules
@@ -275,7 +275,6 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'api_key',
   'model_name',
   'search_model_name',
-  'search_synthesis_model_name',
   'web_search_provider',
   'show_choices',
   'autoscroll_enabled',
@@ -1358,7 +1357,6 @@ async function loadConfigurations() {
   const key = await db.getSetting('api_key', '');
   const groqApiKey = await db.getSetting('groq_api_key', '');
   const tavilyApiKey = await db.getSetting('tavily_api_key', '');
-  const searxngUrl = await db.getSetting('searxng_url', '');
   let model = await db.getSetting('model_name', 'gemini-2.5-flash');
   if (provider === 'groq' && !isGroqModelName(model)) {
     model = DEFAULT_GROQ_MODEL_NAME;
@@ -1368,8 +1366,13 @@ async function loadConfigurations() {
     await db.saveSetting('model_name', model);
   }
   const searchModel = await db.getSetting('search_model_name', '');
-  const searchSynthesisModel = await db.getSetting('search_synthesis_model_name', '');
-  const webSearchProvider = await db.getSetting('web_search_provider', 'auto');
+  const rawWebSearchProvider = await db.getSetting('web_search_provider', 'google');
+  const webSearchProvider = ['google', 'tavily', 'off'].includes(String(rawWebSearchProvider || '').trim().toLowerCase())
+    ? String(rawWebSearchProvider || '').trim().toLowerCase()
+    : 'google';
+  if (webSearchProvider !== rawWebSearchProvider) {
+    await db.saveSetting('web_search_provider', webSearchProvider);
+  }
   const choices = await db.getSetting('show_choices', true);
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
@@ -1409,10 +1412,8 @@ async function loadConfigurations() {
     apiKey: key,
     groqApiKey,
     tavilyApiKey,
-    searxngUrl,
     modelName: model,
     searchModelName: searchModel,
-    searchSynthesisModelName: searchSynthesisModel,
     webSearchProvider,
     showChoices: choices,
     autoscrollEnabled: autoscroll, // ★Stateに反映
@@ -1441,10 +1442,8 @@ async function loadConfigurations() {
   const keyEl = document.getElementById('api-key-input');
   const groqKeyEl = document.getElementById('groq-api-key-input');
   const tavilyKeyEl = document.getElementById('tavily-api-key-input');
-  const searxngUrlEl = document.getElementById('searxng-url-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
-  const searchSynthesisModelEl = document.getElementById('search-synthesis-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★DOM取得
@@ -1467,7 +1466,6 @@ async function loadConfigurations() {
   if (keyEl) keyEl.value = key;
   if (groqKeyEl) groqKeyEl.value = groqApiKey || '';
   if (tavilyKeyEl) tavilyKeyEl.value = tavilyApiKey || '';
-  if (searxngUrlEl) searxngUrlEl.value = searxngUrl || '';
   if (choicesEl) choicesEl.checked = choices;
   if (autoscrollEl) autoscrollEl.checked = autoscroll;
   if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
@@ -1483,7 +1481,7 @@ async function loadConfigurations() {
   if (sessionSummaryAutoEl) sessionSummaryAutoEl.checked = sessionSummaryAutoEnabled;
   if (sessionSummaryTurnIntervalEl) sessionSummaryTurnIntervalEl.value = String(sessionSummaryTurnInterval);
   if (sessionSummaryPromptEl) sessionSummaryPromptEl.value = String(sessionSummaryPrompt || DEFAULT_SESSION_SUMMARY_PROMPT);
-  if (webSearchProviderEl) webSearchProviderEl.value = webSearchProvider || 'auto';
+  if (webSearchProviderEl) webSearchProviderEl.value = webSearchProvider || 'google';
   updateHistoryCompressionControls(historyCompressionEnabled);
   updateSessionSummaryControls(sessionSummaryAutoEnabled);
 
@@ -1496,10 +1494,6 @@ async function loadConfigurations() {
     normalizedCustomModels.push(searchModel);
     await db.saveSetting('custom_models', normalizedCustomModels);
   }
-  if (searchSynthesisModel && !DEFAULT_MODEL_VALUES.includes(searchSynthesisModel) && !normalizedCustomModels.includes(searchSynthesisModel)) {
-    normalizedCustomModels.push(searchSynthesisModel);
-    await db.saveSetting('custom_models', normalizedCustomModels);
-  }
   if (sessionSummaryModelName && !DEFAULT_MODEL_VALUES.includes(sessionSummaryModelName) && !normalizedCustomModels.includes(sessionSummaryModelName)) {
     normalizedCustomModels.push(sessionSummaryModelName);
     await db.saveSetting('custom_models', normalizedCustomModels);
@@ -1510,11 +1504,6 @@ async function loadConfigurations() {
     includeFollowOption: true,
     followOptionLabel: '使用モデルに追従',
     selectedValue: searchModel
-  });
-  populateModelSelect(searchSynthesisModelEl, normalizedCustomModels, {
-    includeFollowOption: true,
-    followOptionLabel: '検索専用モデルに追従',
-    selectedValue: searchSynthesisModel
   });
   populateModelSelect(sessionSummaryModelEl, normalizedCustomModels, {
     includeFollowOption: true,
@@ -1852,9 +1841,7 @@ async function bindEvents() {
   const tavilyKeyEl = document.getElementById('tavily-api-key-input');
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
-  const searchSynthesisModelEl = document.getElementById('search-synthesis-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
-  const searxngUrlEl = document.getElementById('searxng-url-input');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★自動スクロールDOM
   const customModelInput = document.getElementById('custom-model-input');
@@ -1919,13 +1906,6 @@ async function bindEvents() {
       db.saveSetting('tavily_api_key', val);
     };
   }
-  if (searxngUrlEl) {
-    searxngUrlEl.oninput = (e) => {
-      const val = String(e.target.value || '').trim();
-      updateState({ searxngUrl: val });
-      db.saveSetting('searxng_url', val);
-    };
-  }
   if (modelEl) {
     modelEl.onchange = (e) => {
       const val = e.target.value;
@@ -1941,16 +1921,10 @@ async function bindEvents() {
       db.saveSetting('search_model_name', val);
     };
   }
-  if (searchSynthesisModelEl) {
-    searchSynthesisModelEl.onchange = (e) => {
-      const val = e.target.value;
-      updateState({ searchSynthesisModelName: val });
-      db.saveSetting('search_synthesis_model_name', val);
-    };
-  }
   if (webSearchProviderEl) {
     webSearchProviderEl.onchange = (e) => {
-      const val = String(e.target.value || 'auto').trim() || 'auto';
+      const raw = String(e.target.value || 'google').trim().toLowerCase();
+      const val = ['google', 'tavily', 'off'].includes(raw) ? raw : 'google';
       updateState({ webSearchProvider: val });
       db.saveSetting('web_search_provider', val);
     };
@@ -2105,11 +2079,6 @@ async function bindEvents() {
         followOptionLabel: '使用モデルに追従',
         selectedValue: getState().searchModelName || ''
       });
-      populateModelSelect(searchSynthesisModelEl, normalizedCustomModels, {
-        includeFollowOption: true,
-        followOptionLabel: '検索専用モデルに追従',
-        selectedValue: getState().searchSynthesisModelName || ''
-      });
       populateModelSelect(sessionSummaryModelEl, normalizedCustomModels, {
         includeFollowOption: true,
         followOptionLabel: '使用モデルに追従',
@@ -2147,10 +2116,6 @@ async function bindEvents() {
         updates.searchModelName = '';
         await db.saveSetting('search_model_name', '');
       }
-      if (getState().searchSynthesisModelName === modelToRemove) {
-        updates.searchSynthesisModelName = '';
-        await db.saveSetting('search_synthesis_model_name', '');
-      }
       if (getState().sessionSummaryModelName === modelToRemove) {
         updates.sessionSummaryModelName = '';
         await db.saveSetting('session_summary_model_name', '');
@@ -2166,11 +2131,6 @@ async function bindEvents() {
         includeFollowOption: true,
         followOptionLabel: '使用モデルに追従',
         selectedValue: updates.searchModelName !== undefined ? updates.searchModelName : getState().searchModelName
-      });
-      populateModelSelect(searchSynthesisModelEl, customModels, {
-        includeFollowOption: true,
-        followOptionLabel: '検索専用モデルに追従',
-        selectedValue: updates.searchSynthesisModelName !== undefined ? updates.searchSynthesisModelName : getState().searchSynthesisModelName
       });
       populateModelSelect(sessionSummaryModelEl, customModels, {
         includeFollowOption: true,

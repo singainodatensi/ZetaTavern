@@ -89,7 +89,7 @@ const webSearchCooldownUntilByProvider = {
   google: 0,
   tavily: 0
 };
-const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['auto', 'tavily', 'searxng', 'google', 'duckduckgo', 'off']);
+const WEB_SEARCH_PROVIDER_OPTIONS = new Set(['google', 'tavily', 'off']);
 
 function isGroqProvider(provider = '') {
   return String(provider || '').trim().toLowerCase() === 'groq';
@@ -114,17 +114,15 @@ function resolveSearchModelName(appState) {
 
 function normalizeWebSearchProvider(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  return WEB_SEARCH_PROVIDER_OPTIONS.has(normalized) ? normalized : 'auto';
+  return WEB_SEARCH_PROVIDER_OPTIONS.has(normalized) ? normalized : 'google';
 }
 
 function getWebSearchProviderLabel(value) {
   const normalized = normalizeWebSearchProvider(value);
   if (normalized === 'tavily') return 'Tavily';
-  if (normalized === 'searxng') return 'SearXNG';
   if (normalized === 'google') return 'Google';
-  if (normalized === 'duckduckgo') return 'DuckDuckGo';
   if (normalized === 'off') return 'OFF';
-  return 'Auto';
+  return 'Google';
 }
 
 function getWebSearchCooldownRemainingMs(provider) {
@@ -796,7 +794,7 @@ function recordSearchError(accumulator, {
     accumulator.searchErrors = [];
   }
 
-  const normalizedProvider = normalizeWebSearchProvider(provider || 'auto');
+  const normalizedProvider = normalizeWebSearchProvider(provider || 'google');
   const normalizedQuery = String(query || '').trim().slice(0, 80);
   const normalizedMessage = String(message || '').trim().slice(0, 180);
   const normalizedCode = String(code || '').trim().slice(0, 40);
@@ -835,7 +833,7 @@ function classifySearchFailure({
   message = '',
   modelName = ''
 } = {}) {
-  const normalizedProvider = normalizeWebSearchProvider(provider || 'auto');
+  const normalizedProvider = normalizeWebSearchProvider(provider || 'google');
   const normalizedMessage = String(message || '').toLowerCase();
   const normalizedModel = String(modelName || '').trim().toLowerCase();
 
@@ -2772,10 +2770,7 @@ JSONのみを返してください:
 
 function shouldUseExternalProviderPlanning(provider, tavilyApiKey = '') {
   const normalizedProvider = normalizeWebSearchProvider(provider);
-  if (normalizedProvider === 'tavily') return true;
-  if (normalizedProvider === 'searxng') return true;
-  if (normalizedProvider === 'duckduckgo') return true;
-  if (normalizedProvider === 'auto' && String(tavilyApiKey || '').trim()) return true;
+  if (normalizedProvider === 'tavily' && String(tavilyApiKey || '').trim()) return true;
   return false;
 }
 
@@ -2857,7 +2852,6 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
-  const searxngUrl = String(appState.searxngUrl || '').trim();
   const provider = normalizeWebSearchProvider(appState.webSearchProvider);
   if (provider === 'off') return null;
   const usesExternalProviderPlanning = shouldUseExternalProviderPlanning(provider, tavilyApiKey);
@@ -3248,122 +3242,6 @@ async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
   };
 }
 
-function normalizeSearxngBaseUrl(value = '') {
-  const trimmed = String(value || '').trim().replace(/\/+$/, '');
-  if (!trimmed) return '';
-  if (!/^https?:\/\//i.test(trimmed)) return `https://${trimmed}`;
-  return trimmed;
-}
-
-function buildSearxngSummary(payload, query, franchise) {
-  const rawResults = Array.isArray(payload?.results) ? payload.results : [];
-  const results = rawResults
-    .map(item => ({
-      title: String(item?.title || '').trim(),
-      content: String(item?.content || item?.snippet || '').trim(),
-      url: String(item?.url || '').trim(),
-      engine: String(item?.engine || item?.engines?.[0] || '').trim()
-    }))
-    .filter(item => !isNoisyTavilyResult(item, query, franchise))
-    .slice(0, 4);
-  const trustSummary = summarizeSearchTrust(results);
-  const lines = [];
-
-  if (results.length > 0) {
-    const lead = [results[0].title, results[0].content]
-      .filter(Boolean)
-      .join(' - ')
-      .replace(/\s+/g, ' ')
-      .slice(0, 260);
-    if (lead) {
-      lines.push(`概要: ${lead}`);
-    }
-    lines.push(`信頼度: ${trustSummary.rank} (${trustSummary.label})`);
-    if (trustSummary.rank === 'C' || trustSummary.rank === 'D' || trustSummary.rank === 'U') {
-      lines.push('注意: 公式・一次情報では未確認。物語で使う場合は暫定情報として扱い、公式設定として断定しない。');
-    }
-    lines.push('補足:');
-    for (const item of results) {
-      const trust = classifySearchSourceTrust(item);
-      const engine = item.engine ? ` / ${item.engine}` : '';
-      const snippet = [item.title, item.content]
-        .filter(Boolean)
-        .join(' - ')
-        .replace(/\s+/g, ' ')
-        .slice(0, 220);
-      if (snippet) {
-        lines.push(`- [${trust.rank}:${trust.label}${engine}] ${snippet}`);
-      }
-    }
-  }
-
-  return {
-    text: lines.join('\n').trim().slice(0, 1400),
-    rawCount: rawResults.length,
-    acceptedCount: results.length,
-    trustSummary
-  };
-}
-
-async function runSearxngLookup({ baseUrl, query, franchise }) {
-  const normalizedBaseUrl = normalizeSearxngBaseUrl(baseUrl);
-  if (!normalizedBaseUrl) {
-    return {
-      provider: 'searxng',
-      found: false,
-      message: 'SearXNG インスタンスURLが未設定です。'
-    };
-  }
-
-  const searchQuery = [query, franchise].filter(Boolean).join(' ');
-  const url = `${normalizedBaseUrl}/search?q=${encodeURIComponent(searchQuery)}&format=json&language=ja-JP&categories=general`;
-  let response = null;
-  try {
-    response = await fetch(url, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    });
-  } catch (err) {
-    return {
-      provider: 'searxng',
-      found: false,
-      status: 0,
-      failureKind: 'network',
-      message: `SearXNG への接続に失敗しました: ${err?.message || err}`
-    };
-  }
-
-  if (!response.ok) {
-    return {
-      provider: 'searxng',
-      found: false,
-      status: response.status,
-      failureKind: response.status === 403 ? 'json_api_disabled_or_forbidden' : '',
-      message: response.status === 403
-        ? 'SearXNG のJSON APIが無効、またはCORS/アクセス制限で拒否されました。'
-        : `HTTP status ${response.status}`
-    };
-  }
-
-  const payload = await response.json().catch(() => null);
-  const summary = buildSearxngSummary(payload, query, franchise);
-  return {
-    provider: 'searxng',
-    found: Boolean(summary.text),
-    status: 200,
-    text: summary.text,
-    modelName: '',
-    groundingQueries: [],
-    candidateCount: summary.rawCount,
-    acceptedCandidateCount: summary.acceptedCount,
-    sourceTrustRank: summary.trustSummary.rank,
-    sourceTrustLabel: summary.trustSummary.label,
-    message: summary.text
-      ? ''
-      : `SearXNG は ${summary.rawCount} 件の候補を返しましたが、対象語に一致する採用候補は ${summary.acceptedCount} 件でした。`
-  };
-}
-
 async function runGoogleSearchLookup({
   apiKey,
   modelName,
@@ -3459,90 +3337,10 @@ async function runGoogleSearchLookup({
   };
 }
 
-function flattenDuckDuckGoRelatedTopics(relatedTopics = []) {
-  const flat = [];
-  for (const topic of Array.isArray(relatedTopics) ? relatedTopics : []) {
-    if (Array.isArray(topic?.Topics)) {
-      for (const nested of topic.Topics) {
-        flat.push(nested);
-      }
-    } else {
-      flat.push(topic);
-    }
-  }
-  return flat;
-}
-
-function buildDuckDuckGoSummary(payload, query, franchise) {
-  const heading = String(payload?.Heading || query || '').trim();
-  const abstractText = String(payload?.AbstractText || '').trim();
-  const definition = String(payload?.Definition || '').trim();
-  const answer = String(payload?.Answer || '').trim();
-  const related = flattenDuckDuckGoRelatedTopics(payload?.RelatedTopics).slice(0, 3);
-
-  const lines = [];
-  if (heading || franchise) {
-    lines.push(`概要: ${[heading, franchise].filter(Boolean).join(' / ')}`);
-  }
-  if (abstractText) {
-    lines.push(abstractText);
-  } else if (definition) {
-    lines.push(definition);
-  } else if (answer) {
-    lines.push(answer);
-  }
-
-  if (related.length > 0) {
-    lines.push('補足:');
-    for (const topic of related) {
-      const text = String(topic?.Text || '').trim();
-      if (text) {
-        lines.push(`- ${text}`);
-      }
-    }
-  }
-
-  return lines.join('\n').trim();
-}
-
-async function runDuckDuckGoLookup({ query, franchise }) {
-  const searchQuery = [query, franchise].filter(Boolean).join(' ');
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(searchQuery)}&format=json&no_html=1&skip_disambig=1&t=ZetaTavern`;
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'Accept': 'application/json'
-    }
-  });
-
-  if (!response.ok) {
-    return {
-      provider: 'duckduckgo',
-      found: false,
-      status: response.status,
-      failureKind: classifySearchFailure({ provider: 'duckduckgo', status: response.status, message: `HTTP status ${response.status}` }),
-      message: `HTTP status ${response.status}`
-    };
-  }
-
-  const payload = await response.json();
-  const text = buildDuckDuckGoSummary(payload, query, franchise);
-  return {
-    provider: 'duckduckgo',
-    found: Boolean(text),
-    status: 200,
-    text,
-    modelName: '',
-    groundingQueries: [],
-    message: text ? '' : 'DuckDuckGo から十分な要約を取得できませんでした。'
-  };
-}
-
 async function searchWebForStory(story, args = {}, usageAccumulator = null, searchState = null) {
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
-  const searxngUrl = String(appState.searxngUrl || '').trim();
   const rawQuery = String(args?.query || '').trim();
   const purpose = String(args?.purpose || '').trim();
   const franchise = String(args?.franchise || story?.franchise || '').trim();
@@ -3624,13 +3422,6 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
         franchise
       });
     }
-    if (providerName === 'searxng') {
-      return runSearxngLookup({
-        baseUrl: searxngUrl,
-        query,
-        franchise
-      });
-    }
     if (providerName === 'google') {
       const cooldownMs = getWebSearchCooldownRemainingMs('google');
       if (cooldownMs > 0) {
@@ -3651,12 +3442,14 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
         usageAccumulator
       });
     }
-    return runDuckDuckGoLookup({ query, franchise });
+    return {
+      provider: providerName,
+      found: false,
+      message: '未対応の検索プロバイダです。'
+    };
   };
 
-  const providerOrder = provider === 'auto'
-    ? [tavilyApiKey ? 'tavily' : '', searxngUrl ? 'searxng' : '', 'google', 'duckduckgo'].filter(Boolean)
-    : [provider];
+  const providerOrder = [provider];
   let result = null;
 
   for (const providerName of providerOrder) {
@@ -3678,9 +3471,7 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
       });
     }
     result = attempt;
-    if (provider !== 'auto') {
-      break;
-    }
+    break;
   }
 
   const normalizedResult = {
@@ -4695,13 +4486,8 @@ async function getGroqApiKeyFromStorage() {
   return localStorage.getItem('zetatavern_groq_api_key') || '';
 }
 
-function resolveSearchSynthesisModelName(appState) {
-  const preferred = String(appState?.searchSynthesisModelName || '').trim();
-  if (preferred) return preferred;
-  const searchModel = String(appState?.searchModelName || '').trim();
-  if (searchModel) return searchModel;
-  const conversationModel = String(appState?.modelName || '').trim();
-  return conversationModel || DEFAULT_SEARCH_MODEL_NAME;
+function resolveSearchFormattingModelName(appState) {
+  return resolveSearchModelName(appState);
 }
 
 function parseJsonPayloadFromText(text = '') {
@@ -4713,7 +4499,7 @@ function parseJsonPayloadFromText(text = '') {
 }
 
 function buildReferenceSearchEvidenceBlock(result, query, franchise) {
-  const providerLabel = getWebSearchProviderLabel(result?.provider || 'auto');
+  const providerLabel = getWebSearchProviderLabel(result?.provider || 'google');
   const providerModel = String(result?.modelName || '').trim();
   const lines = [
     `検索プロバイダ: ${providerLabel}`,
@@ -4772,7 +4558,7 @@ async function performReferenceLookup({ query, purpose, franchise, usageAccumula
       return result;
     }
 
-    const providerLabel = getWebSearchProviderLabel(result?.provider || getState()?.webSearchProvider || 'auto');
+    const providerLabel = getWebSearchProviderLabel(result?.provider || getState()?.webSearchProvider || 'google');
     const message = String(result?.message || '').trim() || '検索結果を取得できませんでした。';
     throw new Error(`${providerLabel} 検索に失敗しました: ${message}`);
   } catch (err) {
@@ -4791,8 +4577,8 @@ async function generateStructuredJsonFromSearchEvidence({
   requestLabel,
   prompt
 }) {
-  const requestedModelName = String(appState?.searchSynthesisModelName || appState?.searchModelName || appState?.modelName || DEFAULT_SEARCH_MODEL_NAME).trim();
-  const modelName = resolveSearchSynthesisModelName(appState);
+  const requestedModelName = String(appState?.searchModelName || appState?.modelName || DEFAULT_SEARCH_MODEL_NAME).trim();
+  const modelName = resolveSearchFormattingModelName(appState);
   usageAccumulator.modelName = modelName;
 
   if (modelName !== requestedModelName) {

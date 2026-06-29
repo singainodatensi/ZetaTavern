@@ -101,8 +101,7 @@ ZetaTavern は、単なるチャット UI ではありません。
   - 思考混入テキストの除去
 - Web検索
   - Google Search Grounding
-  - Tavily
-  - DuckDuckGo Instant Answer API
+  - Tavily API
 - Dropbox Push / Pull / 自動同期設定
 - PWA + Service Worker
 - モバイル向けドロワー / サイドバー / オーバーフローメニュー

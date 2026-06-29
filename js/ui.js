@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260627d';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260628a';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 
 const blobUrlCache = new Map();
@@ -164,10 +164,8 @@ function formatSearchProviderLabel(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'google') return 'Google';
   if (normalized === 'tavily') return 'Tavily';
-  if (normalized === 'searxng') return 'SearXNG';
-  if (normalized === 'duckduckgo') return 'DuckDuckGo';
   if (normalized === 'off') return 'OFF';
-  return 'Auto';
+  return 'Google';
 }
 
 export function renderApiUsagePanel() {
@@ -208,7 +206,7 @@ export function renderApiUsagePanel() {
           <span>会話 ${formatUsageNumber(lastApiUsage.debug.conversationChars)}</span>
           <span>Schema ${formatUsageNumber(lastApiUsage.debug.toolSchemaChars)}</span>
           <span>Thinking ${escapeHTML(lastApiUsage.debug.thinkingConfigLabel || 'なし')}</span>
-          <span>Web検索 ${escapeHTML(formatSearchProviderLabel(lastApiUsage.debug.searchProviderLabel || 'auto'))}</span>
+          <span>Web検索 ${escapeHTML(formatSearchProviderLabel(lastApiUsage.debug.searchProviderLabel || 'google'))}</span>
           <span>Web検索 利用可能 ${lastApiUsage.debug.googleSearchAvailable ? 'ON' : 'OFF'}</span>
           <span>サーバーツール往復 ${formatUsageNumber(lastApiUsage.debug.serverToolRoundTrips || 0)}</span>
           <span>履歴圧縮 ${lastApiUsage.debug.historyCompressionEnabled === false ? 'OFF' : 'ON'}</span>
@@ -292,7 +290,7 @@ export function renderApiUsagePanel() {
           </div>
           <div class="api-usage-chip-row">
             ${lastApiUsage.debug.searchErrors.map(item => {
-              const providerLabel = formatSearchProviderLabel(item.provider || 'auto');
+              const providerLabel = formatSearchProviderLabel(item.provider || 'google');
               const preview = item.query ? `: ${item.query}` : '';
               const status = Number(item.status || 0) > 0 ? ` / HTTP ${item.status}` : '';
               const model = item.modelName ? ` / ${item.modelName}` : '';
