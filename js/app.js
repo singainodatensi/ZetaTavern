@@ -5,10 +5,19 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260628a';
-import { generateStoryResponse, generateLoreProfileFromSearch, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks, normalizeLoreEntryName, isLikelyWorldLoreName } from './ai-client.js?v=20260628a';
-import * as dropbox from './dropbox.js?v=20260628a';
+import * as ui from './ui.js?v=20260714a';
+import { generateStoryResponse, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks } from './ai-client.js?v=20260714a';
+import * as dropbox from './dropbox.js?v=20260714a';
 import { buildStoryCharacterRefs } from './story-characters.js';
+import {
+  DEFAULT_SESSION_SUMMARY_PROMPT,
+  createEmptySessionLore,
+  createEmptyStoryPlan,
+  createSessionSummarySegment,
+  ensureSessionLoreStructure,
+  normalizeSessionSummarySegments,
+  renderSessionSummarySegments
+} from './story-structure.js?v=20260714a';
 
 // Default Storyteller instructions preset matching the Storyteller rules
 const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
@@ -18,18 +27,6 @@ const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラ
 
 // Default World settings template
 const DEFAULT_WORLD_PROMPT = `【世界観】\n現代の高校を舞台にした日常系ラブコメの世界。\n\n【状況】\n主人公は平凡な男子高校生。ある日、隣の席に学校一の美少女が座ることになり……`;
-const DEFAULT_SESSION_SUMMARY_PROMPT = `あなたはプロの編集者です。以下の会話履歴を、第三者の視点から見た物語の「あらすじ」として要約してください。
-「承知しました」等のAIとしての応答は不要です。要約文のみ出力して下さい。
-
-【最重要ルール】
-- プロットの維持: 物語の重要な転換点、登場人物の重要な決断、新しい事実の判明、伏線となりうる発言は、絶対に省略しないでください。
-- 客観的な記述: 「主人公は〜した。」「〇〇は〜と感じた。」のように、キャラクターの行動と感情を客観的に記述してください。
-- 情報の取捨選択: 日常的な挨拶や、物語の進行に直接関係のない会話は省略してください。
-- 時系列の維持: 出来事が起こった順番を正確に保ってください。
-- 継続性の維持: 誰が誰とどう出会ったか、なぜ同行しているのか、今後どこへ向かうのかが失われないようにしてください。
-- 未回収要素の保持: 約束、保留案件、未解決の懸案、今後回収すべき話題があれば明示してください。
-
-最終的な出力は、このあらすじを初めて読む人でも、これまでの物語の流れを正確に理解できるような形式にしてください。`;
 const SESSION_SUMMARY_RECENT_SEGMENT_LIMIT = 2;
 const DROPBOX_REMOTE_MANIFEST_SNAPSHOT_KEY = 'dropbox_remote_manifest_snapshot';
 
@@ -93,183 +90,6 @@ function normalizeTurnIntervalChoice(value, fallback = 10) {
   return nearest;
 }
 
-function createEmptySessionLore() {
-  return {
-    summary: '',
-    summary_segments: [],
-    summary_source: '',
-    summary_checkpoint_turn: 0,
-    last_summary_at: 0,
-    last_summary_status: '',
-    last_summary_error: '',
-    last_summary_mode: '',
-    current_state: '',
-    recent_turning_points: [],
-    long_term_events: [],
-    active_flags: [],
-    open_threads: [],
-    key_events: []
-  };
-}
-
-function normalizeStoryPlanList(items = [], limit = 8) {
-  const source = Array.isArray(items)
-    ? items
-    : String(items || '').split(/\r?\n|,/);
-  return Array.from(new Set(source
-    .map(item => String(item || '').trim())
-    .filter(Boolean))).slice(0, limit);
-}
-
-function createEmptyStoryPlan() {
-  return {
-    short_term: [],
-    mid_term: [],
-    long_term: [],
-    research_needs: [],
-    updatedAt: 0
-  };
-}
-
-function ensureStoryPlanStructure(story) {
-  if (!story) return createEmptyStoryPlan();
-  const plan = story.story_plan && typeof story.story_plan === 'object'
-    ? story.story_plan
-    : {};
-  story.story_plan = {
-    ...createEmptyStoryPlan(),
-    ...plan,
-    short_term: normalizeStoryPlanList(plan.short_term, 8),
-    mid_term: normalizeStoryPlanList(plan.mid_term, 8),
-    long_term: normalizeStoryPlanList(plan.long_term, 8),
-    research_needs: normalizeStoryPlanList(plan.research_needs, 10),
-    updatedAt: Number.isFinite(Number(plan.updatedAt)) ? Number(plan.updatedAt) : 0
-  };
-  return story.story_plan;
-}
-
-function createSessionSummarySegment({
-  type = 'segment',
-  startTurn = 1,
-  endTurn = 1,
-  summary = '',
-  source = '',
-  createdAt = Date.now()
-} = {}) {
-  const text = String(summary || '').trim();
-  if (!text) return null;
-  const fromTurn = Math.max(1, Number(startTurn || 1));
-  const toTurn = Math.max(fromTurn, Number(endTurn || fromTurn));
-  return {
-    type: type === 'chapter' ? 'chapter' : 'segment',
-    startTurn: fromTurn,
-    endTurn: toTurn,
-    summary: text,
-    source: String(source || '').trim(),
-    createdAt: Number(createdAt || Date.now()),
-    updatedAt: Date.now()
-  };
-}
-
-function parseSessionSummarySegmentsFromText(summaryText = '', checkpointTurn = 0, source = '') {
-  const raw = String(summaryText || '').trim();
-  if (!raw) return [];
-
-  const segments = [];
-  const regex = /【第(\d+)(?:〜(\d+))?ターン(章)?要約】\n([\s\S]*?)(?=\n\n【第\d+(?:〜\d+)?ターン(?:章)?要約】|$)/g;
-  let match;
-  while ((match = regex.exec(raw)) !== null) {
-    const startTurn = Number(match[1] || 1);
-    const endTurn = Number(match[2] || match[1] || startTurn);
-    const type = match[3] ? 'chapter' : 'segment';
-    const summary = String(match[4] || '').trim();
-    const segment = createSessionSummarySegment({ type, startTurn, endTurn, summary, source });
-    if (segment) segments.push(segment);
-  }
-
-  if (segments.length > 0) return segments;
-
-  const fallbackEndTurn = Math.max(1, Number(checkpointTurn || 1));
-  const fallbackType = String(source || '').trim() === 'manual' ? 'segment' : 'chapter';
-  return [
-    createSessionSummarySegment({
-      type: fallbackType,
-      startTurn: 1,
-      endTurn: fallbackEndTurn,
-      summary: raw,
-      source
-    })
-  ].filter(Boolean);
-}
-
-function normalizeSessionSummarySegments(sessionLore = {}) {
-  if (Array.isArray(sessionLore.summary_segments) && sessionLore.summary_segments.length > 0) {
-    return sessionLore.summary_segments
-      .map(segment => createSessionSummarySegment(segment))
-      .filter(Boolean)
-      .sort((a, b) => Number(a.startTurn || 0) - Number(b.startTurn || 0));
-  }
-
-  return parseSessionSummarySegmentsFromText(
-    sessionLore.summary || '',
-    sessionLore.summary_checkpoint_turn || 0,
-    sessionLore.summary_source || ''
-  );
-}
-
-function renderSessionSummarySegments(segments = []) {
-  return segments
-    .map(segment => {
-      const fromTurn = Math.max(1, Number(segment.startTurn || 1));
-      const toTurn = Math.max(fromTurn, Number(segment.endTurn || fromTurn));
-      const label = segment.type === 'chapter'
-        ? `【第${fromTurn}〜${toTurn}ターン章要約】`
-        : (fromTurn === toTurn
-          ? `【第${fromTurn}ターン要約】`
-          : `【第${fromTurn}〜${toTurn}ターン要約】`);
-      return `${label}\n${String(segment.summary || '').trim()}`;
-    })
-    .filter(Boolean)
-    .join('\n\n')
-    .trim();
-}
-
-function ensureSessionLoreStructure(story) {
-  if (!story) return createEmptySessionLore();
-  const sessionLore = story.session_lore && typeof story.session_lore === 'object'
-    ? story.session_lore
-    : {};
-  story.session_lore = {
-    ...createEmptySessionLore(),
-    ...sessionLore,
-    summary_checkpoint_turn: Number.isFinite(Number(sessionLore.summary_checkpoint_turn))
-      ? Number(sessionLore.summary_checkpoint_turn)
-      : 0,
-    last_summary_at: Number.isFinite(Number(sessionLore.last_summary_at))
-      ? Number(sessionLore.last_summary_at)
-      : 0,
-    last_summary_status: String(sessionLore.last_summary_status || '').trim(),
-    last_summary_error: String(sessionLore.last_summary_error || '').trim(),
-    last_summary_mode: String(sessionLore.last_summary_mode || '').trim(),
-    recent_turning_points: Array.isArray(sessionLore.recent_turning_points) ? sessionLore.recent_turning_points : [],
-    long_term_events: Array.isArray(sessionLore.long_term_events)
-      ? sessionLore.long_term_events
-      : (Array.isArray(sessionLore.key_events) ? sessionLore.key_events : []),
-    active_flags: Array.isArray(sessionLore.active_flags)
-      ? sessionLore.active_flags
-      : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []),
-    summary_segments: normalizeSessionSummarySegments(sessionLore),
-    open_threads: Array.isArray(sessionLore.active_flags)
-      ? sessionLore.active_flags
-      : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []),
-    key_events: Array.isArray(sessionLore.long_term_events)
-      ? sessionLore.long_term_events
-      : (Array.isArray(sessionLore.key_events) ? sessionLore.key_events : [])
-  };
-  story.session_lore.summary = renderSessionSummarySegments(story.session_lore.summary_segments);
-  return story.session_lore;
-}
-
 const DROPBOX_SYNC_SETTING_KEYS = [
   'api_provider',
   'api_key',
@@ -282,7 +102,6 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'dropbox_app_key',
   'dropbox_sync_frequency',
   'dropbox_sync_tombstones',
-  'lore_auto_search_enabled',
   'thinking_level',
   'thinking_level_gemini3',
   'thinking_budget_preset_gemini25',
@@ -842,415 +661,6 @@ async function applyDropboxPullToLocal(pulled, { forceFull = false } = {}) {
   });
 }
 
-function normalizeLoreKey(value) {
-  return (value || '').trim().toLowerCase();
-}
-
-function isCharacterInFranchise(character, franchise) {
-  const normalizedFranchise = normalizeLoreKey(franchise);
-  if (!normalizedFranchise) return true;
-
-  const category = normalizeLoreKey(character?.category);
-  const tags = Array.isArray(character?.tags) ? character.tags.map(normalizeLoreKey) : [];
-  if (category || tags.length > 0) {
-    return category === normalizedFranchise || tags.includes(normalizedFranchise);
-  }
-
-  return true;
-}
-
-async function hasCharacterLibraryConflict(keyword, franchise) {
-  const normalizedKeyword = normalizeLoreKey(keyword);
-  if (!normalizedKeyword) return false;
-
-  const characters = await db.getCharacters();
-  return characters.some(character =>
-    normalizeLoreKey(character?.name) === normalizedKeyword &&
-    isCharacterInFranchise(character, franchise)
-  );
-}
-
-function pickMostLikelyLoreFranchise(candidates) {
-  const counts = new Map();
-  for (const candidate of candidates) {
-    const value = (candidate || '').trim();
-    if (!value) continue;
-    counts.set(value, (counts.get(value) || 0) + 1);
-  }
-
-  let best = '';
-  let bestCount = 0;
-  for (const [value, count] of counts.entries()) {
-    if (count > bestCount) {
-      best = value;
-      bestCount = count;
-    }
-  }
-  return best;
-}
-
-async function resolveLoreFranchise(story) {
-  const direct = (story?.franchise || '').trim();
-  if (direct) return direct;
-
-  const storyTag = Array.isArray(story?.tags)
-    ? story.tags.map(tag => (tag || '').trim()).find(Boolean)
-    : '';
-  if (storyTag) return storyTag;
-
-  const attachedIds = new Set((story?.characters || []).map(ref => ref.characterId));
-  const loadedCharacters = getState().characters?.length ? getState().characters : await db.getCharacters();
-  const candidates = [];
-
-  for (const character of loadedCharacters) {
-    if (!attachedIds.has(character.characterId)) continue;
-    if (character.category) candidates.push(character.category);
-    if (Array.isArray(character.tags)) candidates.push(...character.tags);
-  }
-
-  return pickMostLikelyLoreFranchise(candidates);
-}
-
-const LORE_KEYWORD_STOPWORDS = new Set([
-  '主人公', '地の文', 'ナレーション', 'セリフ', '会話', '場面', '現在地',
-  '時間帯', '状況', '世界', '国名', '地名', '名前', '話', '設定', '情報',
-  '関係', '記録', '記憶', '主要', 'イベント', 'キャラ', 'キャラクター',
-  'アイテム', '解呪アイテム', '道具', '武器',
-  'カテゴリー', 'カテゴリ', '多様性', 'テーブル', 'フォーク',
-  '金', '物資', '情報', '金・物資・情報', 'タイミング'
-]);
-
-const SESSION_SPECIFIC_AUTO_LORE_PATTERNS = [
-  /オリジナルキャラクター|オリキャラ/i,
-  /このセッション|セッション限定|今回限り|今回だけ/i,
-  /即興|臨時|仮設|一時的/i,
-  /主人公(?:との|に対する|用の|専用|が|は)/,
-  /ユーザー(?:との|が|は)/,
-  /好感度|関係性メモ/i,
-  /今日|さっき|先ほど|今この場|その場で/i,
-  /ここで出会/i,
-  /新しく(?:作った|設立した|結成した|雇った|名乗った)/i,
-  /現在(?:の|は)?(?:拠点|同行|所属|状況)/i
-];
-
-const LORE_LOCATION_HINTS = ['高校', '学園', '学院', '学校', '寮', '屋敷', '邸', '城', '宮', '神殿', '聖域', '都', '市', '町', '村', 'マンション', 'アパート', 'ホテル', 'カフェ', '喫茶'];
-const LORE_ORGANIZATION_HINTS = ['組', '団', '隊', '軍', '教', '教会', '商会', '会社', '部', '陣営', '騎士団'];
-const LORE_EVENT_HINTS = ['王選', '試験', '祭', '編', '会議', '戦'];
-const LORE_ITEM_HINTS = ['剣', '杖', '指輪', '徽章', '勲章', '書', '石'];
-const LORE_TOPIC_SUFFIXES = ['社会構造', '文化', '歴史', '政治体制', '経済構造', '制度', '仕組み', '種族構成', '身分制度'];
-
-function isLoreKeywordCandidate(word, story) {
-  const trimmed = (word || '').trim();
-  if (!trimmed || trimmed.length < 2) return false;
-  if (/^[0-9０-９]+$/.test(trimmed)) return false;
-  if (LORE_KEYWORD_STOPWORDS.has(trimmed)) return false;
-
-  const normalized = normalizeLoreKey(trimmed);
-  if (normalized === normalizeLoreKey(story?.franchise)) return false;
-  if (normalized === normalizeLoreKey(story?.protagonist?.name)) return false;
-  if (!isLikelyWorldLoreName(trimmed)) return false;
-
-  return true;
-}
-
-function isSessionSpecificAutoLoreText(text) {
-  const value = (text || '').trim();
-  if (!value) return false;
-  return SESSION_SPECIFIC_AUTO_LORE_PATTERNS.some(pattern => pattern.test(value));
-}
-
-function shouldSkipAutoLoreRegistration(result, story) {
-  if (!result || result.shouldRegister === false) {
-    return true;
-  }
-
-  const combined = [
-    result.canonicalName,
-    result.summary,
-    result.profile,
-    result.speech,
-    result.relationships,
-    result.reason
-  ].filter(Boolean).join(' ');
-
-  if (!result.summary) return true;
-  if (isSessionSpecificAutoLoreText(combined)) return true;
-  if (!isLikelyWorldLoreName(result.canonicalName, result.type)) return true;
-
-  const normalizedName = normalizeLoreKey(result.canonicalName);
-  if (normalizedName === normalizeLoreKey(story?.protagonist?.name)) {
-    return true;
-  }
-
-  return false;
-}
-
-function inferLoreCandidateType(name) {
-  const value = (name || '').trim();
-  if (!value) return 'term';
-  if (LORE_LOCATION_HINTS.some(hint => value.includes(hint) || value.endsWith(hint))) return 'location';
-  if (LORE_ORGANIZATION_HINTS.some(hint => value.includes(hint) || value.endsWith(hint))) return 'organization';
-  if (LORE_EVENT_HINTS.some(hint => value.includes(hint) || value.endsWith(hint))) return 'event';
-  if (LORE_ITEM_HINTS.some(hint => value.endsWith(hint))) return 'item';
-  return 'term';
-}
-
-function isLikelyLoreTopicName(value) {
-  const text = normalizeLoreEntryName(value);
-  if (!text || text.length < 4) return false;
-  return LORE_TOPIC_SUFFIXES.some(suffix => text.endsWith(suffix) && text.length > suffix.length + 1);
-}
-
-function extractRequestedLoreTopics(story) {
-  const msgs = story.messages || [];
-  const lastUser = [...msgs].reverse().find(msg => msg.role === 'user');
-  const text = (lastUser?.content || '').replace(/\s+/g, ' ').trim();
-  if (!text) return [];
-
-  const topics = new Set();
-  const directPatterns = [
-    /([^\n。！？]{2,40}?の(?:社会構造|文化|歴史|政治体制|経済構造|制度|仕組み|種族構成|身分制度))(?:について|を|は|って|とは)?(?:教えて|知りたい|説明|詳しく|頼む|見せて)?/gu,
-    /([^\n。！？]{2,40}?)(?:について|とは)(?:教えて|知りたい|説明|詳しく|頼む|見せて)?/gu
-  ];
-
-  for (const pattern of directPatterns) {
-    for (const match of text.matchAll(pattern)) {
-      const candidate = normalizeLoreEntryName((match[1] || '').trim());
-      if (!candidate || LORE_KEYWORD_STOPWORDS.has(candidate)) continue;
-      if (isLikelyLoreTopicName(candidate) || isLikelyWorldLoreName(candidate)) {
-        topics.add(candidate);
-      }
-    }
-  }
-
-  return Array.from(topics).slice(0, 2);
-}
-
-function extractRecentTurnLoreKeywords(story) {
-  const wordsSet = new Set();
-  const msgs = story.messages || [];
-  const recent = msgs.slice(-2);
-  const textSource = [];
-
-  for (const msg of recent) {
-    textSource.push(msg.content || '');
-    textSource.push(msg.aiContent || '');
-  }
-
-  const combinedText = textSource.join('\n');
-  const quotedMatches = [...combinedText.matchAll(/[「『]([^「」『』\n]{2,24})[」』]/g)].map(match => match[1] || '');
-  const boldMatches = [...combinedText.matchAll(/\*\*([^*\n]{2,24})\*\*/g)].map(match => match[1] || '');
-  const matchesKatakana = combinedText.match(/[\u30A0-\u30FF\u30FC・]{2,24}/g) || [];
-  const matchesKanji = combinedText.match(/[\u4E00-\u9FAF]{2,10}/g) || [];
-  const matchesMixedJapanese = combinedText.match(/[\u4E00-\u9FAF々][\u3040-\u309F]{1,3}/g) || [];
-  const matchesEnglish = combinedText.match(/[A-Z][a-zA-Z]{2,15}/g) || [];
-
-  [...quotedMatches, ...boldMatches, ...matchesKatakana, ...matchesKanji, ...matchesMixedJapanese, ...matchesEnglish].forEach(word => {
-    const w = normalizeLoreEntryName(word.trim());
-    if (isLoreKeywordCandidate(w, story)) {
-      wordsSet.add(w);
-    }
-  });
-
-  return Array.from(wordsSet)
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 4);
-}
-
-function getRecentLoreContextText(story) {
-  const msgs = story.messages || [];
-  return msgs.slice(-2)
-    .flatMap(msg => [msg.content || '', msg.aiContent || ''])
-    .join('\n');
-}
-
-function getRecentModelLoreContextText(story) {
-  const msgs = story.messages || [];
-  return msgs
-    .filter(msg => msg.role === 'model')
-    .slice(-1)
-    .flatMap(msg => [msg.content || ''])
-    .join('\n');
-}
-
-function splitJapaneseSentences(text) {
-  return ((text || '').match(/[^。！？\n]+[。！？]?/g) || [])
-    .map(sentence => sentence.trim())
-    .filter(Boolean);
-}
-
-function sanitizeLorePassageText(text) {
-  return (text || '')
-    .replace(/\*\*/g, '')
-    .replace(/[`#>*_]/g, '')
-    .replace(/\r/g, '')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line =>
-      line &&
-      !/ロアブック|機能テスト|世界観の深掘り|解説します|先ほどの概要|さらに/.test(line)
-    )
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function findLoreContextSnippet(text, keyword) {
-  const source = sanitizeLorePassageText(text).replace(/[（(][^）)]*[）)]/g, '');
-  const target = (keyword || '').trim();
-  if (!source || !target) return '';
-
-  const index = source.indexOf(target);
-  if (index < 0) return '';
-
-  const before = source.slice(0, index);
-  const after = source.slice(index + target.length);
-  const lastBoundary = Math.max(before.lastIndexOf('。'), before.lastIndexOf('！'), before.lastIndexOf('？'));
-  const nextCandidates = ['。', '！', '？']
-    .map(mark => after.indexOf(mark))
-    .filter(pos => pos >= 0);
-  const nextBoundary = nextCandidates.length > 0 ? Math.min(...nextCandidates) : -1;
-
-  const start = lastBoundary >= 0 ? lastBoundary + 1 : Math.max(0, index - 48);
-  const end = nextBoundary >= 0 ? index + target.length + nextBoundary + 1 : Math.min(source.length, index + target.length + 48);
-  let snippet = source.slice(start, end).trim();
-
-  if (start > 0) snippet = `...${snippet}`;
-  if (end < source.length) snippet = `${snippet}...`;
-  snippet = snippet
-    .replace(new RegExp(`${target}について\\s*${target}について`, 'g'), `${target}について`)
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-  if (snippet.length > 120) {
-    snippet = `${snippet.slice(0, 117).trim()}...`;
-  }
-  return snippet;
-}
-
-function extractLorePassage(text, keyword) {
-  const source = sanitizeLorePassageText(text);
-  const target = (keyword || '').trim();
-  if (!source || !target) return '';
-
-  const sentences = splitJapaneseSentences(source);
-  if (sentences.length === 0) {
-    return findLoreContextSnippet(source, target);
-  }
-
-  const sentenceIndex = sentences.findIndex(sentence => sentence.includes(target));
-  if (sentenceIndex < 0) {
-    return findLoreContextSnippet(source, target);
-  }
-
-  const picked = [];
-  let totalLength = 0;
-  for (let i = sentenceIndex; i < sentences.length; i++) {
-    const sentence = sentences[i];
-    if (!sentence) continue;
-    picked.push(sentence);
-    totalLength += sentence.length;
-    if (picked.length >= 3 || totalLength >= 260) break;
-  }
-
-  return picked.join(' ').trim();
-}
-
-function buildLoreCandidateContent(name, type, passage = '') {
-  const fallback = `「${name}」が作品全体で共有される安定設定なら採用してください。`;
-  if (!passage) {
-    return {
-      summary: fallback,
-      profile: ''
-    };
-  }
-
-  const sentences = splitJapaneseSentences(passage);
-  if (sentences.length === 0) {
-    return {
-      summary: fallback,
-      profile: passage
-    };
-  }
-
-  let summary = sentences[0].trim();
-  if (summary.length > 110) {
-    summary = `${summary.slice(0, 107).trim()}...`;
-  }
-
-  const profile = sentences.slice(0, 3).join(' ').trim();
-  return {
-    summary,
-    profile: profile !== summary ? profile : ''
-  };
-}
-
-async function queueLoreCandidatesFromRecentTurn(story) {
-  const franchise = await resolveLoreFranchise(story);
-  if (!franchise) return 0;
-
-  if (!story.franchise) {
-    story.franchise = franchise;
-  }
-
-  if (!Array.isArray(story.lore_candidates)) {
-    story.lore_candidates = [];
-  }
-
-  const existingLore = await db.getWorldLores();
-  const existingCandidateKeys = new Set(
-    story.lore_candidates.map(candidate => `${normalizeLoreKey(candidate.franchise)}::${normalizeLoreKey(candidate.name)}`)
-  );
-
-  let queuedCount = 0;
-  const requestedTopics = extractRequestedLoreTopics(story);
-  const keywords = requestedTopics.length > 0 ? [] : extractRecentTurnLoreKeywords(story);
-  const combinedContextText = getRecentLoreContextText(story);
-  const modelContextText = getRecentModelLoreContextText(story);
-  const candidatesToQueue = [
-    ...requestedTopics.map(name => ({ name, sourceKind: 'user-topic' })),
-    ...keywords.map(name => ({ name, sourceKind: 'local-heuristic' }))
-  ];
-
-  for (const entry of candidatesToQueue) {
-    const keyword = entry.name;
-    const name = normalizeLoreEntryName(keyword);
-    if (!name) continue;
-    if (!isLikelyLoreTopicName(name) && !isLikelyWorldLoreName(name)) continue;
-    if (await hasCharacterLibraryConflict(name, franchise)) continue;
-
-    const existsInLore = existingLore.some(lore =>
-      normalizeLoreKey(lore.franchise) === normalizeLoreKey(franchise) &&
-      normalizeLoreKey(lore.name) === normalizeLoreKey(name)
-    );
-    if (existsInLore) continue;
-
-    const candidateKey = `${normalizeLoreKey(franchise)}::${normalizeLoreKey(name)}`;
-    if (existingCandidateKeys.has(candidateKey)) continue;
-
-    const type = isLikelyLoreTopicName(name) ? 'term' : inferLoreCandidateType(name);
-    const preferredContext = entry.sourceKind === 'user-topic' ? modelContextText || combinedContextText : combinedContextText;
-    const passage = extractLorePassage(preferredContext, name);
-    const candidateContent = buildLoreCandidateContent(name, type, passage);
-    story.lore_candidates.push({
-      id: crypto.randomUUID(),
-      franchise,
-      type,
-      name,
-      content: {
-        summary: candidateContent.summary,
-        profile: candidateContent.profile,
-        speech: '',
-        relationships: ''
-      },
-      source: entry.sourceKind,
-      createdAt: Date.now()
-    });
-    existingCandidateKeys.add(candidateKey);
-    queuedCount++;
-  }
-
-  return queuedCount;
-}
 
 // Boot strap execution
 async function bootApp() {
@@ -1377,7 +787,6 @@ async function loadConfigurations() {
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
   const dropboxAppKey = await db.getSetting('dropbox_app_key', '');
-  const loreAutoSearchEnabled = await db.getSetting('lore_auto_search_enabled', false);
   const legacyThinkingLevel = await db.getSetting('thinking_level', 'standard');
   const thinkingLevelGemini3 = normalizeGemini3ThinkingLevel(await db.getSetting('thinking_level_gemini3', legacyThinkingLevel));
   const thinkingBudgetPresetGemini25 = normalizeGemini25ThinkingPreset(await db.getSetting('thinking_budget_preset_gemini25', legacyThinkingLevel), model);
@@ -1423,7 +832,6 @@ async function loadConfigurations() {
     narrationBg: narrationBg,
     narrationColor: narrationColor,
     narrationOpacity: narrationOpacity,
-    loreAutoSearchEnabled: loreAutoSearchEnabled,
     thinkingLevelGemini3,
     thinkingBudgetPresetGemini25,
     gemmaThinkingEnabled,
@@ -1512,12 +920,6 @@ async function loadConfigurations() {
   });
   renderCustomModelList(normalizedCustomModels);
   populateThinkingSelectForModel(model, getState());
-}
-
-async function isLoreAutoSearchEnabled() {
-  const stateValue = getState().loreAutoSearchEnabled;
-  if (typeof stateValue === 'boolean') return stateValue;
-  return await db.getSetting('lore_auto_search_enabled', false);
 }
 
 /**
@@ -2408,7 +1810,7 @@ async function createNewStory() {
       avatarAssetId: '',
       description: '普通の男子高校生。'
     },
-    characters: [], // Array of { characterId, attendance }
+    characters: [], // Array of { characterId }
     messages: [
       {
         role: 'user',
@@ -2485,6 +1887,12 @@ function cleanFallbackSummarySource(text) {
     .replace(/\s+/g, ' ')
     .trim();
   return cleaned;
+}
+
+function splitJapaneseSentences(text) {
+  return ((text || '').match(/[^。！？\n]+[。！？]?/g) || [])
+    .map(sentence => sentence.trim())
+    .filter(Boolean);
 }
 
 function extractFallbackSessionSummary(text, options = {}) {
@@ -2648,11 +2056,6 @@ async function submitStoryTurn(mode = 'normal') {
 
     await db.saveStory(currentStory);
 
-    // バックグラウンド検索はコストが高いため、明示的に有効化された場合のみ実行する
-    if (await isLoreAutoSearchEnabled()) {
-      triggerBackgroundLoreLookup(currentStory);
-    }
-    
     // Auto sync story lists count
     const stories = await db.getStories();
     const refreshedStory = stories.find(story => story.storyId === currentStory.storyId) || currentStory;
@@ -3482,161 +2885,4 @@ function setupVisibilitySync() {
     }
 
   });
-}
-
-// ==========================================
-// 自動ロア検索バックグラウンド処理
-// ==========================================
-
-async function triggerBackgroundLoreLookup(story) {
-  if (!(await isLoreAutoSearchEnabled())) {
-    console.log('[Lore Automatic Lookup] Skipped because auto lore search is disabled.');
-    return;
-  }
-
-  const franchise = await resolveLoreFranchise(story);
-  if (!franchise) {
-    console.log('[Lore Automatic Lookup] Skipped because no franchise could be resolved.');
-    return;
-  }
-
-  if (!story.franchise) {
-    story.franchise = franchise;
-    db.saveStory(story).catch(err => {
-      console.warn('[Lore Automatic Lookup] Failed to persist inferred franchise:', err);
-    });
-  }
-
-  const detectedKeywords = extractKeywordsForLore(story);
-  if (detectedKeywords.length === 0) {
-    console.log('[Lore Automatic Lookup] No keyword candidates found for franchise:', franchise);
-    return;
-  }
-
-  console.log('[Lore Automatic Lookup] Resolved franchise and keywords:', franchise, detectedKeywords);
-
-  for (const keyword of detectedKeywords) {
-    try {
-      const existing = await db.getLoreByNameAndFranchise(keyword, franchise);
-      if (existing && ['completed', 'pending', 'failed'].includes(existing.status)) {
-        continue;
-      }
-
-      const placeholder = {
-        id: 'lore_' + crypto.randomUUID(),
-        franchise,
-        type: 'term',
-        name: keyword,
-        content: {
-          summary: 'Searching lore...',
-          profile: '',
-          speech: '',
-          relationships: ''
-        },
-        source: 'ai-generated',
-        verified: false,
-        status: 'pending'
-      };
-      await db.saveLore(placeholder);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
-      if (getState().activeScreen === 'lorebook') {
-        ui.renderLorebook();
-      }
-
-      executeLoreLookup(placeholder, keyword, franchise, story);
-    } catch (e) {
-      console.warn(`Error check or initial save for lore keyword ${keyword}:`, e);
-    }
-  }
-}
-
-async function executeLoreLookup(placeholder, keyword, franchise, story) {
-  try {
-    console.log(`[Lore Automatic Lookup] Starting search for [${franchise}] ${keyword}`);
-    const result = await generateLoreProfileFromSearch(keyword, franchise);
-
-    if (shouldSkipAutoLoreRegistration(result, story)) {
-      console.log(`[Lore Automatic Lookup] Skipped auto-registration for ${keyword}: ${result?.reason || 'not a stable world lore entry'}`);
-      await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
-      return;
-    }
-
-    const canonicalName = normalizeLoreEntryName(result.canonicalName || keyword);
-    if (!canonicalName) {
-      await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
-      return;
-    }
-
-    const existingCanonical = await db.getLoreByNameAndFranchise(canonicalName, franchise);
-    if (existingCanonical && existingCanonical.id !== placeholder.id) {
-      console.log(`[Lore Automatic Lookup] Skipped duplicate lore for ${canonicalName}.`);
-      await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
-      return;
-    }
-
-    if (result.type === 'character' && await hasCharacterLibraryConflict(canonicalName, franchise)) {
-      console.log(`[Lore Automatic Lookup] Skipped duplicate character lore for ${canonicalName} because character library data takes priority.`);
-      await db.deleteLore(placeholder.id);
-      queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
-      return;
-    }
-
-    placeholder.name = canonicalName;
-    placeholder.content = {
-      summary: result.summary || '',
-      profile: result.profile || '',
-      speech: result.speech || '',
-      relationships: result.relationships || ''
-    };
-    placeholder.type = result.type || 'term';
-    placeholder.status = 'completed';
-    await db.saveLore(placeholder);
-    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
-    console.log(`[Lore Automatic Lookup] Completed and saved lore for ${keyword}`);
-    
-    // ロアブック画面が表示されている場合はリアルタイムに再描画
-    if (getState().activeScreen === 'lorebook') {
-      ui.renderLorebook();
-    }
-  } catch (err) {
-    console.error(`[Lore Automatic Lookup] Failed for keyword ${keyword}:`, err);
-    placeholder.status = 'failed';
-    placeholder.content.summary = `自動検索に失敗しました。Error: ${err.message}`;
-    await db.saveLore(placeholder);
-    queueDropboxAutoSync({ storyId: story?.storyId || null, syncLores: true, loreFranchises: [franchise || '共通'] });
-    if (getState().activeScreen === 'lorebook') {
-      ui.renderLorebook();
-    }
-  }
-}
-
-// 補助用にai-client.jsと同様の簡易抽出をapp.js内にも持たせる
-function extractKeywordsForLore(story) {
-  const wordsSet = new Set();
-  const textSource = [];
-  const msgs = story.messages || [];
-  const startIdx = Math.max(0, msgs.length - 4);
-  for (let i = startIdx; i < msgs.length; i++) {
-    textSource.push(msgs[i].content || '');
-    textSource.push(msgs[i].aiContent || '');
-  }
-  const combinedText = textSource.join('\n');
-  const matchesKatakana = combinedText.match(/[\u30A0-\u30FF\u30FC・]{2,24}/g) || [];
-  const matchesKanji = combinedText.match(/[\u4E00-\u9FAF]{2,10}/g) || [];
-  const matchesMixedJapanese = combinedText.match(/[\u4E00-\u9FAF々][\u3040-\u309F]{1,3}/g) || [];
-  const matchesEnglish = combinedText.match(/[A-Z][a-zA-Z]{2,15}/g) || [];
-
-  [...matchesKatakana, ...matchesKanji, ...matchesMixedJapanese, ...matchesEnglish].forEach(word => {
-    const w = word.trim();
-    if (isLoreKeywordCandidate(w, story)) {
-      wordsSet.add(w);
-    }
-  });
-
-  return Array.from(wordsSet)
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 6);
 }

@@ -15,8 +15,7 @@ export function getStoryScopedCharacters(allCharacters, story) {
 
 export function buildStoryCharacterRefs(story, allCharacters) {
   return getStoryScopedCharacters(allCharacters, story).map(char => ({
-    characterId: char.characterId,
-    attendance: 'active'
+    characterId: char.characterId
   }));
 }
 

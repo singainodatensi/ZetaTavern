@@ -7,8 +7,13 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260628a';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260714a';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
+import {
+  ensureSessionLoreStructure,
+  ensureStoryPlanStructure,
+  normalizeStoryPlanList
+} from './story-structure.js?v=20260714a';
 
 const blobUrlCache = new Map();
 
@@ -38,42 +43,6 @@ function formatSessionSummaryTimestamp(value) {
   } catch (_) {
     return '未実行';
   }
-}
-
-function normalizeStoryPlanList(items = [], limit = 8) {
-  const source = Array.isArray(items)
-    ? items
-    : String(items || '').split(/\r?\n|,/);
-  return Array.from(new Set(source
-    .map(item => String(item || '').trim())
-    .filter(Boolean))).slice(0, limit);
-}
-
-function createEmptyStoryPlan() {
-  return {
-    short_term: [],
-    mid_term: [],
-    long_term: [],
-    research_needs: [],
-    updatedAt: 0
-  };
-}
-
-function ensureStoryPlanStructure(story) {
-  if (!story) return createEmptyStoryPlan();
-  const plan = story.story_plan && typeof story.story_plan === 'object'
-    ? story.story_plan
-    : {};
-  story.story_plan = {
-    ...createEmptyStoryPlan(),
-    ...plan,
-    short_term: normalizeStoryPlanList(plan.short_term, 8),
-    mid_term: normalizeStoryPlanList(plan.mid_term, 8),
-    long_term: normalizeStoryPlanList(plan.long_term, 8),
-    research_needs: normalizeStoryPlanList(plan.research_needs, 10),
-    updatedAt: Number.isFinite(Number(plan.updatedAt)) ? Number(plan.updatedAt) : 0
-  };
-  return story.story_plan;
 }
 
 function storyPlanListToText(items = []) {
@@ -3827,29 +3796,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
     return;
   }
 
-  const sessionLore = {
-    summary: '',
-    summary_segments: [],
-    summary_source: '',
-    summary_checkpoint_turn: 0,
-    last_summary_at: 0,
-    last_summary_status: '',
-    last_summary_error: '',
-    last_summary_mode: '',
-    current_state: '',
-    recent_turning_points: [],
-    long_term_events: [],
-    active_flags: [],
-    open_threads: [],
-    key_events: [],
-    ...(activeStory.session_lore || {})
-  };
-  sessionLore.long_term_events = Array.isArray(sessionLore.long_term_events)
-    ? sessionLore.long_term_events
-    : (Array.isArray(sessionLore.key_events) ? sessionLore.key_events : []);
-  sessionLore.active_flags = Array.isArray(sessionLore.active_flags)
-    ? sessionLore.active_flags
-    : (Array.isArray(sessionLore.open_threads) ? sessionLore.open_threads : []);
+  const sessionLore = ensureSessionLoreStructure(activeStory);
   const relationshipMemory = activeStory.relationshipMemory || {};
   const storyPlan = ensureStoryPlanStructure(activeStory);
   const totalTurns = countUserTurnChunks(activeStory.messages || []);
@@ -4058,43 +4005,7 @@ async function _renderSessionLore(container, renderVersion = 0) {
   };
 
   const ensureEditableSessionLore = () => {
-    if (!activeStory.session_lore) {
-      activeStory.session_lore = {
-        summary: '',
-        summary_segments: [],
-        summary_source: '',
-        summary_checkpoint_turn: 0,
-        last_summary_at: 0,
-        last_summary_status: '',
-        last_summary_error: '',
-        last_summary_mode: '',
-        current_state: '',
-        recent_turning_points: [],
-        long_term_events: [],
-        active_flags: [],
-        open_threads: [],
-        key_events: []
-      };
-    }
-    if (!Array.isArray(activeStory.session_lore.recent_turning_points)) activeStory.session_lore.recent_turning_points = [];
-    if (!Array.isArray(activeStory.session_lore.long_term_events)) {
-      activeStory.session_lore.long_term_events = Array.isArray(activeStory.session_lore.key_events)
-        ? [...activeStory.session_lore.key_events]
-        : [];
-    }
-    if (!Array.isArray(activeStory.session_lore.active_flags)) {
-      activeStory.session_lore.active_flags = Array.isArray(activeStory.session_lore.open_threads)
-        ? [...activeStory.session_lore.open_threads]
-        : [];
-    }
-    if (!Number.isFinite(Number(activeStory.session_lore.summary_checkpoint_turn))) {
-      activeStory.session_lore.summary_checkpoint_turn = 0;
-    }
-    if (!Array.isArray(activeStory.session_lore.summary_segments)) {
-      activeStory.session_lore.summary_segments = [];
-    }
-    activeStory.session_lore.key_events = [...activeStory.session_lore.long_term_events];
-    activeStory.session_lore.open_threads = [...activeStory.session_lore.active_flags];
+    return ensureSessionLoreStructure(activeStory);
   };
 
   const summaryInput = container.querySelector('#session-lore-editor-summary');

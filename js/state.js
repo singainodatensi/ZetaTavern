@@ -37,11 +37,7 @@ const state = {
   sessionSummaryTurnInterval: 20,
   sessionSummaryModelName: '',
   sessionSummaryPrompt: '',
-  isSessionSummaryRunning: false,
-  
-  // Participant attendance for current active story
-  // e.g., { "char-uuid": "active" | "absent" }
-  attendance: {}
+  isSessionSummaryRunning: false
 };
 
 const listeners = new Set();
@@ -84,53 +80,9 @@ export function updateState(updates) {
   notify('stateChanged', state);
 }
 
-export function normalizeCharacterAttendance(role) {
-  return role === 'absent' ? 'absent' : 'active';
-}
-
-/**
- * Sets the active story, syncing character attendance state.
- */
 export function setActiveStory(story) {
   state.currentStory = story;
-  
-  if (story) {
-    // Populate attendance map from story object
-    state.attendance = {};
-    if (story.characters && Array.isArray(story.characters)) {
-      story.characters.forEach(c => {
-        state.attendance[c.characterId] = normalizeCharacterAttendance(c.attendance);
-      });
-    }
-  } else {
-    state.attendance = {};
-  }
-  
+
   notify('storyChanged', state);
-  notify('stateChanged', state);
-}
-
-/**
- * Updates attendance for a specific character in the active story.
- */
-export function updateCharacterAttendance(characterId, role) {
-  if (!state.currentStory) return;
-
-  const normalizedRole = normalizeCharacterAttendance(role);
-  state.attendance[characterId] = normalizedRole;
-  
-  // Sync back to currentStory data structure
-  if (!state.currentStory.characters) {
-    state.currentStory.characters = [];
-  }
-  
-  const charIndex = state.currentStory.characters.findIndex(c => c.characterId === characterId);
-  if (charIndex > -1) {
-    state.currentStory.characters[charIndex].attendance = normalizedRole;
-  } else {
-    state.currentStory.characters.push({ characterId, attendance: normalizedRole });
-  }
-
-  notify('attendanceChanged', { characterId, role: normalizedRole });
   notify('stateChanged', state);
 }

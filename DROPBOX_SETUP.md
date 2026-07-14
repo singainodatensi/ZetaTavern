@@ -22,15 +22,12 @@ https://singainodatensi.github.io/ZetaTavern/
 - `index.html` を付けないこと
 - `http://` 版は本番では不要（ローカル検証時のみ `http://localhost:.../` を追加可）
 
-## 3. App key をコードに設定
+## 3. App key を設定
 
-`js/dropbox.js` の `APP_KEY` を、作成したアプリの **App key** に置き換える。
+ZetaTavern の「設定」画面にある Dropbox App key 欄へ、作成したアプリの **App key** を入力する。
+未入力の場合は、ZetaTavern 標準の App key が使用される。
 
-```javascript
-export const APP_KEY = 'あなたのアプリキー';
-```
-
-`js/app.js` の認証 URL はこの定数を参照するため、両方のファイルでキーが一致している必要はありません（dropbox.js のみ）。
+通常の利用でソースコードを書き換える必要はない。
 
 ## 4. デプロイ後の確認
 

@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260628a';
+import { getSetting, saveSetting } from './db.js?v=20260714a';
 
 // ============================================================
 // 定数
@@ -16,8 +16,6 @@ import { getSetting, saveSetting } from './db.js?v=20260628a';
 
 /** コード内デフォルト（設定画面で上書き可能） */
 export const DEFAULT_APP_KEY = 'lk117tt6k0vfkb8';
-/** @deprecated getAppKey() を使用 */
-export const APP_KEY = DEFAULT_APP_KEY;
 
 /** GitHub Pages 本番で Dropbox アプリに登録するリダイレクト URI（末尾スラッシュ必須） */
 export const PRODUCTION_OAUTH_REDIRECT_URI = 'https://singainodatensi.github.io/ZetaTavern/';
@@ -436,24 +434,6 @@ export async function isConnected() {
 // ============================================================
 
 /**
- * ZetaTavern の stories + characters + settings 全データを Dropbox にアップロードする。
- * アバター画像 (Blob) は除外し、assetId のみ保持する。
- */
-export async function uploadMetadata(stories, characters, settings = {}) {
-  const payload = JSON.stringify({ stories, characters, settings, exportedAt: Date.now() });
-  const args = { path: METADATA_PATH, mode: 'overwrite', mute: true };
-
-  return _request('content', '/files/upload', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'Dropbox-API-Arg': JSON.stringify(args),
-    },
-    body: payload,
-  });
-}
-
-/**
  * Dropbox から stories + characters のメタデータを取得する。
  * ファイルが存在しない場合は null を返す。
  */
@@ -650,12 +630,6 @@ export async function getRemoteManifestInfo() {
     source
   };
   return lastRemoteManifestInfo;
-}
-
-export async function getRemoteManifestSnapshot() {
-  const { manifest } = await loadManifestWithFallback();
-  if (!_isUsableV2Manifest(manifest)) return null;
-  return structuredClone(manifest);
 }
 
 export async function getLastRemoteManifestUpdatedAt() {
@@ -1236,38 +1210,6 @@ export async function listRemoteAssets() {
     if (error.message.includes('path/not_found')) return [];
     throw error;
   }
-}
-
-/**
- * 複数アセットをバッチアップロードする (5件ごとに1秒のウェイトを入れてレート制限を回避)
- *
- * @param {Array<{assetId: string, blob: Blob}>} items
- * @param {Function} [progressCallback] - (current, total) => void
- */
-export async function uploadAssetsInBatches(items, progressCallback) {
-  if (!items || items.length === 0) return;
-  const BATCH_SIZE = 5;
-  const DELAY_MS   = 1000;
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-  for (let i = 0; i < items.length; i++) {
-    const { assetId, blob } = items[i];
-    if (progressCallback) progressCallback(i + 1, items.length);
-
-    try {
-      await uploadAsset(blob, assetId);
-      console.log(`[Dropbox] アセットをアップロード: ${assetId} (${i + 1}/${items.length})`);
-    } catch (error) {
-      console.error(`[Dropbox] アセットのアップロードに失敗: ${assetId}`, error);
-      throw new Error(`アセット ${assetId} のアップロードに失敗しました: ${error.message}`);
-    }
-
-    if ((i + 1) % BATCH_SIZE === 0 && i < items.length - 1) {
-      console.log(`[Dropbox] バッチ間の待機 ${DELAY_MS}ms...`);
-      await sleep(DELAY_MS);
-    }
-  }
-  console.log(`[Dropbox] バッチアップロード完了 (${items.length}件)`);
 }
 
 // ============================================================

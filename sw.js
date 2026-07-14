@@ -1,4 +1,4 @@
-const CACHE_NAME = 'zetatavern-cache-v118';
+const CACHE_NAME = 'zetatavern-cache-v119';
 const urlsToCache = [
   './',
   './index.html',
@@ -10,6 +10,7 @@ const urlsToCache = [
   './js/ai-client.js',
   './js/ui.js',
   './js/story-characters.js',
+  './js/story-structure.js',
   './js/sanitizer.js',
   './js/dropbox.js',
   './assets/default-silhouette.png'

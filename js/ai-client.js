@@ -6,6 +6,18 @@
 import { getState, updateState } from './state.js'; // ★ updateState のインポートを追加
 import { getCharacter, getLore, getLoreByNameAndFranchise, getWorldLores, saveLore, saveStory, getCharacters } from './db.js';
 import { getStoryScopedCharacters } from './story-characters.js';
+import {
+  DEFAULT_SESSION_SUMMARY_PROMPT,
+  ensureSessionLoreStructure as ensureSharedSessionLoreStructure,
+  ensureStoryPlanStructure,
+  mergeSessionLoreEvents,
+  normalizeSessionLoreList,
+  normalizeStoryPlanList
+} from './story-structure.js?v=20260714a';
+
+function ensureSessionLoreStructure(story) {
+  return ensureSharedSessionLoreStructure(story, { normalizeLists: true });
+}
 
 async function getCharactersList() {
   try {
@@ -63,18 +75,6 @@ const GROQ_MODEL_NAMES = new Set([
   'openai/gpt-oss-120b',
   'qwen/qwen3-32b'
 ]);
-const DEFAULT_SESSION_SUMMARY_PROMPT = `あなたはプロの編集者です。以下の会話履歴を、第三者の視点から見た物語の「あらすじ」として要約してください。
-「承知しました」等のAIとしての応答は不要です。要約文のみ出力して下さい。
-
-【最重要ルール】
-- プロットの維持: 物語の重要な転換点、登場人物の重要な決断、新しい事実の判明、伏線となりうる発言は、絶対に省略しないでください。
-- 客観的な記述: 「主人公は〜した。」「〇〇は〜と感じた。」のように、キャラクターの行動と感情を客観的に記述してください。
-- 情報の取捨選択: 日常的な挨拶や、物語の進行に直接関係のない会話は省略してください。
-- 時系列の維持: 出来事が起こった順番を正確に保ってください。
-- 継続性の維持: 誰が誰とどう出会ったか、なぜ同行しているのか、今後どこへ向かうのかが失われないようにしてください。
-- 未回収要素の保持: 約束、保留案件、未解決の懸案、今後回収すべき話題があれば明示してください。
-
-最終的な出力は、このあらすじを初めて読む人でも、これまでの物語の流れを正確に理解できるような形式にしてください。`;
 const DEFAULT_CHAPTER_SUMMARY_PROMPT = `あなたはプロの編集者です。以下に提示される複数の圧縮要約を、長期記憶用の「章あらすじ」として再圧縮してください。
 「承知しました」等のAIとしての応答は不要です。要約文のみ出力して下さい。
 
@@ -1663,137 +1663,6 @@ async function buildProactiveReferenceMemo(story, scopedCharacters, allCharacter
   return block;
 }
 
-function normalizeSessionLoreEvent(event) {
-  if (typeof event === 'string') return event.trim();
-  if (event == null) return '';
-  if (typeof event === 'number' || typeof event === 'boolean') return String(event);
-  if (typeof event === 'object') {
-    const candidates = [
-      event.text,
-      event.summary,
-      event.title,
-      event.name,
-      event.label,
-      event.event
-    ];
-    for (const value of candidates) {
-      if (typeof value === 'string' && value.trim()) return value.trim();
-    }
-    try {
-      return JSON.stringify(event);
-    } catch (_) {
-      return '';
-    }
-  }
-  return '';
-}
-
-function mergeSessionLoreEvents(existingEvents = [], nextEvents = []) {
-  const merged = [...existingEvents, ...nextEvents]
-    .map(normalizeSessionLoreEvent)
-    .filter(Boolean);
-  return Array.from(new Set(merged));
-}
-
-function normalizeSessionLoreList(items = [], limit = 12) {
-  return Array.from(new Set((Array.isArray(items) ? items : [])
-    .map(normalizeSessionLoreEvent)
-    .filter(Boolean))).slice(0, limit);
-}
-
-function createEmptySessionLore() {
-  return {
-    summary: '',
-    summary_segments: [],
-    summary_source: '',
-    summary_checkpoint_turn: 0,
-    last_summary_at: 0,
-    last_summary_status: '',
-    last_summary_error: '',
-    last_summary_mode: '',
-    current_state: '',
-    recent_turning_points: [],
-    long_term_events: [],
-    active_flags: [],
-    open_threads: [],
-    key_events: []
-  };
-}
-
-function normalizeStoryPlanList(items = [], limit = 8) {
-  const source = Array.isArray(items)
-    ? items
-    : String(items || '').split(/\r?\n|,/);
-  return Array.from(new Set(source
-    .map(item => String(item || '').trim())
-    .filter(Boolean))).slice(0, limit);
-}
-
-function createEmptyStoryPlan() {
-  return {
-    short_term: [],
-    mid_term: [],
-    long_term: [],
-    research_needs: [],
-    updatedAt: 0
-  };
-}
-
-function ensureStoryPlanStructure(story) {
-  if (!story) return createEmptyStoryPlan();
-  const plan = story.story_plan && typeof story.story_plan === 'object'
-    ? story.story_plan
-    : {};
-  story.story_plan = {
-    ...createEmptyStoryPlan(),
-    ...plan,
-    short_term: normalizeStoryPlanList(plan.short_term, 8),
-    mid_term: normalizeStoryPlanList(plan.mid_term, 8),
-    long_term: normalizeStoryPlanList(plan.long_term, 8),
-    research_needs: normalizeStoryPlanList(plan.research_needs, 10),
-    updatedAt: Number.isFinite(Number(plan.updatedAt)) ? Number(plan.updatedAt) : 0
-  };
-  return story.story_plan;
-}
-
-function ensureSessionLoreStructure(story) {
-  if (!story) return createEmptySessionLore();
-  const sessionLore = story.session_lore && typeof story.session_lore === 'object'
-    ? story.session_lore
-    : {};
-  story.session_lore = {
-    ...createEmptySessionLore(),
-    ...sessionLore,
-    summary_checkpoint_turn: Number.isFinite(Number(sessionLore.summary_checkpoint_turn))
-      ? Number(sessionLore.summary_checkpoint_turn)
-      : 0,
-    last_summary_at: Number.isFinite(Number(sessionLore.last_summary_at))
-      ? Number(sessionLore.last_summary_at)
-      : 0,
-    last_summary_status: String(sessionLore.last_summary_status || '').trim(),
-    last_summary_error: String(sessionLore.last_summary_error || '').trim(),
-    last_summary_mode: String(sessionLore.last_summary_mode || '').trim(),
-    summary_segments: Array.isArray(sessionLore.summary_segments) ? sessionLore.summary_segments : [],
-    recent_turning_points: normalizeSessionLoreList(sessionLore.recent_turning_points || [], 8),
-    long_term_events: normalizeSessionLoreList(
-      sessionLore.long_term_events || sessionLore.key_events || [],
-      20
-    ),
-    active_flags: normalizeSessionLoreList(
-      sessionLore.active_flags || sessionLore.open_threads || [],
-      10
-    ),
-    open_threads: normalizeSessionLoreList(
-      sessionLore.active_flags || sessionLore.open_threads || [],
-      10
-    ),
-    key_events: normalizeSessionLoreList(
-      sessionLore.long_term_events || sessionLore.key_events || [],
-      20
-    )
-  };
-  return story.session_lore;
-}
 
 async function applySessionLoreUpdate(args, story) {
   const sessionLore = ensureSessionLoreStructure(story);
