@@ -13,7 +13,7 @@ import {
   mergeSessionLoreEvents,
   normalizeSessionLoreList,
   normalizeStoryPlanList
-} from './story-structure.js?v=20260714a';
+} from './story-structure.js?v=20260922c';
 
 function ensureSessionLoreStructure(story) {
   return ensureSharedSessionLoreStructure(story, { normalizeLists: true });
@@ -347,7 +347,7 @@ function buildSessionSummaryPrompt({
   return sections.join('\n');
 }
 
-function selectPromptMessages(messages = [], turnLimit = 0) {
+function selectPromptMessages(messages = [], turnLimit = 0, sessionLore = {}) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return { selectedMessages: [], omittedTurns: 0 };
   }
@@ -362,7 +362,11 @@ function selectPromptMessages(messages = [], turnLimit = 0) {
     return { selectedMessages: [...messages], omittedTurns: 0 };
   }
 
-  const keptChunks = chunks.slice(-normalizedTurnLimit);
+  const checkpoint = Number(sessionLore?.summary_checkpoint_turn);
+  const summarizedTurns = String(sessionLore?.summary || '').trim() && Number.isFinite(checkpoint)
+    ? Math.max(0, Math.min(Math.floor(checkpoint), chunks.length)) : 0;
+  const omitCount = Math.min(chunks.length - normalizedTurnLimit, summarizedTurns);
+  const keptChunks = chunks.slice(omitCount);
   return {
     selectedMessages: keptChunks.flat(),
     omittedTurns: chunks.length - keptChunks.length
@@ -1556,21 +1560,6 @@ function collectStoryReferenceCandidates(story, scopedCharacters = []) {
   return Array.from(candidates).slice(0, 8);
 }
 
-function shouldEnableGoogleSearchForStory(story, systemInstruction, googleSearchEnabled) {
-  if (!googleSearchEnabled) return false;
-  if (/ローカル未解決候補:/.test(systemInstruction)) return true;
-
-  const franchise = String(story?.franchise || '').trim();
-  if (franchise) return true;
-
-  const tags = Array.isArray(story?.tags)
-    ? story.tags.map(tag => String(tag || '').trim()).filter(Boolean)
-    : [];
-  if (tags.length > 0) return true;
-
-  return false;
-}
-
 function isStrongCharacterHit(searchResult, query) {
   const top = searchResult?.results?.[0];
   if (!top) return false;
@@ -1653,8 +1642,8 @@ async function buildProactiveReferenceMemo(story, scopedCharacters, allCharacter
 
   if (unresolvedTerms.length > 0) {
     block += `- ローカル未解決候補: ${unresolvedTerms.join(' / ')}\n`;
-    if (options.googleSearchEnabled) {
-      block += `- ローカル未解決候補が原作キャラ・組織・地名・種族・陣営に関わる場合、本文を書く前に Google Search で確認すること。\n`;
+    if (options.webSearchEnabled) {
+      block += `- ローカル未解決候補が原作キャラ・組織・地名・種族・陣営に関わる場合、本文を書く前に search_web で確認すること。\n`;
       block += `- 特に原作キャラを出す場合は、同行者・陣営・拠点・代表的な関係者を確認し、場面に必要なら自然に同席させること。\n`;
     }
   }
@@ -1677,7 +1666,7 @@ async function applySessionLoreUpdate(args, story) {
   }
   if (args.long_term_events || args.key_events) {
     const nextEvents = args.long_term_events || args.key_events || [];
-    sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], nextEvents).slice(-20);
+    sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], nextEvents);
     sessionLore.key_events = [...sessionLore.long_term_events];
   }
   if (args.affinity_updates) {
@@ -1741,7 +1730,7 @@ async function applyWorldLoreUpdate(args, story) {
       if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
         const sessionLore = ensureSessionLoreStructure(story);
         const sessionNote = buildSessionLoreNote(entry, name, summary);
-        sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], [sessionNote]).slice(-20);
+        sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], [sessionNote]);
         sessionLore.key_events = [...sessionLore.long_term_events];
         reroutedCount++;
       }
@@ -1751,7 +1740,7 @@ async function applyWorldLoreUpdate(args, story) {
     if (shouldRouteWorldLoreEntryToSession(entry, existing, characterMatch)) {
       const sessionLore = ensureSessionLoreStructure(story);
       const sessionNote = buildSessionLoreNote(entry, name, summary);
-      sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], [sessionNote]).slice(-20);
+      sessionLore.long_term_events = mergeSessionLoreEvents(sessionLore.long_term_events || [], [sessionNote]);
       sessionLore.key_events = [...sessionLore.long_term_events];
       reroutedCount++;
       continue;
@@ -1812,7 +1801,7 @@ async function applyWorldLoreUpdate(args, story) {
  */
 export async function buildSystemInstruction(story, options = {}) {
   if (!story) return '';
-  const webSearchEnabled = options.googleSearchEnabled === true;
+  const webSearchEnabled = options.webSearchEnabled === true;
   const gemmaThinkEnabled = options.gemmaThinkEnabled === true;
 
   const { storytellerPrompt, worldPrompt, protagonist, characterMemory, relationshipMemory } = story;
@@ -2191,7 +2180,7 @@ export async function buildSystemInstruction(story, options = {}) {
   }
 
   const proactiveReferenceMemo = await buildProactiveReferenceMemo(story, scopedCharacters, allCharacters, {
-    googleSearchEnabled: webSearchEnabled
+    webSearchEnabled
   });
   if (proactiveReferenceMemo) {
     instruction += `\n${proactiveReferenceMemo}`;
@@ -2427,128 +2416,6 @@ function getThinkingSupportForModel(modelName = '') {
   return { kind: 'unsupported' };
 }
 
-function supportsCombinedGoogleSearch(modelName = '') {
-  const normalized = String(modelName || '').trim().toLowerCase();
-  return normalized.includes('gemini-3');
-}
-
-function shouldUseServerSideGoogleSearchForStory() {
-  // Story generation currently prefers the explicit search_web function.
-  // This keeps search traffic predictable and avoids stacking:
-  // prepass search + server-side tool circulation + client-side search_web.
-  return false;
-}
-
-function collectUnresolvedReferenceTerms(systemInstruction = '') {
-  const match = String(systemInstruction || '').match(/ローカル未解決候補:\s*([^\n]+)/);
-  if (!match) return [];
-  return match[1]
-    .split('/')
-    .map(term => normalizeLoreEntryName(term))
-    .filter(Boolean)
-    .slice(0, 8);
-}
-
-function buildGoogleSearchGroundingPrompt(story, unresolvedTerms = [], recentMessages = []) {
-  const franchise = String(story?.franchise || '').trim();
-  const tags = Array.isArray(story?.tags)
-    ? story.tags.map(tag => String(tag || '').trim()).filter(Boolean)
-    : [];
-  const latestUserMessage = [...recentMessages].reverse().find(message => message?.role === 'user');
-  const latestText = String(latestUserMessage?.content || '').trim();
-
-  let prompt = `あなたは物語生成の前に事実確認を行う下調べ担当です。\n`;
-  prompt += `Google Search を使い、日本語で短い確認メモだけを返してください。\n`;
-  prompt += `推測で埋めず、検索で裏を取れた内容だけを書くこと。\n`;
-  prompt += `会話本文は書かず、箇条書きのみで返すこと。\n`;
-  prompt += `キャラクターを確認した場合は、必要に応じて同行者・所属陣営・拠点・関係者も補ってください。\n`;
-  if (franchise) {
-    prompt += `作品タグ: ${franchise}\n`;
-  }
-  if (tags.length > 0) {
-    prompt += `補助タグ: ${tags.join(', ')}\n`;
-  }
-  if (unresolvedTerms.length > 0) {
-    prompt += `優先確認対象: ${unresolvedTerms.join(' / ')}\n`;
-  }
-  if (latestText) {
-    prompt += `直近のユーザー入力: ${latestText}\n`;
-  }
-  prompt += `\n出力形式:\n`;
-  prompt += `- 確認メモ1\n`;
-  prompt += `- 確認メモ2\n`;
-  return prompt;
-}
-
-async function fetchGoogleSearchGroundingMemo({
-  url,
-  story,
-  systemInstruction,
-  selectedMessages,
-  generationConfig,
-  attemptController,
-  usageAccumulator
-}) {
-  const unresolvedTerms = collectUnresolvedReferenceTerms(systemInstruction);
-  if (unresolvedTerms.length === 0) {
-    return '';
-  }
-
-  const prompt = buildGoogleSearchGroundingPrompt(story, unresolvedTerms, selectedMessages);
-  const searchGenerationConfig = {
-    ...generationConfig,
-    temperature: 0.2,
-    maxOutputTokens: 1024
-  };
-
-  accumulatePromptDebug(usageAccumulator, {
-    systemInstruction: '',
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    tools: [{ googleSearch: {} }]
-  });
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: searchGenerationConfig,
-      tools: [{ googleSearch: {} }],
-      toolConfig: {
-        includeServerSideToolInvocations: true
-      }
-    }),
-    signal: attemptController.signal
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
-    throw new Error(`Google Search grounding failed: ${errMsg}`);
-  }
-
-  const result = await response.json();
-  addUsageMetadata(usageAccumulator, result?.usageMetadata);
-  recordGroundingMetadata(usageAccumulator, result?.candidates?.[0]?.groundingMetadata);
-  if (hasServerToolParts(result)) {
-    usageAccumulator.serverToolRoundTrips = Number(usageAccumulator.serverToolRoundTrips || 0) + 1;
-  }
-
-  const extracted = extractStoryTextAndThoughtFromApiResponse(result);
-  const memo = String(extracted?.text || '').trim();
-  if (!memo) {
-    return '';
-  }
-
-  return `【Google Search 事前確認メモ】\n${memo}\n\n`;
-}
-
-function isServerSideGoogleSearchEnabledForTurn(story, systemInstruction, modelName) {
-  if (!shouldUseServerSideGoogleSearchForStory()) return false;
-  if (!supportsCombinedGoogleSearch(modelName)) return false;
-  return shouldEnableGoogleSearchForStory(story, systemInstruction, true);
-}
-
 function buildStructuredSearchMemoPrompt(providerLabel, query, purpose, franchise) {
   let prompt = `あなたは物語生成を支援する検索アシスタントです。\n`;
   prompt += `${providerLabel} を使い、日本語で簡潔な事実確認メモを返してください。\n`;
@@ -2717,7 +2584,7 @@ function buildExternalProviderSearchPlan(story, selectedMessages = []) {
   };
 }
 
-async function planProactiveStorySearch(story, selectedMessages = [], usageAccumulator = null) {
+async function planProactiveStorySearch(story, selectedMessages = [], usageAccumulator = null, signal = null) {
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
@@ -2751,6 +2618,7 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
   }
 
   const response = await fetch(url, {
+    signal,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -2794,8 +2662,10 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
   };
 }
 
-async function maybePrimeStorySearchMemory(story, selectedMessages = [], usageAccumulator = null) {
-  const plan = await planProactiveStorySearch(story, selectedMessages, usageAccumulator);
+async function maybePrimeStorySearchMemory(story, selectedMessages = [], usageAccumulator = null, signal = null) {
+  signal?.throwIfAborted();
+  const plan = await planProactiveStorySearch(story, selectedMessages, usageAccumulator, signal);
+  signal?.throwIfAborted();
   if (!plan?.query) return null;
 
   if (findSearchMemoryMatch(story, plan)) {
@@ -2824,12 +2694,42 @@ async function maybePrimeStorySearchMemory(story, selectedMessages = [], usageAc
     topicKey: plan.topicKey,
     sceneGoal: plan.sceneGoal,
     source: 'planner'
-  }, usageAccumulator, null);
+  }, usageAccumulator, null, signal);
 
+  signal?.throwIfAborted();
   if (result?.found) {
     await saveStory(story);
   }
   return { result, plan };
+}
+
+async function runProactiveStoryResearch(story, messages, usage, parentSignal, timeoutMs) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  let timedOut = false;
+  parentSignal.addEventListener('abort', cancel, { once: true });
+  if (parentSignal.aborted) cancel();
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await maybePrimeStorySearchMemory(story, messages, usage, controller.signal);
+  } catch (error) {
+    if (parentSignal.aborted) throw new Error('ユーザーにより生成が中止されました。');
+    recordSearchError(usage, {
+      provider: normalizeWebSearchProvider(getState().webSearchProvider),
+      stage: 'proactive_research',
+      code: timedOut ? 'research_timeout' : 'research_failed',
+      message: timedOut
+        ? '事前リサーチが制限時間を超えたため、本文生成を続行します。'
+        : `事前リサーチに失敗したため、本文生成を続行します: ${error.message || error}`
+    });
+    return null;
+  } finally {
+    clearTimeout(timer);
+    parentSignal.removeEventListener('abort', cancel);
+  }
 }
 
 function isNoisyTavilyResult(item, query, franchise) {
@@ -3020,9 +2920,10 @@ function isLowValueSearchSummary(text, query, franchise) {
   return genericSourceOnly || isSeriesOverview;
 }
 
-async function runTavilyLookup({ apiKey, query, purpose, franchise }) {
+async function runTavilyLookup({ apiKey, query, purpose, franchise, signal = null }) {
   const searchQuery = [query, franchise].filter(Boolean).join(' ');
   const response = await fetch('https://api.tavily.com/search', {
+    signal,
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -3117,7 +3018,8 @@ async function runGoogleSearchLookup({
   query,
   purpose,
   franchise,
-  usageAccumulator
+  usageAccumulator,
+  signal = null
 }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   const prompt = buildStructuredSearchMemoPrompt('Google Search', query, purpose, franchise);
@@ -3131,6 +3033,7 @@ async function runGoogleSearchLookup({
   }
 
   const response = await fetch(url, {
+    signal,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -3206,7 +3109,8 @@ async function runGoogleSearchLookup({
   };
 }
 
-async function searchWebForStory(story, args = {}, usageAccumulator = null, searchState = null) {
+async function searchWebForStory(story, args = {}, usageAccumulator = null, searchState = null, signal = null) {
+  signal?.throwIfAborted();
   const appState = getState();
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
@@ -3288,7 +3192,8 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
         apiKey: tavilyApiKey,
         query,
         purpose,
-        franchise
+        franchise,
+        signal
       });
     }
     if (providerName === 'google') {
@@ -3308,7 +3213,8 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
         query,
         purpose,
         franchise,
-        usageAccumulator
+        usageAccumulator,
+        signal
       });
     }
     return {
@@ -3352,6 +3258,7 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
     franchise,
     provider: result?.provider || provider
   };
+  signal?.throwIfAborted();
   if (story && normalizedResult.found && normalizedResult.text) {
     upsertSearchMemoryEntry(story, {
       topicKey: args?.topicKey || query,
@@ -3682,7 +3589,7 @@ async function generateGroqStoryResponse(story, appState = getState()) {
   const historyCompressionEnabled = appState.historyCompressionEnabled !== false;
   const configuredHistoryTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
   const effectiveHistoryTurnLimit = historyCompressionEnabled ? configuredHistoryTurnLimit : 0;
-  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], effectiveHistoryTurnLimit);
+  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], effectiveHistoryTurnLimit, story.session_lore);
   usageAccumulator.historyCompressionEnabled = historyCompressionEnabled;
   usageAccumulator.historyTurnLimit = effectiveHistoryTurnLimit;
   usageAccumulator.omittedTurns = omittedTurns;
@@ -3690,7 +3597,7 @@ async function generateGroqStoryResponse(story, appState = getState()) {
   const systemInstruction = await buildSystemInstruction(story, {
     omittedTurns,
     historyTurnLimit: effectiveHistoryTurnLimit,
-    googleSearchEnabled: false,
+    webSearchEnabled: false,
     gemmaThinkEnabled: false
   });
   const messages = [
@@ -3811,30 +3718,31 @@ export async function generateStoryResponse(story) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   const usageAccumulator = createUsageAccumulator('story', modelName);
   const webSearchProvider = normalizeWebSearchProvider(appState.webSearchProvider);
-  const googleSearchEnabled = webSearchProvider !== 'off';
+  const webSearchEnabled = webSearchProvider !== 'off';
   usageAccumulator.searchProviderLabel = getWebSearchProviderLabel(webSearchProvider);
   const historyCompressionEnabled = appState.historyCompressionEnabled !== false;
   const configuredHistoryTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
   const effectiveHistoryTurnLimit = historyCompressionEnabled ? configuredHistoryTurnLimit : 0;
-  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], effectiveHistoryTurnLimit);
+  const { selectedMessages, omittedTurns } = selectPromptMessages(story.messages || [], effectiveHistoryTurnLimit, story.session_lore);
   const testConversationMode = isTestConversationMode(story);
   usageAccumulator.historyCompressionEnabled = historyCompressionEnabled;
   usageAccumulator.historyTurnLimit = effectiveHistoryTurnLimit;
   usageAccumulator.omittedTurns = omittedTurns;
 
+  const mainController = new AbortController();
+  updateState({ activeAbortController: mainController });
+  try {
   if (!testConversationMode) {
-    await maybePrimeStorySearchMemory(story, selectedMessages, usageAccumulator);
+    await runProactiveStoryResearch(story, selectedMessages, usageAccumulator, mainController.signal, timeoutSeconds * 1000);
   }
 
   const systemInstruction = await buildSystemInstruction(story, {
     omittedTurns,
     historyTurnLimit: effectiveHistoryTurnLimit,
-    googleSearchEnabled,
+    webSearchEnabled,
     gemmaThinkEnabled: normalizeGemmaThinkingEnabled(appState.gemmaThinkingEnabled)
   });
-  const shouldOfferGoogleSearchForTurn = !testConversationMode && isServerSideGoogleSearchEnabledForTurn(story, systemInstruction, modelName);
-  usageAccumulator.googleSearchAvailable = googleSearchEnabled;
-  let runtimeSystemInstruction = systemInstruction;
+  usageAccumulator.googleSearchAvailable = webSearchEnabled;
 
   // Map messages to Gemini API formats: { role: 'user' | 'model', parts: [{ text: string }] }
   const contents = selectedMessages.map(msg => ({
@@ -3855,12 +3763,9 @@ export async function generateStoryResponse(story) {
     generationConfig.thinkingConfig = thinkingConfig;
   }
 
-  // 手動キャンセル用のメイン AbortController
-  const mainController = new AbortController();
-  updateState({ activeAbortController: mainController });
-
   let attempt = 0;
   while (attempt < maxRetries) {
+    if (mainController.signal.aborted) throw new Error('ユーザーにより生成が中止されました。');
     attempt++;
 
     // このアテンプト専用の AbortController
@@ -4062,32 +3967,9 @@ export async function generateStoryResponse(story) {
         ? functionDeclarations.filter(fn => fn.name === 'search_web')
         : functionDeclarations;
 
-      const tools = [];
-      if (shouldOfferGoogleSearchForTurn) {
-        tools.push({ googleSearch: {} });
-      }
-      if (activeFunctionDeclarations.length > 0) {
-        tools.push({ functionDeclarations: activeFunctionDeclarations });
-      }
-
-      if (shouldOfferGoogleSearchForTurn) {
-        try {
-          const groundingMemo = await fetchGoogleSearchGroundingMemo({
-            url,
-            story,
-            systemInstruction: runtimeSystemInstruction,
-            selectedMessages,
-            generationConfig,
-            attemptController,
-            usageAccumulator
-          });
-          if (groundingMemo) {
-            runtimeSystemInstruction += `\n${groundingMemo}`;
-          }
-        } catch (groundingErr) {
-          console.warn('[AI] Google Search grounding prepass failed. Continuing without injected memo.', groundingErr);
-        }
-      }
+      const tools = activeFunctionDeclarations.length > 0
+        ? [{ functionDeclarations: activeFunctionDeclarations }]
+        : [];
 
       let currentContents = [...contents];
       let extracted = { text: null, thought: null };
@@ -4098,67 +3980,35 @@ export async function generateStoryResponse(story) {
 
       // ★ 追加：Function Calling 往復用のループ（AIがメモを更新して本文を書くまで最大3回まで往復する）
       for (let fcTurn = 0; fcTurn < 3; fcTurn++) {
-        let googleSearchAllowedForRequest = shouldOfferGoogleSearchForTurn;
-        let result = null;
-
-        for (let requestVariant = 0; requestVariant < 2; requestVariant++) {
-          const activeTools = googleSearchAllowedForRequest
-            ? tools
-            : tools.filter(tool => !tool.googleSearch);
-
-          accumulatePromptDebug(usageAccumulator, {
-            systemInstruction: runtimeSystemInstruction,
+        accumulatePromptDebug(usageAccumulator, {
+          systemInstruction,
+          contents: currentContents,
+          tools
+        });
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
             contents: currentContents,
-            tools: activeTools
-          });
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: currentContents,
-              systemInstruction: { parts: [{ text: runtimeSystemInstruction }] },
-              generationConfig,
-              tools: activeTools,
-              toolConfig: googleSearchAllowedForRequest
-                ? {
-                  functionCallingConfig: { mode: 'VALIDATED' },
-                  includeServerSideToolInvocations: true
-                }
-                : {
-                  functionCallingConfig: { mode: 'AUTO' }
-                }
-            }),
-            signal: attemptController.signal
-          });
-
-          if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
-
-            if (googleSearchAllowedForRequest && isQuotaLikeApiError(response.status, errMsg)) {
-              console.warn('[AI] Google Search tool request hit quota-like error. Retrying without googleSearch.', errMsg);
-              googleSearchAllowedForRequest = false;
-              continue;
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+            generationConfig,
+            tools,
+            toolConfig: {
+              functionCallingConfig: { mode: 'AUTO' }
             }
+          }),
+          signal: attemptController.signal
+        });
 
-            throw new Error(`Gemini API Error: ${errMsg}`);
-          }
-
-          result = await response.json();
-          break;
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          const errMsg = errorData.error?.message || `HTTP status ${response.status}`;
+          throw new Error(`Gemini API Error: ${errMsg}`);
         }
 
-        if (!result) {
-          throw new Error('Gemini API Error: response was empty after retry.');
-        }
+        const result = await response.json();
 
         addUsageMetadata(usageAccumulator, result?.usageMetadata);
-        recordGroundingMetadata(usageAccumulator, result?.candidates?.[0]?.groundingMetadata);
-        const hasBuiltInToolActivity = hasServerToolParts(result);
-        if (hasBuiltInToolActivity) {
-          usageAccumulator.serverToolRoundTrips = Number(usageAccumulator.serverToolRoundTrips || 0) + 1;
-        }
-
         // Function Calling (update_session_lore) の呼び出し判定・実行
         const calls = result?.candidates?.[0]?.content?.parts?.filter(p => p.functionCall) || [];
         if (calls.length > 0) {
@@ -4210,7 +4060,7 @@ export async function generateStoryResponse(story) {
                   }
                 });
               } else if (name === 'search_web') {
-                const result = await searchWebForStory(story, args, usageAccumulator, searchState);
+                const result = await searchWebForStory(story, args, usageAccumulator, searchState, attemptController.signal);
                 functionResponses.push({
                   functionResponse: {
                     name,
@@ -4301,10 +4151,6 @@ export async function generateStoryResponse(story) {
 
         // 関数呼び出しがない場合は通常通り本文を抽出して終了
         extracted = extractStoryTextAndThoughtFromApiResponse(result);
-        if (!extracted.text && hasBuiltInToolActivity && result?.candidates?.[0]?.content) {
-          currentContents.push(result.candidates[0].content);
-          continue;
-        }
         break; 
       } // for loop end
 
@@ -4342,6 +4188,9 @@ export async function generateStoryResponse(story) {
 
   updateState({ activeAbortController: null });
   throw new Error('AI応答の生成が開始されませんでした。リトライ回数の設定を確認してください。');
+  } finally {
+    updateState({ activeAbortController: null });
+  }
 }
 
 /**

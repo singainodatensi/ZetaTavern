@@ -8,7 +8,7 @@
  *   - /ZetaTavern_Assets/    … キャラ・主人公のアバター画像 (Blob → バイナリ)
  */
 
-import { getSetting, saveSetting } from './db.js?v=20260714a';
+import { getSetting, saveSetting } from './db.js';
 
 // ============================================================
 // 定数
@@ -902,6 +902,14 @@ async function uploadV2Data({ stories = [], characters = [], lores = [], setting
   return manifest;
 }
 
+async function hashMessageChunks(chunks) {
+  return Promise.all(chunks.map(async messages => {
+    const bytes = new TextEncoder().encode(JSON.stringify(messages));
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+  }));
+}
+
 async function uploadV2Story(story, previousEntry = null, now = Date.now()) {
   const storyDir = previousEntry?.dirPath && previousEntry.dirPath.includes('__')
     ? previousEntry.dirPath
@@ -928,6 +936,7 @@ async function uploadV2Story(story, previousEntry = null, now = Date.now()) {
     dirPath: storyDir,
     metaPath,
     messageChunks,
+    messageChunkHashes: await hashMessageChunks(chunks),
     messageCount: Array.isArray(story.messages) ? story.messages.length : 0,
     updatedAt: story.timestamp || now,
     title: story.title || '',
@@ -959,9 +968,11 @@ async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) 
     return `${storyDir}/${chunkName}`;
   });
 
-  const firstChangedChunk = Math.max(0, Math.floor(Math.max(previousEntry.messageCount - 1, 0) / MESSAGE_CHUNK_SIZE));
-  for (let i = firstChangedChunk; i < chunks.length; i++) {
-    await uploadJson(messageChunks[i], { index: i, messages: chunks[i] });
+  const messageChunkHashes = await hashMessageChunks(chunks);
+  for (let i = 0; i < chunks.length; i++) {
+    if (previousEntry.messageChunkHashes?.[i] !== messageChunkHashes[i]) {
+      await uploadJson(messageChunks[i], { index: i, messages: chunks[i] });
+    }
   }
 
   return {
@@ -969,6 +980,7 @@ async function uploadV2StoryAppendDelta(story, previousEntry, now = Date.now()) 
     metaPath,
     messageChunks,
     messageCount: nextMessageCount,
+    messageChunkHashes,
     updatedAt: story.timestamp || now,
     title: story.title || '',
     franchise: story.franchise || ''

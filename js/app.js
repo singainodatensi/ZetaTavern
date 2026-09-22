@@ -5,9 +5,9 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260714a';
-import { generateStoryResponse, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks } from './ai-client.js?v=20260714a';
-import * as dropbox from './dropbox.js?v=20260714a';
+import * as ui from './ui.js?v=20260922c';
+import { generateStoryResponse, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks } from './ai-client.js?v=20260922c';
+import * as dropbox from './dropbox.js?v=20260922c';
 import { buildStoryCharacterRefs } from './story-characters.js';
 import {
   DEFAULT_SESSION_SUMMARY_PROMPT,
@@ -17,7 +17,7 @@ import {
   ensureSessionLoreStructure,
   normalizeSessionSummarySegments,
   renderSessionSummarySegments
-} from './story-structure.js?v=20260714a';
+} from './story-structure.js?v=20260922c';
 
 // Default Storyteller instructions preset matching the Storyteller rules
 const DEFAULT_STORYTELLER_PROMPT =   `・三人称視点で描写し、キャラクター同士のテンポの良い会話（台詞）と、動き・仕草（動作・情景描写）を中心に物語を進行させてください。\n` +
@@ -2368,6 +2368,7 @@ async function performDropboxPush() {
   try {
     setDropboxProgress(activeDropboxSyncLabel ? `他の同期 (${activeDropboxSyncLabel}) の完了待ち...` : '同期待機中...');
     await runExclusiveDropboxSync('manual-push', async () => {
+      const pendingSnapshot = await db.getPendingDropboxChanges();
       const stories    = await db.getStories();
       const characters = await db.getCharacters();
       const lores      = await db.getWorldLores();
@@ -2394,6 +2395,7 @@ async function performDropboxPush() {
         onProgress: msg => setDropboxProgress(msg)
       });
       await saveDropboxManifestSnapshot(pushedManifest);
+      await db.acknowledgeDropboxChanges(pendingSnapshot);
 
       const now = Date.now();
       await db.saveSetting('dropbox_last_sync', now);
@@ -2429,6 +2431,7 @@ async function performDropboxPull() {
     setDropboxProgress(activeDropboxSyncLabel ? `他の同期 (${activeDropboxSyncLabel}) の完了待ち...` : '同期待機中...');
     let result = null;
     await runExclusiveDropboxSync('manual-pull', async () => {
+      const pendingSnapshot = await db.getPendingDropboxChanges();
       const localAssets = await db.getAll('assets');
       const localAssetIds = new Set(localAssets.map(a => a.assetId));
 
@@ -2446,6 +2449,7 @@ async function performDropboxPull() {
 
       await applyDropboxPullToLocal(pulled, { forceFull: true });
       await saveDropboxManifestSnapshot(pulled.manifest);
+      await db.acknowledgeDropboxChanges(pendingSnapshot);
 
       const now = Date.now();
       await db.saveSetting('dropbox_last_sync', now);
@@ -2491,7 +2495,14 @@ async function performDropboxPull() {
 }
 
 /** ターン終了後に自動同期を行うか確認する（静的UI表示） */
-function queueDropboxAutoSync(request = {}) {
+async function queueDropboxAutoSync(request = {}) {
+  try {
+    await db.recordDropboxSyncRequest(request);
+  } catch (error) {
+    console.error('[Dropbox] 未同期変更の記録に失敗しました:', error);
+    updateSyncStatusIndicator('error');
+    return;
+  }
   const hasExplicitScope =
     request?.syncStory !== undefined ||
     request?.syncLores !== undefined ||
@@ -2556,16 +2567,7 @@ async function performAutoDropboxSync({ storyId = null, forceFull = false, syncS
     await runExclusiveDropboxSync('auto-sync', async () => {
       updateSyncStatusIndicator('syncing');
       try {
-        let completed = false;
-        if (!forceFull && (syncStory || syncLores || syncCharacters)) {
-          completed = await performDropboxSelectiveAutoSync({ storyId, syncStory, syncLores, syncCharacters, characterIds, assetIds, loreFranchises });
-          if (!completed) {
-            console.log('[Dropbox AutoSync] 差分同期の基準がないため、フル同期します。');
-          }
-        }
-        if (!completed) {
-          completed = await performDropboxPushSilent({ storyId, preferDelta: !forceFull && syncStory && !syncLores });
-        }
+        const completed = await flushPendingDropboxChanges();
         if (completed && typeof completed === 'object') {
           await saveDropboxManifestSnapshot(completed);
         }
@@ -2583,6 +2585,50 @@ async function performAutoDropboxSync({ storyId = null, forceFull = false, syncS
       }
     });
   }
+}
+
+async function flushPendingDropboxChanges() {
+  const snapshot = await db.getPendingDropboxChanges();
+  const entries = Object.values(snapshot);
+  if (!entries.length) return true;
+  if (entries.some(entry => entry.scope === 'full')) {
+    const result = await performDropboxPushSilent();
+    await saveDropboxManifestSnapshot(result);
+    await db.acknowledgeDropboxChanges(snapshot);
+    return result;
+  }
+
+  let lastManifest = null;
+  const assets = entries.filter(entry => entry.scope === 'assets').map(entry => entry.id);
+  const jobs = entries.filter(entry => entry.scope === 'stories').map(entry => ({
+    scopes: [entry], request: { syncStory: true, storyId: entry.id, assetIds: assets }
+  }));
+  const characters = entries.filter(entry => entry.scope === 'characters');
+  const assetEntries = entries.filter(entry => entry.scope === 'assets');
+  if (characters.length || assetEntries.length) jobs.push({
+    scopes: [...characters, ...assetEntries],
+    request: { syncCharacters: true, characterIds: characters.map(entry => entry.id), assetIds: assets }
+  });
+  const lores = entries.filter(entry => entry.scope === 'lores');
+  if (lores.length) jobs.push({
+    scopes: lores, request: { syncLores: true, loreFranchises: lores.some(entry => entry.id === '*') ? [] : lores.map(entry => entry.id) }
+  });
+
+  for (const job of jobs) {
+    const result = await performDropboxSelectiveAutoSync(job.request);
+    if (!result) {
+      const fullResult = await performDropboxPushSilent();
+      await saveDropboxManifestSnapshot(fullResult);
+      await db.acknowledgeDropboxChanges(snapshot);
+      return fullResult;
+    }
+    if (typeof result !== 'object') throw new Error('差分同期の完了を確認できませんでした。');
+    await saveDropboxManifestSnapshot(result);
+    const sent = Object.fromEntries(Object.entries(snapshot).filter(([, entry]) => job.scopes.includes(entry)));
+    await db.acknowledgeDropboxChanges(sent);
+    lastManifest = result;
+  }
+  return lastManifest;
 }
 
 /**
@@ -2673,7 +2719,6 @@ async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = fal
   if (syncCharacters && uniqueCharacterIds.length > 0) {
     const allCharacters = await db.getCharacters();
     const targetCharacters = allCharacters.filter(item => uniqueCharacterIds.includes(item.characterId));
-    if (targetCharacters.length === 0) return false;
 
     const relevantAssetIds = uniqueAssetIds.length > 0
       ? uniqueAssetIds
@@ -2693,10 +2738,15 @@ async function performDropboxSelectiveAutoSync({ storyId = null, syncStory = fal
     if (!characterResult) return false;
     lastManifest = characterResult;
   } else if (syncCharacters && uniqueCharacterIds.length === 0 && uniqueAssetIds.length > 0) {
+    const assets = [];
+    for (const assetId of uniqueAssetIds) {
+      const blob = await db.getAssetBlob(assetId);
+      if (blob) assets.push({ assetId, blob });
+    }
     const characterResult = await dropbox.pushCharacterDeltaToDropbox({
       characters: [],
       settings,
-      assets: [],
+      assets,
       onProgress: msg => console.log('[Dropbox AutoSync]', msg)
     });
     if (!characterResult) return false;
@@ -2775,6 +2825,7 @@ function updateSyncStatusIndicator(status) {
  * ローカルの更新（ストーリーやキャラクター）が、前回の同期時刻より新しいか判定
  */
 async function hasNewerLocalChanges() {
+  if (Object.keys(await db.getPendingDropboxChanges()).length > 0) return true;
   const lastSync = parseInt(await db.getSetting('dropbox_last_sync', '0'), 10) || 0;
   const localChangeAt = parseInt(await db.getLocalChangeMarker(), 10) || 0;
   return localChangeAt > lastSync;
@@ -2792,18 +2843,14 @@ async function performStartupSync() {
     updateSyncStatusIndicator('syncing');
     try {
       if (await hasNewerLocalChanges()) {
-        console.log('[Dropbox StartupSync] ローカルに最新の未同期編集があります。Pullをスキップし、直近ストーリーを差分Pushします。');
-        const lastActiveId = await db.getSetting('last_active_story_id', null);
-        const localStories = await db.getStories();
-        const latestStory = localStories
-          .slice()
-          .sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))[0];
-        const targetStoryId = lastActiveId || latestStory?.storyId || null;
-        const completed = targetStoryId
-          ? await performDropboxSelectiveAutoSync({ storyId: targetStoryId, syncStory: true })
-          : false;
+        console.log('[Dropbox StartupSync] 記録された未同期変更を送信します。');
+        if (Object.keys(await db.getPendingDropboxChanges()).length === 0) {
+          // Legacy installations have only a global marker, not individual dirty scopes.
+          await db.recordDropboxSyncRequest({ forceFull: true });
+        }
+        const completed = await flushPendingDropboxChanges();
         if (!completed) {
-          console.warn('[Dropbox StartupSync] 差分Pushできるストーリーがないため、起動時の重いフルPushはスキップしました。手動Pushで全体同期できます。');
+          console.warn('[Dropbox StartupSync] 未同期変更の送信完了を確認できませんでした。');
           updateSyncStatusIndicator('error');
           return;
         }

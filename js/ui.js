@@ -7,13 +7,13 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260714a';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260922c';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 import {
   ensureSessionLoreStructure,
   ensureStoryPlanStructure,
   normalizeStoryPlanList
-} from './story-structure.js?v=20260714a';
+} from './story-structure.js?v=20260922c';
 
 const blobUrlCache = new Map();
 
@@ -1453,7 +1453,10 @@ export async function showEditSegmentModal(msgIndex, seg) {
       updatedContent = updatedContent.replace(/\n{3,}/g, '\n\n');
       
       currentStory.messages[msgIndex].content = updatedContent;
+      delete currentStory.messages[msgIndex].aiContent;
+      delete currentStory.messages[msgIndex].directedUtterances;
       await db.saveStory(currentStory);
+      requestDropboxAutoSync(currentStory.storyId, { syncStory: true });
       modal.remove();
       renderStory();
     } else {
@@ -1514,7 +1517,10 @@ export async function showEditMessageModal(msgIndex) {
     const newContent = textarea.value.trim();
     if (newContent) {
       currentStory.messages[msgIndex].content = newContent;
+      delete currentStory.messages[msgIndex].aiContent;
+      delete currentStory.messages[msgIndex].directedUtterances;
       await db.saveStory(currentStory);
+      requestDropboxAutoSync(currentStory.storyId, { syncStory: true });
       modal.remove();
       renderStory();
     } else {

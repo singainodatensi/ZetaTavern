@@ -220,8 +220,7 @@ export function ensureSessionLoreStructure(story, options = {}) {
   const originalSummary = String(sessionLore.summary || '').trim();
   const summarySegments = normalizeSessionSummarySegments(sessionLore);
   const longTermEvents = normalizeSessionLoreList(
-    sessionLore.long_term_events || sessionLore.key_events || [],
-    listLimits ? 20 : null
+    sessionLore.long_term_events || sessionLore.key_events || []
   );
   const activeFlags = normalizeSessionLoreList(
     sessionLore.active_flags || sessionLore.open_threads || [],

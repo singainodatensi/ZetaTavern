@@ -7,6 +7,87 @@ const DB_NAME = 'ZetaTavern_PWA_Unique_v1_DB'; // 他のアプリと絶対衝突
 // Bump when adding stores/indexes so existing users receive schema upgrades.
 const DB_VERSION = 3;
 const LOCAL_CHANGE_MARKER_KEY = 'dropbox_local_change_at';
+const SYNC_JOURNAL_KEY = 'dropbox_pending_changes_v1';
+
+function changeKey(scope, id) {
+  return JSON.stringify([scope, id]);
+}
+
+export async function getPendingDropboxChanges() {
+  const record = await get('settings', SYNC_JOURNAL_KEY);
+  return record?.value || {};
+}
+
+async function updateSyncJournal(update) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('settings', 'readwrite');
+    const store = tx.objectStore('settings');
+    const request = store.get(SYNC_JOURNAL_KEY);
+    request.onsuccess = () => {
+      const changes = request.result?.value || {};
+      update(changes);
+      store.put({ key: SYNC_JOURNAL_KEY, value: changes });
+    };
+    tx.oncomplete = () => resolve();
+    tx.onabort = () => reject(tx.error || new Error('Sync journal transaction aborted'));
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function recordDropboxSyncRequest(request = {}) {
+  await updateSyncJournal(changes => {
+    const add = (scope, id) => {
+      changes[changeKey(scope, id)] = { scope, id, revision: crypto.randomUUID() };
+    };
+    if (request.forceFull || (!request.storyId && !request.syncStory && !request.syncCharacters && !request.syncLores)) {
+      add('full', '*');
+    }
+    if (request.storyId) add('stories', request.storyId);
+    for (const id of request.characterIds || []) add('characters', id);
+    for (const id of request.assetIds || []) add('assets', id);
+    if (request.syncLores) {
+      for (const id of request.loreFranchises?.length ? request.loreFranchises : ['*']) add('lores', id || '共通');
+    }
+  });
+}
+
+export async function acknowledgeDropboxChanges(snapshot) {
+  await updateSyncJournal(changes => {
+    for (const [key, sent] of Object.entries(snapshot)) {
+      if (changes[key]?.revision === sent.revision) delete changes[key];
+    }
+  });
+}
+
+// Commit local data and its dirty scope together. A concurrent write gets a new revision.
+async function mutateTracked(storeName, value, key, removing = false) {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([storeName, 'settings'], 'readwrite');
+    const store = tx.objectStore(storeName);
+    const settings = tx.objectStore('settings');
+    const oldRequest = store.get(key);
+    oldRequest.onsuccess = () => {
+      const journalRequest = settings.get(SYNC_JOURNAL_KEY);
+      journalRequest.onsuccess = () => {
+        const changes = journalRequest.result?.value || {};
+        const ids = storeName === 'world_lore'
+          ? [...new Set([oldRequest.result, value].filter(Boolean).map(item => String(item.franchise || '').trim() || '共通'))]
+          : [key];
+        const scope = storeName === 'world_lore' ? 'lores' : storeName;
+        for (const id of ids) changes[changeKey(scope, id)] = { scope, id, revision: crypto.randomUUID() };
+        settings.put({ key: SYNC_JOURNAL_KEY, value: changes });
+        settings.put({ key: LOCAL_CHANGE_MARKER_KEY, value: Date.now() });
+        if (removing) store.delete(key);
+        else store.put(value);
+      };
+    };
+    tx.oncomplete = () => resolve(key);
+    tx.onabort = () => reject(tx.error || new Error('Data transaction aborted'));
+    tx.onerror = () => reject(tx.error);
+  });
+}
 
 let dbPromise = null;
 let localChangeTrackingSuspendCount = 0;
@@ -90,7 +171,11 @@ export async function getAll(storeName) {
   });
 }
 
-async function put(storeName, value) {
+async function put(storeName, value, track = true) {
+  if (track && localChangeTrackingSuspendCount === 0 && storeName !== 'settings') {
+    const key = value.storyId || value.characterId || value.assetId || value.id;
+    return mutateTracked(storeName, value, key);
+  }
   const db = await getDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(storeName, 'readwrite');
@@ -103,6 +188,9 @@ async function put(storeName, value) {
 }
 
 async function deleteKey(storeName, key) {
+  if (localChangeTrackingSuspendCount === 0 && storeName !== 'settings') {
+    return mutateTracked(storeName, null, key, true);
+  }
   const db = await getDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(storeName, 'readwrite');
@@ -302,7 +390,7 @@ export async function saveCharacterFromSync(character) {
     character.timestamp = Date.now();
   }
   try {
-    await put('characters', character);
+    await put('characters', character, false);
     return character.characterId;
   } catch (err) {
     console.error('Error saving synced character:', err);
@@ -369,7 +457,7 @@ export async function saveStoryFromSync(story) {
     story.timestamp = Date.now();
   }
   try {
-    await put('stories', story);
+    await put('stories', story, false);
     return story.storyId;
   } catch (err) {
     console.error('Error saving synced story:', err);
