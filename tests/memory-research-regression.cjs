@@ -25,7 +25,47 @@ async function main() {
   assert(ai.includes('runGoogleSearchLookup'));
   assert(ai.includes('runTavilyLookup'));
   assert(ai.includes("functionCallingConfig: { mode: 'AUTO' }"));
+  assert(ai.includes("(webSearchEnabled || fn.name !== 'search_web')"));
   console.log('PASS: retired combined Google Search path removed; search_web providers remain');
+
+  const searchQueries = vm.createContext({
+    normalizeLoreEntryName: value => String(value || '').trim(),
+    uniqueNonEmpty: values => [...new Set(values.filter(Boolean))],
+    collectStoryScopedSearchAnchors: (_, text) => text.includes('エミリア') ? ['エミリア'] : [],
+    PROACTIVE_REFERENCE_STOPWORDS: new Set(),
+    KNOWN_WORLD_SEARCH_TERMS: new Set(['白鯨'])
+  });
+  vm.runInContext(section(ai, 'function extractReferenceCandidatesFromText(', 'function collectStoryScopedSearchAnchors('), searchQueries);
+  const normalizeQuery = (query, franchise = 'リゼロ') => searchQueries.normalizeSearchWebQuery(query, { franchise }, franchise);
+  assert.equal(normalizeQuery('「なんだか知らないけど、捕まってたのかアンタ。ちょっと待ってろ、縄を切るから」').rejected, true);
+  assert.equal(normalizeQuery('「助けて」').reason, 'dialogue_query');
+  assert.equal(normalizeQuery('なんだか知らないけど、捕まってたのかアンタ。').reason, 'dialogue_query');
+  assert.equal(normalizeQuery('「エミリアが捕まった。助けよう」').query, 'エミリア リゼロ');
+  assert.equal(normalizeQuery('白鯨 リゼロ').query, '白鯨 リゼロ');
+  assert.equal(normalizeQuery('「星くず☆うぃっちメルル」').query, '星くず☆うぃっちメルル');
+  assert.equal(normalizeQuery('「ドキドキ！プリキュア」').query, 'ドキドキ！プリキュア');
+  let providerCalls = 0;
+  let webSearchEnabled = true;
+  const blockedSearch = vm.createContext({
+    ...searchQueries,
+    getState: () => ({ apiKey: 'test-key', webSearchProvider: 'google', webSearchEnabled }),
+    normalizeWebSearchProvider: value => value,
+    getApiKeyFromStorage: async () => 'test-key',
+    runGoogleSearchLookup: async () => { providerCalls++; return { found: true }; }
+  });
+  vm.runInContext(section(ai, 'async function searchWebForStory(', 'function isQuotaLikeApiError('), blockedSearch);
+  const blockedResult = await blockedSearch.searchWebForStory({ franchise: 'リゼロ' }, {
+    query: '「なんだか知らないけど、捕まってたのかアンタ。ちょっと待ってろ、縄を切るから」'
+  });
+  assert.equal(blockedResult.rejected, true);
+  assert.equal(providerCalls, 0);
+  webSearchEnabled = false;
+  const disabledResult = await blockedSearch.searchWebForStory({ franchise: 'リゼロ' }, { query: '白鯨 リゼロ' });
+  assert.equal(disabledResult.found, false);
+  assert.match(disabledResult.message, /OFF/);
+  assert.equal(providerCalls, 0);
+  webSearchEnabled = true;
+  console.log('PASS: dialogue is withheld from Web search while named topics remain searchable');
 
   const memory = vm.createContext({});
   vm.runInContext(read('js/story-structure.js').replaceAll('export ', ''), memory);
@@ -44,7 +84,7 @@ async function main() {
   let seenSignal;
   const research = vm.createContext({
     AbortController, setTimeout, clearTimeout,
-    getState: () => ({ apiKey: 'test', webSearchProvider: 'google' }),
+    getState: () => ({ apiKey: 'test', webSearchProvider: 'google', webSearchEnabled }),
     normalizeWebSearchProvider: value => value,
     shouldUseExternalProviderPlanning: () => false,
     resolveSearchModelName: () => 'test-model',
@@ -78,6 +118,10 @@ async function main() {
   const run = (signal, timeout = 100) => research.runProactiveStoryResearch(
     { franchise: 'test' }, [{ role: 'user', content: 'test' }], {}, signal, timeout
   );
+  webSearchEnabled = false;
+  assert.equal(await run(new AbortController().signal), null);
+  assert.equal(errors.length, 0);
+  webSearchEnabled = true;
   assert.equal(await run(new AbortController().signal), null);
   assert.equal(errors.at(-1).code, 'research_failed');
   mode = 'http';

@@ -102,6 +102,7 @@ ZetaTavern は、単なるチャット UI ではありません。
 - Web検索
   - Google Search Grounding
   - Tavily API
+  - ストーリー進行とUI設定から、事前リサーチと会話中のWeb検索を一括でON/OFF可能（キャラクター・ロアの手動検索は対象外）
 - Dropbox Push / Pull / 自動同期設定
 - PWA + Service Worker
 - モバイル向けドロワー / サイドバー / オーバーフローメニュー

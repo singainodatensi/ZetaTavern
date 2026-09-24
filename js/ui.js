@@ -2792,6 +2792,22 @@ export async function showStorySettingsModal() {
         <button id="story-settings-close-btn" style="background: none; border: none; font-size: 24px; cursor: pointer; color: inherit;">&times;</button>
       </div>
       <div data-story-settings-scroll-body="true" style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 4px;">
+        <fieldset class="story-metadata-group story-settings-metadata-group">
+          <legend>作品情報・タグ</legend>
+          <div class="form-group">
+            <label for="story-franchise-modal-input">作品名タグ (Franchise)</label>
+            <input type="text" id="story-franchise-modal-input" value="${escapeHTML(currentStory.franchise || '')}" placeholder="例: リゼロ">
+          </div>
+          <div class="form-group">
+            <label for="story-franchise-context-modal-input">検索用作品名・別名</label>
+            <input type="text" id="story-franchise-context-modal-input" value="${escapeHTML(currentStory.franchiseContext || '')}" placeholder="例: Re:ゼロから始める異世界生活">
+          </div>
+          <div class="form-group">
+            <label for="story-tags-input">ストーリーのタグ (カンマ区切り)</label>
+            <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" placeholder="例: リゼロ, 異世界, テスト">
+          </div>
+        </fieldset>
+
         <fieldset style="border: 1px solid var(--border-color, #ddd); padding: 12px; border-radius: 6px;">
           <legend style="padding: 0 6px; font-weight: bold; font-size: 13px;">主人公設定</legend>
           <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
@@ -2815,14 +2831,6 @@ export async function showStorySettingsModal() {
         </fieldset>
 
         <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-weight: bold; font-size: 13px;">作品名タグ (Franchise)</label>
-          <input type="text" id="story-franchise-modal-input" value="${escapeHTML(currentStory.franchise || '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-weight: bold; font-size: 13px;">検索用作品名・別名</label>
-          <input type="text" id="story-franchise-context-modal-input" value="${escapeHTML(currentStory.franchiseContext || '')}" placeholder="例: リゼロ / Re:ゼロから始める異世界生活" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">画像ベースURL</label>
           <input type="text" id="story-image-base-url-modal-input" value="${escapeHTML(currentStory.imageBaseUrl || '')}" placeholder="例: https://aquamarine-torte-953693.netlify.app" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
         </div>
@@ -2833,10 +2841,6 @@ export async function showStorySettingsModal() {
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">世界観設定・あらすじ</label>
           <textarea id="story-world-input" rows="3" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; resize: none; overflow-y: hidden; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">${escapeHTML(currentStory.worldPrompt || '')}</textarea>
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-weight: bold; font-size: 13px;">ストーリーのタグ (カンマ区切り)</label>
-          <input type="text" id="story-tags-input" value="${escapeHTML(currentStory.tags ? currentStory.tags.join(', ') : '')}" style="width: 100%; padding: 6px; border: 1px solid var(--border-color, #ccc); border-radius: 4px; box-sizing: border-box; background: var(--bg-input, transparent); color: inherit;">
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-weight: bold; font-size: 13px;">ストーリーテラーへの指示（執筆ルール）</label>
@@ -2939,6 +2943,13 @@ saveBtn.onclick = async () => {
       currentStory.storytellerPrompt = promptText;
       currentStory.tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0) : [];
       currentStory.characters = buildStoryCharacterRefs(currentStory, await db.getCharacters());
+
+      const sidebarFranchiseInput = document.getElementById('story-franchise-input');
+      const sidebarFranchiseContextInput = document.getElementById('story-franchise-context-input');
+      const sidebarTagsInput = document.getElementById('story-tags-sidebar-input');
+      if (sidebarFranchiseInput) sidebarFranchiseInput.value = currentStory.franchise;
+      if (sidebarFranchiseContextInput) sidebarFranchiseContextInput.value = currentStory.franchiseContext;
+      if (sidebarTagsInput) sidebarTagsInput.value = currentStory.tags.join(', ');
 
       await db.saveStory(currentStory);
       const updatedStories = await db.getStories();

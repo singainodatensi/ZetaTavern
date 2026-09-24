@@ -12,6 +12,7 @@ const state = {
   modelName: 'gemini-2.5-flash',
   searchModelName: '',
   webSearchProvider: 'google',
+  webSearchEnabled: true,
   availableModels: [],
   lastUsedModel: '',
   

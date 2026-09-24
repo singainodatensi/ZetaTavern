@@ -148,8 +148,32 @@ async function main() {
       await smoke.locator('#new-story-btn').waitFor();
       await smoke.locator('#new-story-btn').click();
       await smoke.locator('#story-title-prompt-input').waitFor({ timeout: 5000 });
+      await smoke.locator('#story-title-prompt-input').fill('作品情報UIテスト');
+      await smoke.locator('#story-title-prompt-ok').click();
+      await smoke.getByText('現在のストーリーを設定', { exact: false }).waitFor({ timeout: 5000 });
+      await smoke.getByText('現在のストーリーを設定', { exact: false }).click();
+      const metadataGroup = smoke.locator('#story-settings-modal [data-story-settings-scroll-body="true"] > .story-metadata-group');
+      await metadataGroup.waitFor({ timeout: 5000 });
+      assert.equal(await metadataGroup.locator('#story-franchise-modal-input').count(), 1);
+      assert.equal(await metadataGroup.locator('#story-franchise-context-modal-input').count(), 1);
+      assert.equal(await metadataGroup.locator('#story-tags-input').count(), 1);
+      await smoke.locator('#story-franchise-modal-input').fill('作品タグ');
+      await smoke.locator('#story-franchise-context-modal-input').fill('作品の正式名称');
+      await smoke.locator('#story-tags-input').fill('作品タグ, テスト');
+      await smoke.locator('#story-settings-save-btn').click();
+      await smoke.locator('.sidebar-tab-btn[data-tab="config"]').click();
+      assert.equal(await smoke.locator('#story-franchise-input').inputValue(), '作品タグ');
+      assert.equal(await smoke.locator('#story-franchise-context-input').inputValue(), '作品の正式名称');
+      assert.equal(await smoke.locator('#story-tags-sidebar-input').inputValue(), '作品タグ, テスト');
+      await smoke.locator('#web-search-toggle-checkbox').evaluate(input => {
+        input.checked = false;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await smoke.waitForFunction(async () => (await (await import('/js/db.js')).getSetting('web_search_enabled')) === false);
+      await smoke.reload();
+      await smoke.waitForFunction(() => document.getElementById('web-search-toggle-checkbox')?.checked === false);
       assert.deepEqual(errors, []);
-      console.log('PASS: application boots and new-story dialog responds');
+      console.log('PASS: application boots, story metadata stays grouped, Web search toggle persists');
     }
   } finally {
     await browser.close();

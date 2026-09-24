@@ -1455,6 +1455,22 @@ function normalizeSearchWebQuery(rawQuery, story, franchise) {
   const searchContext = String(franchise || story?.franchiseContext || story?.franchise || '').trim();
   const scopedAnchors = collectStoryScopedSearchAnchors(story, source);
   const knownWorldTerms = collectKnownWorldSearchTerms(source);
+  const quotedText = source.match(/^[「『“"](.+)[」』”"]$/)?.[1] || '';
+  const isQuotedTerm = /^[\u30a0-\u30ffー・！!]{2,30}$/.test(quotedText) ||
+    /^[\u4e00-\u9faf・]{2,12}$/.test(quotedText) ||
+    /[☆★]/.test(quotedText);
+  if (/[、。]/.test(source) || (quotedText && !isQuotedTerm)) {
+    const namedAnchor = filterSearchPlanningTerms([...scopedAnchors, ...knownWorldTerms])
+      .find(term => !isStoryContextOnlySearchTerm(term, story, searchContext));
+    if (!namedAnchor) {
+      return { query: '', rejected: true, reason: 'dialogue_query' };
+    }
+    return {
+      query: buildFocusedSearchQuery(namedAnchor, searchContext),
+      rejected: false,
+      reason: 'focused_dialogue_query'
+    };
+  }
   const extractedTerms = extractReferenceCandidatesFromText(source);
   const candidateTerms = filterSearchPlanningTerms([
     ...scopedAnchors,
@@ -1813,7 +1829,9 @@ export async function buildSystemInstruction(story, options = {}) {
     instruction += `- シナリオ、地の文、キャラクター台詞、選択肢A/B/Cを生成しない。\n`;
     instruction += `- ユーザーの不具合報告、ログ、エラーメッセージ、設定確認に対して、通常の対話型AIとして簡潔に回答する。\n`;
     instruction += `- 推測と確認済みの事実を分けて説明する。原因が複数考えられる場合は、可能性の高い順に述べる。\n`;
-    instruction += `- Web検索が必要な場合は search_web を使えることがある。検索に失敗した場合は、失敗理由や代替確認方法を隠さず説明する。\n`;
+    if (webSearchEnabled) {
+      instruction += `- Web検索が必要な場合は search_web を使えることがある。検索に失敗した場合は、失敗理由や代替確認方法を隠さず説明する。\n`;
+    }
     instruction += `- セッションロア、ストーリープラン、ワールドロア、キャラクター設定の更新は行わない。ユーザーが明示的に求めた場合も、まず提案として説明する。\n`;
     instruction += `- 返答は日本語で行う。\n\n`;
     instruction += `【現在のテスト対象】\n`;
@@ -1841,7 +1859,9 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- 作品名、作中作品名、ゲーム名、キャラクター名、学校名、組織名、地名、イベント名、商品名など、分かっている固有名詞は代名詞でぼかさず明示すること。\n`;
   instruction += `- 「あの名作ゲーム」「例の新作」「あの子」「その店」「あの組織」のような曖昧な代名詞だけで済ませてはいけない。読者が名前を把握できるよう、初出または重要場面では正式名や通称を出すこと。\n`;
   instruction += `- モデル自身の記憶や自信は根拠として扱わない。検索メモ、キャラクターライブラリ、ロアブック、直近会話に根拠がない固有名詞や作中作品は、初回に参照・検索してから使うこと。\n`;
-  instruction += `- 固有名詞が不明な場合は、適当にぼかして続けるのではなく、キャラクターライブラリ、ロアブック、検索メモ、必要なら search_web で確認してから使うこと。\n`;
+  instruction += webSearchEnabled
+    ? `- 固有名詞が不明な場合は、適当にぼかして続けるのではなく、キャラクターライブラリ、ロアブック、検索メモ、必要なら search_web で確認してから使うこと。\n`
+    : `- 固有名詞が不明な場合は、キャラクターライブラリ、ロアブック、既存の検索メモで確認し、根拠がなければ知っているふりをしないこと。\n`;
   instruction += `- 作中ゲーム・作中アニメ・雑誌・イベント名など、モデルがハルシネーションしやすい固有名詞は特に確認を優先すること。\n`;
   instruction += `- どうしても確認できない場合のみ、本文では「まだ名前の分からない〜」のように不明であることを明示し、知っているふりをしないこと。\n\n`;
 
@@ -1881,8 +1901,10 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `原作キャラや原作世界を使う時は、「その人物/用語そのもの」だけでなく、「周辺人物」「所属」「拠点」「制度」「同席しやすい存在」まで確認してから描写すること。\n`;
   instruction += `- 人物情報は search_character_library / get_character_profile を優先して使うこと。\n`;
   instruction += `- 世界設定や用語は search_lorebook / get_lore_entry を優先して使うこと。\n`;
-  instruction += `- ローカル参照で不足する場合は search_web を使い、原作設定や周辺人物、所属、拠点、制度を確認すること。\n`;
-  instruction += `- search_web がクォータ制限や一時エラーで失敗した場合、その内部事情をユーザーへ説明せず、分かる範囲だけで保守的に描写を続けること。\n`;
+  if (webSearchEnabled) {
+    instruction += `- ローカル参照で不足する場合は search_web を使い、原作設定や周辺人物、所属、拠点、制度を確認すること。\n`;
+    instruction += `- search_web がクォータ制限や一時エラーで失敗した場合、その内部事情をユーザーへ説明せず、分かる範囲だけで保守的に描写を続けること。\n`;
+  }
   instruction += `- ローカル参照で見つからない内容だけ、モデル自身の既知知識を慎重に使うこと。\n`;
   instruction += `- 不確かな固有設定を断定せず、確証のない場合は曖昧な言い切りを避けること。\n\n`;
   instruction += `【参照トリガー（重要）】\n`;
@@ -1897,12 +1919,14 @@ export async function buildSystemInstruction(story, options = {}) {
   instruction += `- 直前に同じ主題を確認済みで、新情報が不要な場合\n`;
   instruction += `- 作品固有性に影響しない軽い雑談や短いリアクションだけの場面\n`;
   instruction += `- 汎用的な日常のつなぎで、固有設定を出す必要がない場合\n`;
-  instruction += `【検索語の作り方】\n`;
-  instruction += `- ユーザーの入力文をそのまま検索してはいけない。\n`;
-  instruction += `- ユーザーがA/B/Cの選択肢を選んだだけの入力は検索トリガーにしない。選択肢文をそのまま search_web の query にしてはいけない。\n`;
-  instruction += `- 一般名詞だけをそのまま調べず、作品名・人物名・所属・目的を含む具体的な検索語に変換すること。\n`;
-  instruction += `- 悪い例: 「マジ アーカイブ VTuber」 / 「ゴミ 犯罪者 Re:ゼロ」\n`;
-  instruction += `- 良い例: 「城ヶ崎美嘉 活動内容 アイドルマスターシンデレラガールズ」 / 「プリシラ陣営 関係者 Re:ゼロから始める異世界生活」\n\n`;
+  if (webSearchEnabled) {
+    instruction += `【検索語の作り方】\n`;
+    instruction += `- ユーザーの入力文をそのまま検索してはいけない。\n`;
+    instruction += `- ユーザーがA/B/Cの選択肢を選んだだけの入力は検索トリガーにしない。選択肢文をそのまま search_web の query にしてはいけない。\n`;
+    instruction += `- 一般名詞だけをそのまま調べず、作品名・人物名・所属・目的を含む具体的な検索語に変換すること。\n`;
+    instruction += `- 悪い例: 「マジ アーカイブ VTuber」 / 「ゴミ 犯罪者 Re:ゼロ」\n`;
+    instruction += `- 良い例: 「城ヶ崎美嘉 活動内容 アイドルマスターシンデレラガールズ」 / 「プリシラ陣営 関係者 Re:ゼロから始める異世界生活」\n\n`;
+  }
   if (webSearchEnabled) {
     instruction += `【Web検索の使用ルール】\n`;
     instruction += `- このターンでは Web検索を利用できます。必要なら search_web を使ってください。\n`;
@@ -2469,6 +2493,7 @@ ${searchMemory || 'なし'}
 - 原作キャラクターを新規登場させる時は、その人物だけでなく、所属、陣営、家族、相棒、同行しやすい人物、拠点まで確認対象にする。
 - 新しい場所・組織・制度・イベントを扱う時は、その作品固有の舞台情報を優先して確認する。汎用設定の代用品で埋めない。
 - ユーザーが目的を持つ行動を宣言した時は、その行動文をそのまま検索語にせず、「次の場面に必要な原作知識」を逆算して検索語を作る。
+- 引用符内の台詞や主人公の発言は query にコピーしない。固有名詞を特定できなければ needsSearch を false にする。
 - 最新のユーザー入力が「A.」「B.」「C.」で始まる選択肢選択の場合、それ自体を検索語にしてはいけない。選択肢の行動文だけなら needsSearch は false にする。
 - 原作キャラ同士の関係が展開に影響しそうなら、単体情報ではなく、周辺人物との関係、立場、利害、同席しやすさまで確認対象にする。
 - 作品固有の制度・組織・拠点・依頼文化・陣営・同行者・敵対勢力・原作イベント進行を描くと場面が豊かになるなら検索候補にする。
@@ -2586,6 +2611,7 @@ function buildExternalProviderSearchPlan(story, selectedMessages = []) {
 
 async function planProactiveStorySearch(story, selectedMessages = [], usageAccumulator = null, signal = null) {
   const appState = getState();
+  if (appState.webSearchEnabled === false) return null;
   const apiKey = appState.apiKey || await getApiKeyFromStorage();
   const tavilyApiKey = String(appState.tavilyApiKey || '').trim();
   const provider = normalizeWebSearchProvider(appState.webSearchProvider);
@@ -3127,6 +3153,9 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
     franchise: normalizeLoreEntryName(franchise)
   });
 
+  if (story && appState.webSearchEnabled === false) {
+    return { found: false, query, purpose, franchise, provider, message: 'ストーリー中のWeb検索は設定でOFFになっています。' };
+  }
   if (!apiKey) {
     return { found: false, query, message: 'APIキーが設定されていません。' };
   }
@@ -3137,7 +3166,9 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
       normalizedQuery: '',
       rejected: true,
       reason: normalizedQuery.reason || 'query is required',
-      message: '検索クエリがメタ発言または一般語だけだったため、Web検索を実行しませんでした。'
+      message: normalizedQuery.reason === 'dialogue_query'
+        ? '台詞や会話文は検索できません。調べたい人物・作品・用語を短い検索語にして再指定してください。'
+        : '検索クエリがメタ発言または一般語だけだったため、Web検索を実行しませんでした。'
     };
   }
   if (provider === 'off') {
@@ -3718,8 +3749,8 @@ export async function generateStoryResponse(story) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   const usageAccumulator = createUsageAccumulator('story', modelName);
   const webSearchProvider = normalizeWebSearchProvider(appState.webSearchProvider);
-  const webSearchEnabled = webSearchProvider !== 'off';
-  usageAccumulator.searchProviderLabel = getWebSearchProviderLabel(webSearchProvider);
+  const webSearchEnabled = appState.webSearchEnabled !== false && webSearchProvider !== 'off';
+  usageAccumulator.searchProviderLabel = webSearchEnabled ? getWebSearchProviderLabel(webSearchProvider) : 'OFF';
   const historyCompressionEnabled = appState.historyCompressionEnabled !== false;
   const configuredHistoryTurnLimit = Number.isFinite(Number(appState.historyTurnLimit)) ? Number(appState.historyTurnLimit) : 10;
   const effectiveHistoryTurnLimit = historyCompressionEnabled ? configuredHistoryTurnLimit : 0;
@@ -3732,7 +3763,7 @@ export async function generateStoryResponse(story) {
   const mainController = new AbortController();
   updateState({ activeAbortController: mainController });
   try {
-  if (!testConversationMode) {
+  if (!testConversationMode && webSearchEnabled) {
     await runProactiveStoryResearch(story, selectedMessages, usageAccumulator, mainController.signal, timeoutSeconds * 1000);
   }
 
@@ -3858,7 +3889,7 @@ export async function generateStoryResponse(story) {
           properties: {
             query: {
               type: 'STRING',
-              description: '検索クエリ。人物名や用語名だけで曖昧なら作品名も含める。例: エミリア Re:ゼロから始める異世界生活 陣営'
+              description: '検索クエリ。台詞・ユーザー入力文を貼らず、調べたい人物名や固有用語と作品名・確認観点だけにする。例: エミリア Re:ゼロから始める異世界生活 陣営'
             },
             purpose: {
               type: 'STRING',
@@ -3963,9 +3994,10 @@ export async function generateStoryResponse(story) {
         }
       }];
 
-      const activeFunctionDeclarations = testConversationMode
-        ? functionDeclarations.filter(fn => fn.name === 'search_web')
-        : functionDeclarations;
+      const activeFunctionDeclarations = functionDeclarations.filter(fn =>
+        (webSearchEnabled || fn.name !== 'search_web') &&
+        (!testConversationMode || fn.name === 'search_web')
+      );
 
       const tools = activeFunctionDeclarations.length > 0
         ? [{ functionDeclarations: activeFunctionDeclarations }]
@@ -3992,10 +4024,12 @@ export async function generateStoryResponse(story) {
             contents: currentContents,
             systemInstruction: { parts: [{ text: systemInstruction }] },
             generationConfig,
-            tools,
-            toolConfig: {
-              functionCallingConfig: { mode: 'AUTO' }
-            }
+            ...(tools.length > 0 ? {
+              tools,
+              toolConfig: {
+                functionCallingConfig: { mode: 'AUTO' }
+              }
+            } : {})
           }),
           signal: attemptController.signal
         });

@@ -96,6 +96,7 @@ const DROPBOX_SYNC_SETTING_KEYS = [
   'model_name',
   'search_model_name',
   'web_search_provider',
+  'web_search_enabled',
   'show_choices',
   'autoscroll_enabled',
   'custom_models',
@@ -783,6 +784,7 @@ async function loadConfigurations() {
   if (webSearchProvider !== rawWebSearchProvider) {
     await db.saveSetting('web_search_provider', webSearchProvider);
   }
+  const webSearchEnabled = await db.getSetting('web_search_enabled', true);
   const choices = await db.getSetting('show_choices', true);
   const autoscroll = await db.getSetting('autoscroll_enabled', true); // ★自動スクロール設定
   const customModels = await db.getSetting('custom_models', []);
@@ -824,6 +826,7 @@ async function loadConfigurations() {
     modelName: model,
     searchModelName: searchModel,
     webSearchProvider,
+    webSearchEnabled,
     showChoices: choices,
     autoscrollEnabled: autoscroll, // ★Stateに反映
     apiTimeout: apiTimeout,
@@ -853,6 +856,7 @@ async function loadConfigurations() {
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
+  const webSearchToggleEl = document.getElementById('web-search-toggle-checkbox');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★DOM取得
   const dropboxKeyEl = document.getElementById('dropbox-app-key-input');
@@ -874,6 +878,7 @@ async function loadConfigurations() {
   if (keyEl) keyEl.value = key;
   if (groqKeyEl) groqKeyEl.value = groqApiKey || '';
   if (tavilyKeyEl) tavilyKeyEl.value = tavilyApiKey || '';
+  if (webSearchToggleEl) webSearchToggleEl.checked = webSearchEnabled;
   if (choicesEl) choicesEl.checked = choices;
   if (autoscrollEl) autoscrollEl.checked = autoscroll;
   if (dropboxKeyEl) dropboxKeyEl.value = dropboxAppKey || '';
@@ -930,6 +935,7 @@ function fillStorySettingsForm(story) {
   const wPrompt = document.getElementById('story-world-prompt');
   const fInput = document.getElementById('story-franchise-input');
   const fContextInput = document.getElementById('story-franchise-context-input');
+  const tagsInput = document.getElementById('story-tags-sidebar-input');
   const imageBaseUrlInput = document.getElementById('story-image-base-url-input');
   const imageDefaultOutfitInput = document.getElementById('story-image-default-outfit-input');
   const pName = document.getElementById('protagonist-name');
@@ -941,6 +947,7 @@ function fillStorySettingsForm(story) {
     if (wPrompt) wPrompt.value = '';
     if (fInput) fInput.value = '';
     if (fContextInput) fContextInput.value = '';
+    if (tagsInput) tagsInput.value = '';
     if (imageBaseUrlInput) imageBaseUrlInput.value = '';
     if (imageDefaultOutfitInput) imageDefaultOutfitInput.value = '';
     if (pName) pName.value = '';
@@ -953,6 +960,7 @@ function fillStorySettingsForm(story) {
   if (wPrompt) wPrompt.value = story.worldPrompt || '';
   if (fInput) fInput.value = story.franchise || '';
   if (fContextInput) fContextInput.value = story.franchiseContext || '';
+  if (tagsInput) tagsInput.value = Array.isArray(story.tags) ? story.tags.join(', ') : '';
   if (imageBaseUrlInput) imageBaseUrlInput.value = story.imageBaseUrl || '';
   if (imageDefaultOutfitInput) imageDefaultOutfitInput.value = story.imageDefaultOutfit || '';
   if (pName) pName.value = story.protagonist?.name || '';
@@ -1244,6 +1252,7 @@ async function bindEvents() {
   const modelEl = document.getElementById('model-name-select');
   const searchModelEl = document.getElementById('search-model-name-select');
   const webSearchProviderEl = document.getElementById('web-search-provider-select');
+  const webSearchToggleEl = document.getElementById('web-search-toggle-checkbox');
   const choicesEl = document.getElementById('choices-toggle-checkbox');
   const autoscrollEl = document.getElementById('autoscroll-toggle-checkbox'); // ★自動スクロールDOM
   const customModelInput = document.getElementById('custom-model-input');
@@ -1329,6 +1338,13 @@ async function bindEvents() {
       const val = ['google', 'tavily', 'off'].includes(raw) ? raw : 'google';
       updateState({ webSearchProvider: val });
       db.saveSetting('web_search_provider', val);
+    };
+  }
+  if (webSearchToggleEl) {
+    webSearchToggleEl.onchange = (e) => {
+      const val = e.target.checked;
+      updateState({ webSearchEnabled: val });
+      db.saveSetting('web_search_enabled', val);
     };
   }
   if (choicesEl) {
@@ -1548,6 +1564,7 @@ async function bindEvents() {
   const wPrompt = document.getElementById('story-world-prompt');
   const fInput = document.getElementById('story-franchise-input');
   const fContextInput = document.getElementById('story-franchise-context-input');
+  const tagsInput = document.getElementById('story-tags-sidebar-input');
   const imageBaseUrlInput = document.getElementById('story-image-base-url-input');
   const imageDefaultOutfitInput = document.getElementById('story-image-default-outfit-input');
   let storyConfigSaveTimer = null;
@@ -1559,11 +1576,20 @@ async function bindEvents() {
     currentStory.worldPrompt = wPrompt.value.trim();
     currentStory.franchise = fInput ? fInput.value.trim() : '';
     currentStory.franchiseContext = fContextInput ? fContextInput.value.trim() : '';
+    if (tagsInput) {
+      currentStory.tags = tagsInput.value
+        .split(',')
+        .map(tag => tag.trim())
+        .filter(Boolean);
+    }
     currentStory.imageBaseUrl = imageBaseUrlInput ? imageBaseUrlInput.value.trim() : '';
     currentStory.imageDefaultOutfit = imageDefaultOutfitInput ? imageDefaultOutfitInput.value.trim() : '';
 
     if (storyConfigSaveTimer) clearTimeout(storyConfigSaveTimer);
     storyConfigSaveTimer = setTimeout(async () => {
+      if (tagsInput) {
+        currentStory.characters = buildStoryCharacterRefs(currentStory, await db.getCharacters());
+      }
       await db.saveStory(currentStory);
       const stateNow = getState();
       const nextStories = Array.isArray(stateNow.stories)
@@ -1577,6 +1603,7 @@ async function bindEvents() {
   if (wPrompt) wPrompt.oninput = () => { saveCurrentStoryConfig(); triggerAutoResize(wPrompt); };
   if (fInput) fInput.oninput = () => { saveCurrentStoryConfig(); };
   if (fContextInput) fContextInput.oninput = () => { saveCurrentStoryConfig(); };
+  if (tagsInput) tagsInput.oninput = () => { saveCurrentStoryConfig(); };
   if (imageBaseUrlInput) imageBaseUrlInput.oninput = () => { saveCurrentStoryConfig(); };
   if (imageDefaultOutfitInput) imageDefaultOutfitInput.oninput = () => { saveCurrentStoryConfig(); };
 
