@@ -7,7 +7,7 @@
 import { getState, updateState, setActiveStory } from './state.js';
 import * as db from './db.js';
 import { sanitizeHTML, escapeHTML } from './sanitizer.js';
-import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20260922c';
+import { generateCharacterProfile, generateLoreProfileFromSearch, normalizeLoreEntryName, countUserTurnChunks, stripLeakedThinkingText } from './ai-client.js?v=20261010c';
 import { isCharacterMatchingStory, getStoryScopedCharacters, getStoryCharacterIds, buildStoryCharacterRefs } from './story-characters.js';
 import {
   ensureSessionLoreStructure,
@@ -122,7 +122,7 @@ function formatToolCallLabel(name) {
     get_character_profile: 'キャラ詳細',
     search_lorebook: 'ロア検索',
     get_lore_entry: 'ロア詳細',
-    search_web: 'Web検索',
+    search_web: 'Web検索要求',
     update_session_lore: 'セッション更新',
     update_world_lore: 'ワールド候補'
   };
@@ -135,6 +135,31 @@ function formatSearchProviderLabel(value) {
   if (normalized === 'tavily') return 'Tavily';
   if (normalized === 'off') return 'OFF';
   return 'Google';
+}
+
+function formatSearchStageLabel(stageName) {
+  return { planning: '検索計画', search: '外部検索', synthesis: '整形' }[stageName] || stageName;
+}
+
+function formatSearchError(item) {
+  const stage = item.stage || (String(item.code || '').startsWith('planner:') ? 'planning' : '');
+  const fields = [];
+  if (stage === 'planning') {
+    fields.push('検索計画の生成失敗', '検索語: 未生成', '外部検索未実行');
+  } else if (stage === 'query_validation') {
+    fields.push('検索語の却下', `候補: ${item.rawQuery || item.query || '未指定'}`, '外部検索未実行');
+  } else {
+    fields.push(stage === 'provider_lookup' ? '外部検索の失敗' : '事前リサーチの失敗');
+    if (item.provider) fields.push(formatSearchProviderLabel(item.provider));
+    if (item.query) fields.push(`検索語: ${item.query}`);
+    if (item.rawQuery && item.rawQuery !== item.query) fields.push(`補正前: ${item.rawQuery}`);
+  }
+  if (item.modelName) fields.push(`モデル: ${item.modelName}`);
+  if (Number(item.status || 0) > 0) fields.push(`HTTP ${item.status}`);
+  if (item.code) fields.push(item.code);
+  if (item.failureKind) fields.push(item.failureKind);
+  const count = Number(item.count || 0) > 1 ? ` x${formatUsageNumber(item.count)}` : '';
+  return `${fields.join(' / ')} - ${item.message || '原因不明'}${count}`;
 }
 
 export function renderApiUsagePanel() {
@@ -182,15 +207,15 @@ export function renderApiUsagePanel() {
           <span>履歴制限 ${lastApiUsage.debug.historyCompressionEnabled === false || lastApiUsage.debug.historyTurnLimit === 0 ? '全履歴' : `${formatUsageNumber(lastApiUsage.debug.historyTurnLimit)}ターン`}</span>
           <span>省略 ${formatUsageNumber(lastApiUsage.debug.omittedTurns || 0)}ターン</span>
         </div>
-        ${(lastApiUsage.debug.stageStatus?.search || lastApiUsage.debug.stageStatus?.synthesis) ? `
+        ${(lastApiUsage.debug.stageStatus?.planning || lastApiUsage.debug.stageStatus?.search || lastApiUsage.debug.stageStatus?.synthesis) ? `
           <div class="api-usage-debug-meta">
             <span>処理段階</span>
           </div>
           <div class="api-usage-chip-row">
-            ${['search', 'synthesis'].map(stageName => {
+            ${['planning', 'search', 'synthesis'].map(stageName => {
               const stage = lastApiUsage.debug.stageStatus?.[stageName];
               if (!stage) return '';
-              const label = stageName === 'search' ? '検索段階' : '整形段階';
+              const label = formatSearchStageLabel(stageName);
               const phase = stage.phase || 'unknown';
               const provider = stage.provider ? ` / ${formatSearchProviderLabel(stage.provider)}` : '';
               const model = stage.modelName ? ` / ${stage.modelName}` : '';
@@ -198,29 +223,33 @@ export function renderApiUsagePanel() {
               const kind = stage.failureKind ? ` / ${stage.failureKind}` : '';
               const queryCount = Number(stage.groundingQueryCount || 0) > 0 ? ` / query ${formatUsageNumber(stage.groundingQueryCount)}` : '';
               const finishReason = stage.finishReason ? ` / finish ${stage.finishReason}` : '';
+              const blockReason = stage.blockReason ? ` / block ${stage.blockReason}` : '';
+              const planningTokens = stageName === 'planning' && stage.outputTokenLimit ? ` / Thinking ${formatUsageNumber(stage.thoughtsTokenCount || 0)} / 出力上限 ${formatUsageNumber(stage.outputTokenLimit)}` : '';
+              const planningThinking = stageName === 'planning' && stage.thinkingConfigLabel ? ` / ${stage.thinkingConfigLabel}` : '';
               const candidateCount = Number(stage.candidateCount || 0) > 0 ? ` / candidates ${formatUsageNumber(stage.candidateCount)}` : '';
               const rawText = Number(stage.rawTextLength || 0) > 0 ? ` / raw ${formatUsageNumber(stage.rawTextLength)}` : '';
-              const extractedText = Number(stage.extractedTextLength || 0) > 0 ? ` / text ${formatUsageNumber(stage.extractedTextLength)}` : '';
+              const extractedText = Number(stage.extractedTextLength || 0) > 0 || (stageName === 'planning' && stage.extractedTextLength === 0) ? ` / text ${formatUsageNumber(stage.extractedTextLength)}` : '';
               const groundingMeta = stage.hasGroundingMetadata ? ' / groundingMeta' : '';
               const serverTools = stage.hasServerToolParts ? ' / serverTools' : '';
-              return `<span class="api-usage-chip">${escapeHTML(`${label}: ${phase}${provider}${model}${status}${kind}${queryCount}${candidateCount}${finishReason}${rawText}${extractedText}${groundingMeta}${serverTools}`)}</span>`;
+              return `<span class="api-usage-chip">${escapeHTML(`${label}: ${phase}${provider}${model}${status}${kind}${queryCount}${candidateCount}${finishReason}${blockReason}${rawText}${extractedText}${planningTokens}${planningThinking}${groundingMeta}${serverTools}`)}</span>`;
             }).join('')}
           </div>
-          ${['search', 'synthesis'].some(stageName => {
+          ${['planning', 'search', 'synthesis'].some(stageName => {
             const stage = lastApiUsage.debug.stageStatus?.[stageName];
-            return stage?.message || (Array.isArray(stage?.partKinds) && stage.partKinds.length > 0);
+            return stage?.message || stage?.responsePreview || (Array.isArray(stage?.partKinds) && stage.partKinds.length > 0);
           }) ? `
             <div class="api-usage-chip-row">
-              ${['search', 'synthesis'].map(stageName => {
+              ${['planning', 'search', 'synthesis'].map(stageName => {
                 const stage = lastApiUsage.debug.stageStatus?.[stageName];
                 const parts = Array.isArray(stage?.partKinds) && stage.partKinds.length > 0
-                  ? `${stageName === 'search' ? '検索' : '整形'} parts: ${stage.partKinds.join(', ')}`
+                  ? `${formatSearchStageLabel(stageName)} parts: ${stage.partKinds.join(', ')}`
                   : '';
-                if (!stage?.message && !parts) return '';
-                const label = stageName === 'search' ? '検索' : '整形';
+                if (!stage?.message && !stage?.responsePreview && !parts) return '';
+                const label = formatSearchStageLabel(stageName);
                 return `
                   ${stage?.message ? `<span class="api-usage-chip">${escapeHTML(`${label}: ${stage.message}`)}</span>` : ''}
                   ${parts ? `<span class="api-usage-chip">${escapeHTML(parts)}</span>` : ''}
+                  ${stage?.responsePreview ? `<span class="api-usage-chip api-usage-error">${escapeHTML(`${label} 返答冒頭（最大400文字）: ${stage.responsePreview}`)}</span>` : ''}
                 `;
               }).join('')}
             </div>
@@ -245,7 +274,7 @@ export function renderApiUsagePanel() {
         `}
         ${lastApiUsage.debug.groundingQueries?.length ? `
           <div class="api-usage-debug-meta">
-            <span>Google検索クエリ ${formatUsageNumber(lastApiUsage.debug.groundingQueries.length)}件</span>
+            <span>Googleが報告した実行検索語 ${formatUsageNumber(lastApiUsage.debug.groundingQueries.length)}件</span>
           </div>
           <div class="api-usage-chip-row">
             ${lastApiUsage.debug.groundingQueries.map(query => `
@@ -255,19 +284,10 @@ export function renderApiUsagePanel() {
         ` : ''}
         ${lastApiUsage.debug.searchErrors?.length ? `
           <div class="api-usage-debug-meta">
-            <span>検索失敗 ${formatUsageNumber(lastApiUsage.debug.searchErrors.reduce((sum, item) => sum + Number(item.count || 0), 0))}件</span>
+            <span>検索関連エラー ${formatUsageNumber(lastApiUsage.debug.searchErrors.reduce((sum, item) => sum + Number(item.count || 0), 0))}件</span>
           </div>
           <div class="api-usage-chip-row">
-            ${lastApiUsage.debug.searchErrors.map(item => {
-              const providerLabel = formatSearchProviderLabel(item.provider || 'google');
-              const preview = item.query ? `: ${item.query}` : '';
-              const status = Number(item.status || 0) > 0 ? ` / HTTP ${item.status}` : '';
-              const model = item.modelName ? ` / ${item.modelName}` : '';
-              const stage = item.stage ? ` / ${item.stage}` : '';
-              const kind = item.failureKind ? ` / ${item.failureKind}` : '';
-              const count = Number(item.count || 0) > 1 ? ` x${formatUsageNumber(item.count)}` : '';
-              return `<span class="api-usage-chip">${escapeHTML(`${providerLabel}${preview}${model}${status}${stage}${kind} - ${item.message || '検索失敗'}${count}`)}</span>`;
-            }).join('')}
+            ${lastApiUsage.debug.searchErrors.map(item => `<span class="api-usage-chip api-usage-error">${escapeHTML(formatSearchError(item))}</span>`).join('')}
           </div>
         ` : ''}
         <div class="api-usage-debug-list">

@@ -5,8 +5,8 @@
 
 import { getState, updateState, setActiveStory, subscribe } from './state.js';
 import * as db from './db.js';
-import * as ui from './ui.js?v=20260922c';
-import { generateStoryResponse, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks } from './ai-client.js?v=20260922c';
+import * as ui from './ui.js?v=20261010c';
+import { generateStoryResponse, generateStorySummary, generateSessionChapterSummary, countUserTurnChunks } from './ai-client.js?v=20261010c';
 import * as dropbox from './dropbox.js?v=20260922c';
 import { buildStoryCharacterRefs } from './story-characters.js';
 import {

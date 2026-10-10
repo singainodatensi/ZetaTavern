@@ -50,6 +50,7 @@ async function main() {
     ...searchQueries,
     getState: () => ({ apiKey: 'test-key', webSearchProvider: 'google', webSearchEnabled }),
     normalizeWebSearchProvider: value => value,
+    recordSearchError() {}, updateUsageStage() {},
     getApiKeyFromStorage: async () => 'test-key',
     runGoogleSearchLookup: async () => { providerCalls++; return { found: true }; }
   });
@@ -114,7 +115,11 @@ async function main() {
       });
     }
   });
+  vm.runInContext(section(ai, 'function summarizeCandidatePartKinds(', 'function recordGroundingMetadata('), research);
+  vm.runInContext(section(ai, 'function getThinkingSupportForModel(', 'function buildStructuredSearchMemoPrompt('), research);
+  vm.runInContext(section(ai, 'function buildSearchPlanningGenerationConfig(', 'async function planProactiveStorySearch('), research);
   vm.runInContext(section(ai, 'async function planProactiveStorySearch(', 'function isNoisyTavilyResult('), research);
+  vm.runInContext(section(ai, 'function updateUsageStage(', 'function addUsageMetadata('), research);
   const run = (signal, timeout = 100) => research.runProactiveStoryResearch(
     { franchise: 'test' }, [{ role: 'user', content: 'test' }], {}, signal, timeout
   );

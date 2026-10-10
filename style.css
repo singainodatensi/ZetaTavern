@@ -1020,6 +1020,15 @@ body {
   padding-top: 10px;
 }
 
+.api-usage-chip.api-usage-error {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+}
+
 .api-usage-debug-details summary {
   cursor: pointer;
   color: var(--text-main);

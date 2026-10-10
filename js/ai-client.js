@@ -786,6 +786,7 @@ function recordToolCall(accumulator, name, args = {}) {
 function recordSearchError(accumulator, {
   provider = '',
   query = '',
+  rawQuery = '',
   message = '',
   code = '',
   status = 0,
@@ -799,7 +800,8 @@ function recordSearchError(accumulator, {
   }
 
   const normalizedProvider = normalizeWebSearchProvider(provider || 'google');
-  const normalizedQuery = String(query || '').trim().slice(0, 80);
+  const normalizedQuery = String(query || '').trim();
+  const normalizedRawQuery = String(rawQuery || '').trim();
   const normalizedMessage = String(message || '').trim().slice(0, 180);
   const normalizedCode = String(code || '').trim().slice(0, 40);
   const normalizedModelName = String(modelName || '').trim().slice(0, 80);
@@ -809,6 +811,10 @@ function recordSearchError(accumulator, {
   const existing = accumulator.searchErrors.find(item =>
     item?.provider === normalizedProvider &&
     item?.query === normalizedQuery &&
+    String(item?.rawQuery || '') === normalizedRawQuery &&
+    String(item?.stage || '') === normalizedStage &&
+    String(item?.modelName || '') === normalizedModelName &&
+    String(item?.code || '') === normalizedCode &&
     item?.message === normalizedMessage &&
     Number(item?.status || 0) === normalizedStatus &&
     String(item?.failureKind || '') === normalizedFailureKind
@@ -821,6 +827,7 @@ function recordSearchError(accumulator, {
   accumulator.searchErrors.push({
     provider: normalizedProvider,
     query: normalizedQuery,
+    rawQuery: normalizedRawQuery,
     message: normalizedMessage,
     code: normalizedCode,
     status: normalizedStatus,
@@ -2609,6 +2616,18 @@ function buildExternalProviderSearchPlan(story, selectedMessages = []) {
   };
 }
 
+function buildSearchPlanningGenerationConfig(modelName) {
+  const config = { temperature: 0.2, topP: 0.8, maxOutputTokens: 4096 };
+  const support = getThinkingSupportForModel(modelName);
+  // Thinking shares the output limit; leave room for the complete plan JSON.
+  if (support.kind === 'gemini25') {
+    config.thinkingConfig = { thinkingBudget: 1024 };
+  } else if (support.kind === 'gemini3') {
+    config.thinkingConfig = { thinkingLevel: 'low' };
+  }
+  return config;
+}
+
 async function planProactiveStorySearch(story, selectedMessages = [], usageAccumulator = null, signal = null) {
   const appState = getState();
   if (appState.webSearchEnabled === false) return null;
@@ -2633,7 +2652,16 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
 
   const modelName = resolveSearchModelName(appState);
   const prompt = buildSearchPlanningPrompt(story, selectedMessages);
+  const generationConfig = buildSearchPlanningGenerationConfig(modelName);
+  const planningThinking = generationConfig.thinkingConfig;
+  const thinkingConfigLabel = planningThinking?.thinkingBudget != null
+    ? `Budget: ${planningThinking.thinkingBudget}`
+    : planningThinking?.thinkingLevel ? `Level: ${planningThinking.thinkingLevel}` : 'モデル既定';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  updateUsageStage(usageAccumulator, 'planning', {
+    phase: 'started', modelName, query: '', status: 0, message: '',
+    outputTokenLimit: generationConfig.maxOutputTokens, thinkingConfigLabel
+  });
 
   if (usageAccumulator) {
     accumulatePromptDebug(usageAccumulator, {
@@ -2649,21 +2677,22 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.2,
-        topP: 0.8,
-        maxOutputTokens: 512
-      }
+      generationConfig
     })
   });
 
+  updateUsageStage(usageAccumulator, 'planning', { status: response.status });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
+    const message = errorData.error?.message || `検索計画の生成に失敗しました (${response.status})`;
+    updateUsageStage(usageAccumulator, 'planning', { phase: 'error', message });
     recordSearchError(usageAccumulator, {
       provider,
-      query: latestUserMessage?.content || '',
+      stage: 'planning',
+      status: response.status,
+      modelName,
       code: `planner:${response.status}`,
-      message: errorData.error?.message || `検索計画の生成に失敗しました (${response.status})`
+      message
     });
     return null;
   }
@@ -2672,11 +2701,57 @@ async function planProactiveStorySearch(story, selectedMessages = [], usageAccum
   if (usageAccumulator && result) {
     addUsageMetadata(usageAccumulator, result?.usageMetadata);
   }
-  const parts = result?.candidates?.[0]?.content?.parts;
-  if (!parts?.length) return null;
-  const text = parts.filter(part => !part?.thought).map(part => part?.text || '').join('\n').trim();
+  const candidate = result?.candidates?.[0];
+  const parts = candidate?.content?.parts;
+  const text = Array.isArray(parts) ? parts.filter(part => !part?.thought).map(part => part?.text || '').join('\n').trim() : '';
   const parsed = parseJsonObjectFromModelText(text);
-  if (!parsed || parsed.needsSearch !== true) return null;
+  const finishReason = String(candidate?.finishReason || '');
+  const blockReason = String(result?.promptFeedback?.blockReason || '');
+  const validObject = parsed && typeof parsed === 'object' && !Array.isArray(parsed);
+  const invalidFields = [];
+  if (validObject && typeof parsed.needsSearch !== 'boolean') invalidFields.push('needsSearch: boolean必須');
+  if (validObject && parsed.needsSearch === true && (typeof parsed.query !== 'string' || !parsed.query.trim())) {
+    invalidFields.push('query: 空でない文字列必須');
+  }
+  const validationIssue = !result ? 'invalid_response_body' : blockReason ? 'blocked'
+    : !text ? 'empty_text' : !parsed ? 'invalid_json' : !validObject ? 'invalid_object'
+      : invalidFields.length ? 'invalid_fields' : '';
+  updateUsageStage(usageAccumulator, 'planning', {
+    finishReason,
+    blockReason,
+    candidateCount: Array.isArray(result?.candidates) ? result.candidates.length : 0,
+    extractedTextLength: text.length,
+    thoughtsTokenCount: Number(result?.usageMetadata?.thoughtsTokenCount || 0),
+    outputTokenLimit: generationConfig.maxOutputTokens,
+    partKinds: summarizeCandidatePartKinds(parts),
+    validationIssue,
+    invalidFields
+  });
+  if (validationIssue) {
+    const reason = finishReason === 'MAX_TOKENS'
+      ? '出力上限に到達し、有効な検索計画を取得できませんでした。'
+      : blockReason ? `入力がブロックされました (${blockReason})。`
+        : !result ? 'API応答をJSONとして読み取れませんでした。'
+          : !text ? '計画本文が空でした（Thinkingやツール呼び出しは本文に含めません）。'
+            : !parsed ? '計画本文をJSONとして解析できませんでした。'
+              : !validObject ? '計画がJSONオブジェクトではありませんでした。'
+                : `計画の項目が不正でした: ${invalidFields.join(', ')}`;
+    const message = `検索計画の応答から有効な計画を取得できませんでした。${reason}`;
+    updateUsageStage(usageAccumulator, 'planning', {
+      phase: 'error', message, failureKind: validationIssue,
+      responsePreview: text.slice(0, 400)
+    });
+    recordSearchError(usageAccumulator, {
+      provider, stage: 'planning', status: response.status, modelName,
+      code: 'planner:invalid_response', failureKind: validationIssue, message
+    });
+    return null;
+  }
+  updateUsageStage(usageAccumulator, 'planning', {
+    phase: parsed.needsSearch ? 'success' : 'skipped',
+    query: parsed.needsSearch ? String(parsed.query).trim() : ''
+  });
+  if (!parsed.needsSearch) return null;
 
   return {
     topicKey: normalizeLoreEntryName(parsed.topicKey || parsed.query || ''),
@@ -2743,13 +2818,25 @@ async function runProactiveStoryResearch(story, messages, usage, parentSignal, t
     return await maybePrimeStorySearchMemory(story, messages, usage, controller.signal);
   } catch (error) {
     if (parentSignal.aborted) throw new Error('ユーザーにより生成が中止されました。');
+    const searchStage = usage?.stageStatus?.search;
+    if (searchStage?.phase === 'error') return null;
+    const planningStage = usage?.stageStatus?.planning;
+    const stageName = searchStage?.phase === 'started' ? 'search'
+      : planningStage?.phase === 'started' ? 'planning' : '';
+    const activeStage = stageName ? usage.stageStatus[stageName] : {};
+    const message = timedOut
+      ? '事前リサーチが制限時間を超えたため、本文生成を続行します。'
+      : `事前リサーチに失敗したため、本文生成を続行します: ${error.message || error}`;
+    if (stageName) updateUsageStage(usage, stageName, { phase: 'error', message });
     recordSearchError(usage, {
       provider: normalizeWebSearchProvider(getState().webSearchProvider),
-      stage: 'proactive_research',
+      stage: stageName === 'search' ? 'provider_lookup' : stageName || 'proactive_research',
+      query: stageName === 'search' ? activeStage.query || '' : '',
+      rawQuery: stageName === 'search' ? activeStage.rawQuery || '' : '',
+      modelName: activeStage.modelName || '',
+      status: activeStage.status || 0,
       code: timedOut ? 'research_timeout' : 'research_failed',
-      message: timedOut
-        ? '事前リサーチが制限時間を超えたため、本文生成を続行します。'
-        : `事前リサーチに失敗したため、本文生成を続行します: ${error.message || error}`
+      message
     });
     return null;
   } finally {
@@ -3073,6 +3160,7 @@ async function runGoogleSearchLookup({
     })
   });
 
+  updateUsageStage(usageAccumulator, 'search', { status: response.status });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     const message = errorData.error?.message || `HTTP status ${response.status}`;
@@ -3160,15 +3248,19 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
     return { found: false, query, message: 'APIキーが設定されていません。' };
   }
   if (!query) {
+    const message = normalizedQuery.reason === 'dialogue_query'
+      ? '台詞や会話文は検索できません。調べたい人物・作品・用語を短い検索語にして再指定してください。'
+      : '検索クエリがメタ発言または一般語だけだったため、Web検索を実行しませんでした。';
+    recordSearchError(usageAccumulator, {
+      provider, rawQuery, stage: 'query_validation', code: normalizedQuery.reason || 'query_required', message
+    });
     return {
       found: false,
       query: rawQuery,
       normalizedQuery: '',
       rejected: true,
       reason: normalizedQuery.reason || 'query is required',
-      message: normalizedQuery.reason === 'dialogue_query'
-        ? '台詞や会話文は検索できません。調べたい人物・作品・用語を短い検索語にして再指定してください。'
-        : '検索クエリがメタ発言または一般語だけだったため、Web検索を実行しませんでした。'
+      message
     };
   }
   if (provider === 'off') {
@@ -3259,7 +3351,30 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
   let result = null;
 
   for (const providerName of providerOrder) {
-    const attempt = await runProviderLookup(providerName);
+    const lookupModel = providerName === 'google' ? modelName : '';
+    updateUsageStage(usageAccumulator, 'search', {
+      phase: 'started', provider: providerName, query, rawQuery,
+      modelName: lookupModel, status: 0, message: ''
+    });
+    let attempt;
+    try {
+      attempt = await runProviderLookup(providerName);
+    } catch (error) {
+      if (!signal?.aborted) {
+        const message = String(error.message || error);
+        updateUsageStage(usageAccumulator, 'search', { phase: 'error', message });
+        recordSearchError(usageAccumulator, {
+          provider: providerName, query, rawQuery, modelName: lookupModel,
+          status: usageAccumulator?.stageStatus?.search?.status || 0,
+          stage: 'provider_lookup', code: 'provider_exception', message
+        });
+      }
+      throw error;
+    }
+    updateUsageStage(usageAccumulator, 'search', {
+      phase: attempt?.found ? 'success' : 'error', status: attempt?.status || 0,
+      message: attempt?.message || '', modelName: attempt?.modelName || lookupModel
+    });
     if (attempt?.found) {
       result = attempt;
       break;
@@ -3268,6 +3383,7 @@ async function searchWebForStory(story, args = {}, usageAccumulator = null, sear
       recordSearchError(usageAccumulator, {
         provider: providerName,
         query,
+        rawQuery,
         status: attempt?.status || 0,
         modelName: attempt?.modelName || (providerName === 'google' ? modelName : ''),
         stage: 'provider_lookup',
